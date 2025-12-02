@@ -37,6 +37,9 @@ const nextConfig: NextConfig = {
     ];
   },
 
+  // Ensure both roots match for monorepo support
+  outputFileTracingRoot: path.join(__dirname, '../..'),
+
   // Turbopack configuration to handle optional dependencies
   turbopack: {
     root: path.join(__dirname, '../..'), // Point to monorepo root for workspace support
