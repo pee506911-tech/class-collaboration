@@ -1,5 +1,5 @@
 import type { NextConfig } from "next";
-import path from "path";
+
 
 const nextConfig: NextConfig = {
   /* config options here */
@@ -37,25 +37,21 @@ const nextConfig: NextConfig = {
     ];
   },
 
-  // Ensure both roots match for monorepo support
-  outputFileTracingRoot: path.join(__dirname, '../..'),
-
-  // Turbopack configuration to handle optional dependencies
-  turbopack: {
-    root: path.join(__dirname, '../..'), // Point to monorepo root for workspace support
-    resolveAlias: {
+  // Webpack configuration to handle optional dependencies (replacing Turbopack)
+  webpack: (config) => {
+    config.resolve.alias = {
+      ...config.resolve.alias,
       // Ignore optional keyv adapters that Ably's dependencies try to load
-      // These are Node.js-only optional dependencies not needed in browser
-      // Using empty path to prevent resolution
-      '@keyv/redis': './empty.js',
-      '@keyv/mongo': './empty.js',
-      '@keyv/sqlite': './empty.js',
-      '@keyv/postgres': './empty.js',
-      '@keyv/mysql': './empty.js',
-      '@keyv/etcd': './empty.js',
-      '@keyv/offline': './empty.js',
-      '@keyv/tiered': './empty.js',
-    },
+      '@keyv/redis': false,
+      '@keyv/mongo': false,
+      '@keyv/sqlite': false,
+      '@keyv/postgres': false,
+      '@keyv/mysql': false,
+      '@keyv/etcd': false,
+      '@keyv/offline': false,
+      '@keyv/tiered': false,
+    };
+    return config;
   },
 };
 
