@@ -19,6 +19,7 @@ export default function Dashboard() {
   const router = useRouter();
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
+  const [authChecking, setAuthChecking] = useState(true);
   const [user, setUser] = useState<{ name: string } | null>(null);
   const [activeTab, setActiveTab] = useState("active");
 
@@ -35,11 +36,14 @@ export default function Dashboard() {
 
   useEffect(() => {
     const userStr = localStorage.getItem('user');
-    if (userStr) {
-      setUser(JSON.parse(userStr));
+    if (!userStr) {
+      router.push('/login');
+      return;
     }
+    setUser(JSON.parse(userStr));
+    setAuthChecking(false);
     loadSessions("active");
-  }, []);
+  }, [router]);
 
   function handleLogout() {
     localStorage.removeItem('token');
@@ -107,6 +111,18 @@ export default function Dashboard() {
     } finally {
       setActionLoading(false);
     }
+  }
+
+  // Show loading screen while checking auth
+  if (authChecking) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-12 h-12 bg-gradient-to-br from-blue-600 to-blue-700 rounded-xl flex items-center justify-center text-white font-bold text-2xl shadow-lg shadow-blue-600/20 animate-pulse">C</div>
+          <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
+        </div>
+      </div>
+    );
   }
 
   return (
