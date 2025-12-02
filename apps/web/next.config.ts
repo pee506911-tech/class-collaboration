@@ -1,4 +1,5 @@
 import type { NextConfig } from "next";
+import path from "path";
 
 const nextConfig: NextConfig = {
   /* config options here */
@@ -38,7 +39,7 @@ const nextConfig: NextConfig = {
 
   // Turbopack configuration to handle optional dependencies
   turbopack: {
-    root: __dirname, // Set the project root for monorepo support
+    root: path.join(__dirname, '../..'), // Point to monorepo root for workspace support
     resolveAlias: {
       // Ignore optional keyv adapters that Ably's dependencies try to load
       // These are Node.js-only optional dependencies not needed in browser
