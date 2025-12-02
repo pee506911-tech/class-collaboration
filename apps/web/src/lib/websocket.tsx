@@ -128,7 +128,6 @@ export function WebSocketProvider({
             return;
         }
 
-        console.log('🔔 Processing message:', messageName, JSON.stringify(data));
         const payload = data;
 
         if (messageName === 'STATE_UPDATE') {
@@ -160,7 +159,6 @@ export function WebSocketProvider({
         messageBufferRef.current = [];
         isInFailoverRef.current = false;
 
-        console.log(`📦 Processing ${buffer.length} buffered messages`);
         buffer.forEach(msg => {
             handleAblyMessage(msg.name, msg.data);
         });
@@ -212,7 +210,7 @@ export function WebSocketProvider({
             if (client) return;
 
             const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
-            console.log('🔌 Creating Ably connection (leader) for session:', sessionId);
+
 
             client = new Ably.Realtime({
                 authUrl: `${apiBase}/auth/ably?sessionId=${sessionId}&role=${role}&participantId=${participantIdRef.current}`,
@@ -225,7 +223,7 @@ export function WebSocketProvider({
             setAblyClient(client);
 
             client.connection.on('connected', () => {
-                console.log('✅ Connected to Ably (leader)');
+
                 setIsConnected(true);
                 setIsConnecting(false);
                 setConnectionError(null);
@@ -283,11 +281,11 @@ export function WebSocketProvider({
 
             const now = Date.now();
             if (now - lastLeaderTimestamp < 1000) {
-                console.log('🚫 Recent leader activity detected, not becoming leader');
+
                 return;
             }
 
-            console.log('👑 Becoming leader for session:', sessionId);
+
             isLeaderRef.current = true;
             leaderSinceRef.current = now;
             leaderStatus.set(sessionId, true);
@@ -307,7 +305,7 @@ export function WebSocketProvider({
         const stepDown = (newLeaderTabId: string, newLeaderSince: number) => {
             if (!isLeaderRef.current) return;
 
-            console.log('⬇️ Stepping down as leader');
+
             isLeaderRef.current = false;
             leaderStatus.set(sessionId, false);
             currentLeaderTabId = newLeaderTabId;
@@ -339,7 +337,7 @@ export function WebSocketProvider({
                 leaderPongTimeoutRef.current = setTimeout(() => {
                     if (!isMountedRef.current || isLeaderRef.current) return;
 
-                    console.log('⚠️ Leader not responding, initiating election...');
+
                     isInFailoverRef.current = true;
 
                     const tabHash = TAB_ID.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
@@ -373,7 +371,7 @@ export function WebSocketProvider({
                     handleAblyMessage(msg.message.name, msg.message.data);
 
                 } else if (msg.type === 'LEADER_ANNOUNCE' && msg.tabId !== TAB_ID) {
-                    console.log('👥 Another tab is leader for session:', sessionId);
+
                     lastLeaderTimestamp = msg.timestamp || Date.now();
                     const newLeaderSince = msg.leaderSince || Date.now();
 
@@ -381,11 +379,11 @@ export function WebSocketProvider({
                     if (isLeaderRef.current) {
                         if (newLeaderSince < leaderSinceRef.current) {
                             // Other leader is older, we step down
-                            console.log('⚠️ Split-brain: other leader is older, stepping down');
+
                             stepDown(msg.tabId!, newLeaderSince);
                         } else {
                             // We are older, re-announce
-                            console.log('⚠️ Split-brain: we are older leader, re-announcing');
+
                             bc?.postMessage({
                                 type: 'LEADER_ANNOUNCE',
                                 sessionId,
@@ -453,7 +451,7 @@ export function WebSocketProvider({
                     }
 
                 } else if (msg.type === 'LEADER_GOODBYE' && msg.tabId !== TAB_ID) {
-                    console.log('👋 Leader said goodbye, starting election...');
+
                     isInFailoverRef.current = true;
 
                     const tabHash = TAB_ID.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
@@ -478,7 +476,7 @@ export function WebSocketProvider({
                 }
             };
 
-            console.log('🔍 Checking for existing leader...');
+
             bc.postMessage({ type: 'REQUEST_LEADER', sessionId, tabId: TAB_ID });
 
             leaderCheckTimeoutRef.current = setTimeout(() => {
@@ -487,7 +485,7 @@ export function WebSocketProvider({
             }, 200);
 
         } else {
-            console.log('⚠️ BroadcastChannel not supported, using direct connection');
+
             becomeLeader();
         }
 
@@ -495,7 +493,7 @@ export function WebSocketProvider({
             isMountedRef.current = false;
 
             if (isLeaderRef.current && bc) {
-                console.log('👋 Sending leader goodbye...');
+
                 bc.postMessage({ type: 'LEADER_GOODBYE', sessionId, tabId: TAB_ID });
             }
 
@@ -559,7 +557,7 @@ export function WebSocketProvider({
                     });
                     break;
                 case 'SET_SLIDE':
-                    console.log('🎯 Sending SET_SLIDE:', payload);
+
                     const token = localStorage.getItem('token');
                     await fetch(`${apiBase}/sessions/${sessionId}/current-slide`, {
                         method: 'PUT',

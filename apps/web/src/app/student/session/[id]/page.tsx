@@ -44,15 +44,11 @@ function ConnectedStudentView({ session, shareToken }: { session: Session & { sl
     const [globalQuestion, setGlobalQuestion] = useState('');
     const [selectedSlideId, setSelectedSlideId] = useState<string>(''); // No default selection
 
-    // Debug: Log state changes
-    useEffect(() => {
-        console.log('📱 Student view state updated:', JSON.stringify(state));
-    }, [state]);
+
 
     // Refetch slides when notified of updates
     useEffect(() => {
         if (lastSlideUpdate > 0) {
-            console.log('Refetching slides due to update...');
             getSessionByToken(shareToken).then(data => {
                 if (data && data.slides) {
                     setSlides(data.slides);
