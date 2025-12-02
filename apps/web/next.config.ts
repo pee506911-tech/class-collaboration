@@ -6,7 +6,10 @@ const nextConfig: NextConfig = {
   reactCompiler: true,
   
   // Explicitly acknowledge Turbopack (Next.js 16 default) while keeping webpack config for compatibility
-  turbopack: {},
+  // Set root to monorepo root for proper workspace resolution in Cloudflare Pages builds
+  turbopack: {
+    root: '../..',
+  },
   reactStrictMode: false, // Disable strict mode to prevent double-mounting in dev (causes connection leaks)
 
   // Security headers
