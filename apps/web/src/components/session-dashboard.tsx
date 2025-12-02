@@ -38,9 +38,17 @@ export function SessionDashboard({ sessionId, isPublic = false }: { sessionId: s
     const [loading, setLoading] = useState(true);
     const [expandedSlides, setExpandedSlides] = useState<Set<string>>(new Set());
     const [filteredQuestions, setFilteredQuestions] = useState<Stats['questions'] | null>(null);
+    const [lastFetchTime, setLastFetchTime] = useState(0);
     const { socket } = useWebSocket();
 
-    const fetchStats = async () => {
+    const fetchStats = async (force = false) => {
+        // Debounce: don't fetch more than once per 5 seconds unless forced
+        const now = Date.now();
+        if (!force && now - lastFetchTime < 5000) {
+            return;
+        }
+        setLastFetchTime(now);
+
         if (!stats) setLoading(true);
         try {
             const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
@@ -51,21 +59,27 @@ export function SessionDashboard({ sessionId, isPublic = false }: { sessionId: s
             const headers: HeadersInit = {};
             if (!isPublic) {
                 const token = localStorage.getItem('token');
-                if (token) {
-                    headers['Authorization'] = `Bearer ${token}`;
+                if (!token) {
+                    // No token available, skip fetch for authenticated endpoint
+                    console.warn('No auth token available for stats fetch');
+                    setLoading(false);
+                    return;
                 }
+                headers['Authorization'] = `Bearer ${token}`;
             }
 
-            const res = await fetch(endpoint, {
-                headers,
-                credentials: 'include' // Important for cookies
-            });
+            const res = await fetch(endpoint, { headers });
             if (res.ok) {
                 const data = await res.json();
-                console.log('Received stats:', data);
                 setStats(data);
+            } else if (res.status === 401) {
+                console.warn('Unauthorized: token may be expired');
+                // Don't spam console with errors, just set empty stats
+                if (!stats) {
+                    setStats({ participants: [], slides: [], questions: [] });
+                }
             } else {
-                console.error('Failed to fetch stats:', res.statusText);
+                console.error('Failed to fetch stats:', res.status);
                 if (!stats) {
                     setStats({ participants: [], slides: [], questions: [] });
                 }
@@ -81,18 +95,18 @@ export function SessionDashboard({ sessionId, isPublic = false }: { sessionId: s
     };
 
     useEffect(() => {
-        fetchStats();
-        const interval = setInterval(fetchStats, 30000);
+        // Initial fetch with force flag
+        fetchStats(true);
+        // Refresh every 30 seconds
+        const interval = setInterval(() => fetchStats(true), 30000);
         return () => clearInterval(interval);
-    }, [sessionId]);
+    }, [sessionId, isPublic]);
 
-    // Listen to context state changes instead of raw socket events
+    // Listen to context state changes
     const { state, voteResults, questions, activeParticipants } = useWebSocket();
 
     useEffect(() => {
-        // When realtime data updates, we might want to refresh full stats
-        // or just rely on the realtime data. For now, let's refresh stats on major updates
-        // to keep everything in sync.
+        // Debounced fetch on realtime updates (will be skipped if too frequent)
         fetchStats();
     }, [voteResults, questions, activeParticipants]);
 

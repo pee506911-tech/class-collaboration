@@ -3,7 +3,7 @@
 export const runtime = 'edge';
 
 import { useEffect, useState } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { Slide } from 'shared';
 import { getSlides } from '@/lib/api';
 import { Button } from '@/components/ui/button';
@@ -217,9 +217,20 @@ function ClickerContent() {
 
 export default function ClickerPage() {
     const params = useParams();
+    const router = useRouter();
     const id = params?.id as string;
+    const [authChecked, setAuthChecked] = useState(false);
 
-    if (!id) return null;
+    useEffect(() => {
+        const token = localStorage.getItem('token');
+        if (!token) {
+            router.push('/login');
+            return;
+        }
+        setAuthChecked(true);
+    }, [router]);
+
+    if (!id || !authChecked) return null;
 
     return (
         <WebSocketProvider sessionId={id} role="staff">

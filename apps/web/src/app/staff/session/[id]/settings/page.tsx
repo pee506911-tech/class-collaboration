@@ -22,14 +22,23 @@ export default function SessionSettingsPage() {
     const id = params?.id as string;
     const [session, setSession] = useState<Session | null>(null);
     const [loading, setLoading] = useState(true);
+    const [authChecked, setAuthChecked] = useState(false);
     const [editTitle, setEditTitle] = useState('');
     const [saveLoading, setSaveLoading] = useState(false);
 
     useEffect(() => {
+        // Check auth first
+        const token = localStorage.getItem('token');
+        if (!token) {
+            router.push('/login');
+            return;
+        }
+        setAuthChecked(true);
+        
         if (id) {
             loadSession();
         }
-    }, [id]);
+    }, [id, router]);
 
     async function loadSession() {
         try {
@@ -66,7 +75,7 @@ export default function SessionSettingsPage() {
         }
     };
 
-    if (!id) return null;
+    if (!id || !authChecked) return null;
     if (loading) return <div className="min-h-screen flex items-center justify-center text-slate-500">Loading...</div>;
 
     return (

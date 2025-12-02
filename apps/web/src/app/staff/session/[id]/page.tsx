@@ -3,7 +3,7 @@
 export const runtime = 'edge';
 
 import { useEffect, useState, useCallback } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { Slide, Session } from 'shared';
 import { getSlides, createSlide, updateSlide, deleteSlide, reorderSlides, getSession, updateSession, updateSlideVisibility, goLiveSession, stopSession } from '@/lib/api';
 import { Button } from '@/components/ui/button';
@@ -672,17 +672,27 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
 
 export default function SlideEditor() {
     const params = useParams();
+    const router = useRouter();
     const id = params?.id as string;
     const [slides, setSlides] = useState<Slide[]>([]);
     const [session, setSession] = useState<Session | null>(null);
     const [loading, setLoading] = useState(true);
+    const [authChecked, setAuthChecked] = useState(false);
 
     useEffect(() => {
+        // Check auth first
+        const token = localStorage.getItem('token');
+        if (!token) {
+            router.push('/login');
+            return;
+        }
+        setAuthChecked(true);
+        
         if (id) {
             loadSlides();
             loadSession();
         }
-    }, [id]);
+    }, [id, router]);
 
     async function loadSession() {
         try {
@@ -706,7 +716,7 @@ export default function SlideEditor() {
         }
     }
 
-    if (!id) return null;
+    if (!id || !authChecked) return null;
 
     if (loading) {
         return (
