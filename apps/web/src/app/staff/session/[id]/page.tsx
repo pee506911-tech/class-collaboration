@@ -135,8 +135,9 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
     async function handleUpdateSlide(slideId: string, content: any) {
         try {
             await updateSlide(id, slideId, content);
+            // Silently update - no toast spam on every keystroke
+            // Only reload slides to sync state
             loadSlides();
-            toast.success('Slide updated');
         } catch (e) {
             toast.error('Failed to update slide');
         }
