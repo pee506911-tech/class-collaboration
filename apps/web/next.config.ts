@@ -4,6 +4,9 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   /* config options here */
   reactCompiler: true,
+  
+  // Explicitly acknowledge Turbopack (Next.js 16 default) while keeping webpack config for compatibility
+  turbopack: {},
   reactStrictMode: false, // Disable strict mode to prevent double-mounting in dev (causes connection leaks)
 
   // Security headers
