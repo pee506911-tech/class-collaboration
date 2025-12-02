@@ -35,8 +35,9 @@ export default function Dashboard() {
   const [requireName, setRequireName] = useState(false);
 
   useEffect(() => {
+    const token = localStorage.getItem('token');
     const userStr = localStorage.getItem('user');
-    if (!userStr) {
+    if (!token || !userStr) {
       router.push('/login');
       return;
     }

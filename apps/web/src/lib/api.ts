@@ -2,23 +2,28 @@ import { ApiResponse, Session, Slide } from 'shared';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
 
-function getHeaders() {
-    // Token is now in HttpOnly cookie, no need for Authorization header
-    return {
+function getHeaders(): HeadersInit {
+    const headers: HeadersInit = {
         'Content-Type': 'application/json',
     };
+    // Use Authorization header for cross-origin compatibility (works in incognito)
+    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+    if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+    }
+    return headers;
 }
 
 export async function login(email: string, password: string) {
     const res = await fetch(`${API_URL}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'include', // Include cookies in request
         body: JSON.stringify({ email, password }),
     });
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'Login failed');
-    // Token is now in HttpOnly cookie, only store user info
+    // Store token in localStorage for Authorization header
+    localStorage.setItem('token', json.token);
     localStorage.setItem('user', JSON.stringify(json.user));
     return json;
 }
@@ -35,7 +40,7 @@ export async function register(email: string, password: string, name: string, ro
 }
 
 export function logout() {
-    // Clear user info (token is in HttpOnly cookie, cleared by backend or expires)
+    localStorage.removeItem('token');
     localStorage.removeItem('user');
     window.location.href = '/login';
 }
@@ -44,7 +49,6 @@ export async function getSessions(status?: string): Promise<Session[]> {
     const url = status ? `${API_URL}/sessions?status=${status}` : `${API_URL}/sessions`;
     const res = await fetch(url, {
         headers: getHeaders(),
-        credentials: 'include' // Include cookies
     });
     if (res.status === 401) { logout(); return []; }
     const json: ApiResponse<Session[]> = await res.json();
@@ -53,7 +57,7 @@ export async function getSessions(status?: string): Promise<Session[]> {
 }
 
 export async function getSession(sessionId: string): Promise<Session> {
-    const res = await fetch(`${API_URL}/sessions/${sessionId}`, { headers: getHeaders(), credentials: 'include' });
+    const res = await fetch(`${API_URL}/sessions/${sessionId}`, { headers: getHeaders() });
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
     const json: ApiResponse<Session> = await res.json();
     if (!json.success) throw new Error(json.error || 'Failed to fetch session');
@@ -64,7 +68,6 @@ export async function duplicateSession(sessionId: string): Promise<Session> {
     const res = await fetch(`${API_URL}/sessions/${sessionId}/duplicate`, {
         method: 'POST',
         headers: getHeaders(),
-        credentials: 'include',
     });
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
     const json: ApiResponse<Session> = await res.json();
@@ -76,7 +79,6 @@ export async function archiveSession(sessionId: string): Promise<void> {
     const res = await fetch(`${API_URL}/sessions/${sessionId}/archive`, {
         method: 'PUT',
         headers: getHeaders(),
-        credentials: 'include',
     });
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
     const json: ApiResponse<void> = await res.json();
@@ -87,7 +89,6 @@ export async function restoreSession(sessionId: string): Promise<void> {
     const res = await fetch(`${API_URL}/sessions/${sessionId}/restore`, {
         method: 'PUT',
         headers: getHeaders(),
-        credentials: 'include',
     });
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
     const json: ApiResponse<void> = await res.json();
@@ -98,7 +99,6 @@ export async function createSession(title: string, allowQuestions: boolean = fal
     const res = await fetch(`${API_URL}/sessions`, {
         method: 'POST',
         headers: getHeaders(),
-        credentials: 'include',
         body: JSON.stringify({ title, allowQuestions, requireName }),
     });
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
@@ -111,7 +111,6 @@ export async function updateSession(sessionId: string, title?: string, allowQues
     const res = await fetch(`${API_URL}/sessions/${sessionId}`, {
         method: 'PUT',
         headers: getHeaders(),
-        credentials: 'include',
         body: JSON.stringify({ title, allowQuestions, requireName }),
     });
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
@@ -123,7 +122,6 @@ export async function deleteSession(sessionId: string): Promise<void> {
     const res = await fetch(`${API_URL}/sessions/${sessionId}`, {
         method: 'DELETE',
         headers: getHeaders(),
-        credentials: 'include',
     });
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
     const json: ApiResponse<void> = await res.json();
@@ -131,7 +129,7 @@ export async function deleteSession(sessionId: string): Promise<void> {
 }
 
 export async function getSlides(sessionId: string): Promise<Slide[]> {
-    const res = await fetch(`${API_URL}/sessions/${sessionId}/slides`, { headers: getHeaders(), credentials: 'include' });
+    const res = await fetch(`${API_URL}/sessions/${sessionId}/slides`, { headers: getHeaders() });
     if (res.status === 401) { logout(); return []; }
     const json: ApiResponse<Slide[]> = await res.json();
     if (!json.success) throw new Error(json.error || 'Failed to fetch slides');
@@ -142,7 +140,6 @@ export async function createSlide(sessionId: string, type: string, content: any)
     const res = await fetch(`${API_URL}/sessions/${sessionId}/slides`, {
         method: 'POST',
         headers: getHeaders(),
-        credentials: 'include',
         body: JSON.stringify({ type, content }),
     });
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
@@ -155,7 +152,6 @@ export async function updateSlide(sessionId: string, slideId: string, content: a
     const res = await fetch(`${API_URL}/sessions/${sessionId}/slides/${slideId}`, {
         method: 'PUT',
         headers: getHeaders(),
-        credentials: 'include',
         body: JSON.stringify({ content }),
     });
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
@@ -167,7 +163,6 @@ export async function deleteSlide(sessionId: string, slideId: string): Promise<v
     const res = await fetch(`${API_URL}/sessions/${sessionId}/slides/${slideId}`, {
         method: 'DELETE',
         headers: getHeaders(),
-        credentials: 'include',
     });
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
     const json: ApiResponse<void> = await res.json();
@@ -178,7 +173,6 @@ export async function reorderSlides(sessionId: string, slideIds: string[]): Prom
     const res = await fetch(`${API_URL}/sessions/${sessionId}/slides/reorder`, {
         method: 'PUT',
         headers: getHeaders(),
-        credentials: 'include',
         body: JSON.stringify({ slideIds }),
     });
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
@@ -190,7 +184,6 @@ export async function updateSlideVisibility(sessionId: string, slideId: string, 
     const res = await fetch(`${API_URL}/sessions/${sessionId}/slides/${slideId}/visibility`, {
         method: 'PATCH',
         headers: getHeaders(),
-        credentials: 'include',
         body: JSON.stringify({ isHidden }),
     });
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
@@ -202,7 +195,6 @@ export async function goLiveSession(sessionId: string): Promise<void> {
     const res = await fetch(`${API_URL}/sessions/${sessionId}/go-live`, {
         method: 'POST',
         headers: getHeaders(),
-        credentials: 'include',
     });
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
     const json: ApiResponse<void> = await res.json();
@@ -213,7 +205,6 @@ export async function stopSession(sessionId: string): Promise<void> {
     const res = await fetch(`${API_URL}/sessions/${sessionId}/stop`, {
         method: 'POST',
         headers: getHeaders(),
-        credentials: 'include',
     });
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
     const json: ApiResponse<void> = await res.json();

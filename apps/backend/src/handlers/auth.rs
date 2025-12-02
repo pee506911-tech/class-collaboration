@@ -114,7 +114,7 @@ pub async fn login(
     }
 
     let expiration = Utc::now()
-        .checked_add_signed(Duration::hours(24))
+        .checked_add_signed(Duration::days(30))
         .expect("valid timestamp")
         .timestamp() as usize;
 

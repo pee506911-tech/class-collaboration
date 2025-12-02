@@ -184,9 +184,7 @@ export function WebSocketProvider({
         const fetchInitialState = async () => {
             try {
                 const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
-                const res = await fetch(`${apiBase}/sessions/${sessionId}/state`, {
-                    credentials: 'include'
-                });
+                const res = await fetch(`${apiBase}/sessions/${sessionId}/state`);
                 if (res.ok && isMountedRef.current) {
                     const data = await res.json();
                     setState(data);
@@ -562,20 +560,26 @@ export function WebSocketProvider({
                     break;
                 case 'SET_SLIDE':
                     console.log('🎯 Sending SET_SLIDE:', payload);
+                    const token = localStorage.getItem('token');
                     await fetch(`${apiBase}/sessions/${sessionId}/current-slide`, {
                         method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: { 
+                            'Content-Type': 'application/json',
+                            ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+                        },
                         body: JSON.stringify(payload),
-                        credentials: 'include'
                     });
                     break;
                 case 'STATE_UPDATE':
                     if (payload.showResults !== undefined) {
+                        const authToken = localStorage.getItem('token');
                         await fetch(`${apiBase}/sessions/${sessionId}/results-visibility`, {
                             method: 'PUT',
-                            headers: { 'Content-Type': 'application/json' },
+                            headers: { 
+                                'Content-Type': 'application/json',
+                                ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {})
+                            },
                             body: JSON.stringify({ visible: payload.showResults }),
-                            credentials: 'include'
                         });
                     }
                     break;
