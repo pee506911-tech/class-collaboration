@@ -131,17 +131,14 @@ pub async fn login(
     )?;
 
     // Build cookie with security attributes
-    let mut cookie_builder = Cookie::build(("token", token.clone()))
+    // Use SameSite::None for cross-origin requests (frontend on different domain)
+    // This requires Secure flag (HTTPS)
+    let cookie = Cookie::build(("token", token.clone()))
         .path("/")
         .http_only(true)
-        .same_site(SameSite::Lax);
-    
-    // Add Secure flag in production (HTTPS only)
-    if config.is_production() {
-        cookie_builder = cookie_builder.secure(true);
-    }
-
-    let cookie = cookie_builder.build();
+        .same_site(SameSite::None)
+        .secure(true) // Required for SameSite::None
+        .build();
 
     Ok((
         jar.add(cookie),
