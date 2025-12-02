@@ -1,16 +1,18 @@
+import { join } from "path";
 import type { NextConfig } from "next";
-
 
 const nextConfig: NextConfig = {
   /* config options here */
   reactCompiler: true,
-  
-  // Explicitly acknowledge Turbopack (Next.js 16 default) while keeping webpack config for compatibility
-  // Set root to monorepo root for proper workspace resolution in Cloudflare Pages builds
-  turbopack: {
-    root: '../..',
-  },
   reactStrictMode: false, // Disable strict mode to prevent double-mounting in dev (causes connection leaks)
+  
+  // Monorepo root for proper file tracing
+  outputFileTracingRoot: join(__dirname, '../../'),
+  
+  // Turbopack config - must match outputFileTracingRoot
+  turbopack: {
+    root: join(__dirname, '../../'),
+  },
 
   // Security headers
   async headers() {
