@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: classcolab-backend
+    runtime: docker
+    rootDirectory: apps/backend
+    plan: free
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: ABLY_API_KEY
+        sync: false
+      - key: JWT_SECRET
+        sync: false

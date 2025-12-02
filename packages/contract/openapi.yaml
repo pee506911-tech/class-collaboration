@@ -1,0 +1,259 @@
+openapi: 3.0.0
+info:
+  title: ClassColab API
+  version: 1.0.0
+  description: Contract-First API for ClassColab Real-time Interaction Platform
+
+servers:
+  - url: /api
+    description: API Base Path
+
+components:
+  schemas:
+    User:
+      type: object
+      required:
+        - id
+        - email
+        - name
+        - role
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        role:
+          type: string
+          enum: [staff, student]
+
+    Session:
+      type: object
+      required:
+        - id
+        - title
+        - status
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        status:
+          type: string
+          enum: [draft, published, archived]
+        shareToken:
+          type: string
+        allowQuestions:
+          type: boolean
+        requireName:
+          type: boolean
+        isPresentationActive:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    Slide:
+      type: object
+      required:
+        - id
+        - sessionId
+        - type
+        - content
+        - orderIndex
+      properties:
+        id:
+          type: string
+        sessionId:
+          type: string
+        type:
+          type: string
+          enum: [static, poll, multiple-choice, quiz, wordcloud, rating, ranking, qa, leaderboard]
+        content:
+          type: object
+        orderIndex:
+          type: number
+        isHidden:
+          type: boolean
+
+    ApiResponse:
+      type: object
+      required:
+        - success
+        - data
+      properties:
+        success:
+          type: boolean
+        data:
+          oneOf:
+            - type: object
+            - type: array
+        error:
+          type: string
+          nullable: true
+
+    CreateSessionRequest:
+      type: object
+      required:
+        - title
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        allowQuestions:
+          type: boolean
+        requireName:
+          type: boolean
+
+    UpdateSessionRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        allowQuestions:
+          type: boolean
+        requireName:
+          type: boolean
+
+paths:
+  /sessions:
+    get:
+      summary: Get all sessions for authenticated user
+      operationId: getSessions
+      tags:
+        - Sessions
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: List of sessions
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Session'
+    post:
+      summary: Create a new session
+      operationId: createSession
+      tags:
+        - Sessions
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSessionRequest'
+      responses:
+        '201':
+          description: Session created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Session'
+
+  /sessions/{id}:
+    get:
+      summary: Get session by ID
+      operationId: getSession
+      tags:
+        - Sessions
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Session details
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Session'
+    put:
+      summary: Update session
+      operationId: updateSession
+      tags:
+        - Sessions
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSessionRequest'
+      responses:
+        '200':
+          description: Session updated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Session'
+    delete:
+      summary: Delete session
+      operationId: deleteSession
+      tags:
+        - Sessions
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Session deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiResponse'
+
+securitySchemes:
+  cookieAuth:
+    type: apiKey
+    in: cookie
+    name: token
