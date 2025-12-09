@@ -5,12 +5,19 @@ export const runtime = 'edge';
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { Slide } from 'shared';
-import { getSlides } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { WebSocketProvider, useWebSocket } from '@/lib/websocket';
 import { ChevronLeft, ChevronRight, Eye, EyeOff, BarChart2, Users, Smartphone, Layout } from 'lucide-react';
-import { Card } from '@/components/ui/card';
 import { SlideRenderer } from '@/components/slide-renderer';
+
+// Public API call (no auth required) - fetches session by ID
+async function getPublicSlides(sessionId: string): Promise<Slide[]> {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
+    const res = await fetch(`${apiUrl}/public/sessions/${sessionId}/slides`);
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data || [];
+}
 
 function ClickerContent() {
     const { sendMessage, state, isConnected, activeParticipants, lastSlideUpdate, updateState } = useWebSocket();
@@ -20,7 +27,7 @@ function ClickerContent() {
     const [currentIndex, setCurrentIndex] = useState(-1);
     const [isBlackout, setIsBlackout] = useState(false);
     const [showResults, setShowResults] = useState(false);
-    const [lostCount, setLostCount] = useState(0);
+    const [, setLostCount] = useState(0);
     const [currentTime, setCurrentTime] = useState<Date | null>(null);
 
     useEffect(() => {
@@ -31,7 +38,7 @@ function ClickerContent() {
 
     // Fetch slides and reload when they change
     useEffect(() => {
-        const loadSlides = () => getSlides(id).then(setSlides);
+        const loadSlides = () => getPublicSlides(id).then(setSlides);
         loadSlides();
 
         // Poll for slide changes (in case of edits)
@@ -82,7 +89,6 @@ function ClickerContent() {
     };
 
     const currentSlide = visibleSlides[currentIndex];
-    const nextSlide = visibleSlides[currentIndex + 1];
 
     const hasPrev = currentIndex > 0;
     const hasNext = currentIndex < visibleSlides.length - 1;

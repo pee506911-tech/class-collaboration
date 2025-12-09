@@ -125,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/share/:token", get(handlers::public::get_session_by_share_token))
         .route("/api/session-by-token/:token", get(handlers::public::get_session_by_share_token))
         .route("/api/sessions/:id/state", get(handlers::public::get_session_state))
+        .route("/api/public/sessions/:id/slides", get(handlers::public::get_public_slides))
         
         // Session stats - static "public" segment before dynamic :id
         .route("/api/sessions/public/:id/stats",
