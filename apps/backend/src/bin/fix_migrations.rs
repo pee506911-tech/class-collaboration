@@ -44,12 +44,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  {} {}: {}", status, version, desc);
     }
     
-    // Remove failed migrations
-    println!("\nRemoving failed migrations...");
+    // Remove failed/missing migrations
+    println!("\nRemoving failed/missing migrations...");
     sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 20241201000001")
         .execute(&pool)
         .await?;
     sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 20241201150000")
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 20241209000000")
         .execute(&pool)
         .await?;
     

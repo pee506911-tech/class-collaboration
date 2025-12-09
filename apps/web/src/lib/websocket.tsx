@@ -312,7 +312,11 @@ export function WebSocketProvider({
             currentLeaderSince = newLeaderSince;
 
             if (client) {
-                client.close();
+                try {
+                    client.close();
+                } catch (e) {
+                    // Ignore close errors
+                }
                 client = null;
                 ablyClientRef.current = null;
                 setAblyClient(null);

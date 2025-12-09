@@ -210,3 +210,60 @@ export async function stopSession(sessionId: string): Promise<void> {
     const json: ApiResponse<void> = await res.json();
     if (!json.success) throw new Error(json.error || 'Failed to stop session');
 }
+
+// ============ Public Clicker API (no auth required) ============
+
+export async function publicSetCurrentSlide(sessionId: string, slideId: string | null): Promise<void> {
+    try {
+        const res = await fetch(`${API_URL}/sessions/${sessionId}/clicker/slide`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ slideId }),
+        });
+        if (!res.ok) {
+            console.error('Failed to set slide:', res.status);
+            return;
+        }
+        const text = await res.text();
+        if (!text) return; // Empty response is OK
+        const json: ApiResponse<void> = JSON.parse(text);
+        if (!json.success) console.error(json.error || 'Failed to set slide');
+    } catch (e) {
+        console.error('Error setting slide:', e);
+    }
+}
+
+export async function publicSetResultsVisibility(sessionId: string, visible: boolean): Promise<void> {
+    try {
+        const res = await fetch(`${API_URL}/sessions/${sessionId}/clicker/results`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ visible }),
+        });
+        if (!res.ok) {
+            console.error('Failed to set results visibility:', res.status);
+            return;
+        }
+        const text = await res.text();
+        if (!text) return; // Empty response is OK
+        const json: ApiResponse<void> = JSON.parse(text);
+        if (!json.success) console.error(json.error || 'Failed to set results visibility');
+    } catch (e) {
+        console.error('Error setting results visibility:', e);
+    }
+}
+
+export async function publicGetSlides(sessionId: string): Promise<Slide[]> {
+    try {
+        const res = await fetch(`${API_URL}/sessions/${sessionId}/state`);
+        if (!res.ok) {
+            console.error('Failed to fetch slides:', res.status);
+            return [];
+        }
+        const json = await res.json();
+        return json.slides || [];
+    } catch (e) {
+        console.error('Error fetching slides:', e);
+        return [];
+    }
+}

@@ -126,6 +126,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/session-by-token/:token", get(handlers::public::get_session_by_share_token))
         .route("/api/sessions/:id/state", get(handlers::public::get_session_state))
         
+        // Public clicker endpoints (for mobile clicker without auth)
+        .route("/api/sessions/:id/clicker/slide", put(handlers::public::public_set_current_slide))
+        .route("/api/sessions/:id/clicker/results", put(handlers::public::public_set_results_visibility))
+        
         // Session stats - static "public" segment before dynamic :id
         .route("/api/sessions/public/:id/stats",
             get(handlers::stats::get_public_session_stats))

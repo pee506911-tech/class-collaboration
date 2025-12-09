@@ -210,7 +210,7 @@ function ConnectedStudentView({ session, shareToken }: { session: Session & { sl
                         </label>
                         <div className="relative">
                             <textarea
-                                className="w-full p-4 border border-slate-200 rounded-xl min-h-[120px] focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none resize-none text-base disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed transition-colors"
+                                className="w-full p-4 border border-slate-200 rounded-xl min-h-[120px] focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none resize-none text-base text-slate-900 bg-white disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed transition-colors"
                                 placeholder={selectedSlideId ? "What would you like to ask?" : "Select a topic above to start typing..."}
                                 value={globalQuestion}
                                 onChange={(e) => setGlobalQuestion(e.target.value)}
