@@ -178,7 +178,7 @@ function ConnectedStudentView({ session, shareToken }: { session: Session & { sl
                         <select
                             value={selectedSlideId}
                             onChange={(e) => setSelectedSlideId(e.target.value)}
-                            className={`w-full p-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-base bg-white transition-all ${!selectedSlideId ? 'border-amber-300 ring-4 ring-amber-50' : 'border-slate-200'}`}
+                            className={`w-full p-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-base text-slate-900 bg-white transition-all ${!selectedSlideId ? 'border-amber-300 ring-4 ring-amber-50' : 'border-slate-200'}`}
                             required
                             autoFocus
                         >
