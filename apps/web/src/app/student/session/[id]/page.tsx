@@ -180,7 +180,6 @@ function ConnectedStudentView({ session, shareToken }: { session: Session & { sl
                             onChange={(e) => setSelectedSlideId(e.target.value)}
                             className={`w-full p-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-base text-slate-900 bg-white transition-all ${!selectedSlideId ? 'border-amber-300 ring-4 ring-amber-50' : 'border-slate-200'}`}
                             required
-                            autoFocus
                         >
                             <option value="" disabled>-- Select a topic to start --</option>
                             <option value="overall">📚 Overall Session</option>
