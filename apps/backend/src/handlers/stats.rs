@@ -117,10 +117,12 @@ pub async fn get_session_stats(
     AuthUser { user_id, .. }: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<SessionStats>> {
+    let pool = app_state.db_pool.pool().await?;
+    
     // Verify session exists and user owns it
     let session = query_as::<_, Session>("SELECT * FROM sessions WHERE id = ?")
         .bind(&id)
-        .fetch_optional(&app_state.db_pool)
+        .fetch_optional(&pool)
         .await?
         .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
 
@@ -133,7 +135,7 @@ pub async fn get_session_stats(
         "SELECT * FROM slides WHERE session_id = ? ORDER BY order_index"
     )
     .bind(&id)
-    .fetch_all(&app_state.db_pool)
+    .fetch_all(&pool)
     .await?;
 
     // Get vote counts per slide and option
@@ -141,7 +143,7 @@ pub async fn get_session_stats(
         "SELECT slide_id, option_id, COUNT(*) as count FROM votes WHERE session_id = ? GROUP BY slide_id, option_id"
     )
     .bind(&id)
-    .fetch_all(&app_state.db_pool)
+    .fetch_all(&pool)
     .await
     .unwrap_or_default();
 
@@ -154,7 +156,7 @@ pub async fn get_session_stats(
          ORDER BY v.created_at DESC"
     )
     .bind(&id)
-    .fetch_all(&app_state.db_pool)
+    .fetch_all(&pool)
     .await
     .unwrap_or_default();
 
@@ -222,7 +224,7 @@ pub async fn get_session_stats(
         "SELECT id, name, joined_at FROM participants WHERE session_id = ? ORDER BY joined_at DESC"
     )
     .bind(&id)
-    .fetch_all(&app_state.db_pool)
+    .fetch_all(&pool)
     .await
     .unwrap_or_default();
 
@@ -242,7 +244,7 @@ pub async fn get_session_stats(
          ORDER BY q.upvotes DESC, q.created_at DESC"
     )
     .bind(&id)
-    .fetch_all(&app_state.db_pool)
+    .fetch_all(&pool)
     .await
     .unwrap_or_default()
     .into_iter()
@@ -268,10 +270,12 @@ pub async fn get_public_session_stats(
     State(app_state): State<crate::AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<SessionStats>> {
+    let pool = app_state.db_pool.pool().await?;
+    
     // Verify session exists
     let _session = query_as::<_, Session>("SELECT * FROM sessions WHERE id = ?")
         .bind(&id)
-        .fetch_optional(&app_state.db_pool)
+        .fetch_optional(&pool)
         .await?
         .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
 
@@ -280,7 +284,7 @@ pub async fn get_public_session_stats(
         "SELECT * FROM slides WHERE session_id = ? AND is_hidden = FALSE ORDER BY order_index"
     )
     .bind(&id)
-    .fetch_all(&app_state.db_pool)
+    .fetch_all(&pool)
     .await?;
 
     // Get vote counts per slide and option
@@ -288,7 +292,7 @@ pub async fn get_public_session_stats(
         "SELECT slide_id, option_id, COUNT(*) as count FROM votes WHERE session_id = ? GROUP BY slide_id, option_id"
     )
     .bind(&id)
-    .fetch_all(&app_state.db_pool)
+    .fetch_all(&pool)
     .await
     .unwrap_or_default();
 
@@ -301,7 +305,7 @@ pub async fn get_public_session_stats(
          ORDER BY v.created_at DESC"
     )
     .bind(&id)
-    .fetch_all(&app_state.db_pool)
+    .fetch_all(&pool)
     .await
     .unwrap_or_default();
 
@@ -367,7 +371,7 @@ pub async fn get_public_session_stats(
         "SELECT id, name, joined_at FROM participants WHERE session_id = ? ORDER BY joined_at DESC"
     )
     .bind(&id)
-    .fetch_all(&app_state.db_pool)
+    .fetch_all(&pool)
     .await
     .unwrap_or_default();
 
@@ -387,7 +391,7 @@ pub async fn get_public_session_stats(
          ORDER BY q.upvotes DESC, q.created_at DESC"
     )
     .bind(&id)
-    .fetch_all(&app_state.db_pool)
+    .fetch_all(&pool)
     .await
     .unwrap_or_default()
     .into_iter()

@@ -42,9 +42,9 @@ USER appuser
 # Expose port
 EXPOSE 8080
 
-# Health check
+# Health check - use liveness endpoint for fast response
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8080/health || exit 1
+  CMD curl -f http://localhost:8080/health/live || exit 1
 
 # Run the binary
 CMD ["/app/backend-rust"]

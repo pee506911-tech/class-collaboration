@@ -1,28 +1,111 @@
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::{MySql, Pool};
-use crate::error::Result;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use crate::error::{AppError, Result};
 
 pub type DbPool = Pool<MySql>;
 
-pub async fn init_db(database_url: &str) -> Result<DbPool> {
-    let pool = MySqlPoolOptions::new()
-        .max_connections(20) // Increased for production load
-        .min_connections(5)
-        .acquire_timeout(std::time::Duration::from_secs(10))
-        .idle_timeout(std::time::Duration::from_secs(600))
-        .connect(database_url)
-        .await?;
+/// Lazy database pool that initializes in the background
+#[derive(Clone)]
+pub struct LazyDbPool {
+    pool: Arc<RwLock<Option<DbPool>>>,
+    ready: Arc<AtomicBool>,
+    error: Arc<RwLock<Option<String>>>,
+}
 
-    // Run migrations automatically on startup
-    tracing::info!("Running database migrations...");
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .map_err(|e| {
-            tracing::error!("Migration failed: {}", e);
-            e
-        })?;
-    tracing::info!("Migrations completed successfully");
+impl LazyDbPool {
+    pub fn new() -> Self {
+        Self {
+            pool: Arc::new(RwLock::new(None)),
+            ready: Arc::new(AtomicBool::new(false)),
+            error: Arc::new(RwLock::new(None)),
+        }
+    }
 
-    Ok(pool)
+    /// Check if the pool is ready (non-blocking)
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::SeqCst)
+    }
+
+    /// Get initialization error if any
+    pub async fn get_error(&self) -> Option<String> {
+        self.error.read().await.clone()
+    }
+
+    /// Get the pool, returns None if not ready
+    pub async fn get(&self) -> Option<DbPool> {
+        self.pool.read().await.clone()
+    }
+
+    /// Get the pool, waits until ready or returns error
+    pub async fn get_or_wait(&self) -> Result<DbPool> {
+        // Fast path: already ready
+        if let Some(pool) = self.pool.read().await.clone() {
+            return Ok(pool);
+        }
+
+        // Wait for initialization (with timeout)
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(30);
+        
+        while start.elapsed() < timeout {
+            if let Some(err) = self.error.read().await.clone() {
+                return Err(AppError::Internal(err));
+            }
+            if let Some(pool) = self.pool.read().await.clone() {
+                return Ok(pool);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        
+        Err(AppError::Internal("Database connection timeout".to_string()))
+    }
+
+    /// Initialize the pool in the background
+    pub fn start_background_init(self, database_url: String, run_migrations: bool) {
+        tokio::spawn(async move {
+            tracing::info!("Starting background database initialization...");
+            
+            match Self::init_pool(&database_url, run_migrations).await {
+                Ok(pool) => {
+                    *self.pool.write().await = Some(pool);
+                    self.ready.store(true, Ordering::SeqCst);
+                    tracing::info!("Database ready!");
+                }
+                Err(e) => {
+                    let err_msg = format!("Database init failed: {}", e);
+                    tracing::error!("{}", err_msg);
+                    *self.error.write().await = Some(err_msg);
+                }
+            }
+        });
+    }
+
+    async fn init_pool(database_url: &str, run_migrations: bool) -> anyhow::Result<DbPool> {
+        let pool = MySqlPoolOptions::new()
+            .max_connections(20)
+            .min_connections(0) // Start with 0 for faster init
+            .acquire_timeout(std::time::Duration::from_secs(10))
+            .idle_timeout(std::time::Duration::from_secs(600))
+            .connect(database_url)
+            .await?;
+
+        if run_migrations {
+            tracing::info!("Running database migrations...");
+            sqlx::migrate!("./migrations").run(&pool).await?;
+            tracing::info!("Migrations completed");
+        }
+
+        // Warm up one connection
+        sqlx::query("SELECT 1").execute(&pool).await?;
+        
+        Ok(pool)
+    }
+
+    /// Helper to get pool for handlers - returns Result for easy ? usage
+    pub async fn pool(&self) -> Result<DbPool> {
+        self.get_or_wait().await
+    }
 }

@@ -47,6 +47,8 @@ pub async fn register(
     State(app_state): State<crate::AppState>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<Value>> {
+    let pool = app_state.db_pool.pool().await?;
+    
     // Input validation
     if payload.email.len() > MAX_EMAIL_LENGTH {
         return Err(AppError::Input("Email too long".to_string()));
@@ -63,7 +65,6 @@ pub async fn register(
     if payload.name.trim().is_empty() {
         return Err(AppError::Input("Name cannot be empty".to_string()));
     }
-    // Basic email format validation
     if !payload.email.contains('@') || !payload.email.contains('.') {
         return Err(AppError::Input("Invalid email format".to_string()));
     }
@@ -80,7 +81,7 @@ pub async fn register(
     .bind(&password_hash)
     .bind(&payload.name)
     .bind(&role)
-    .execute(&app_state.db_pool)
+    .execute(&pool)
     .await
     .map_err(|e| {
         if e.to_string().contains("Duplicate entry") {
@@ -103,9 +104,11 @@ pub async fn login(
     jar: CookieJar,
     Json(payload): Json<LoginRequest>,
 ) -> Result<(CookieJar, Json<AuthResponse>)> {
+    let pool = app_state.db_pool.pool().await?;
+    
     let user: User = query_as("SELECT * FROM users WHERE email = ?")
         .bind(&payload.email)
-        .fetch_optional(&app_state.db_pool)
+        .fetch_optional(&pool)
         .await?
         .ok_or_else(|| AppError::Auth("Invalid email or password".to_string()))?;
 

@@ -13,14 +13,14 @@ pub async fn get_slides(
     AuthUser { user_id, .. }: AuthUser,
     Path(session_id): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<Slide>>>> {
-    // Verify user owns the session
-    verify_session_ownership(&app_state.db_pool, &session_id, &user_id).await?;
+    let pool = app_state.db_pool.pool().await?;
+    verify_session_ownership(&pool, &session_id, &user_id).await?;
 
     let slides = query_as::<_, Slide>(
         "SELECT * FROM slides WHERE session_id = ? ORDER BY order_index ASC"
     )
     .bind(&session_id)
-    .fetch_all(&app_state.db_pool)
+    .fetch_all(&pool)
     .await?;
 
     Ok(Json(ApiResponse::success(slides)))
@@ -33,17 +33,15 @@ pub async fn create_slide(
     Path(session_id): Path<String>,
     Json(payload): Json<CreateSlideRequest>,
 ) -> Result<Json<ApiResponse<Slide>>> {
-    // Verify user owns the session
-    verify_session_ownership(&app_state.db_pool, &session_id, &user_id).await?;
+    let pool = app_state.db_pool.pool().await?;
+    verify_session_ownership(&pool, &session_id, &user_id).await?;
 
     let id = Uuid::new_v4().to_string();
-
-    // Get max order_index
     let max_order: Option<i32> = sqlx::query_scalar(
         "SELECT COALESCE(MAX(order_index), -1) FROM slides WHERE session_id = ?"
     )
     .bind(&session_id)
-    .fetch_one(&app_state.db_pool)
+    .fetch_one(&pool)
     .await?;
 
     let order_index = max_order.unwrap_or(-1) + 1;
@@ -56,12 +54,12 @@ pub async fn create_slide(
     .bind(&payload.slide_type)
     .bind(sqlx::types::Json(&payload.content))
     .bind(order_index)
-    .execute(&app_state.db_pool)
+    .execute(&pool)
     .await?;
 
     let slide = query_as::<_, Slide>("SELECT * FROM slides WHERE id = ?")
         .bind(&id)
-        .fetch_one(&app_state.db_pool)
+        .fetch_one(&pool)
         .await?;
 
     Ok(Json(ApiResponse::success(slide)))
@@ -74,23 +72,21 @@ pub async fn update_slide(
     Path((session_id, slide_id)): Path<(String, String)>,
     Json(payload): Json<UpdateSlideRequest>,
 ) -> Result<Json<ApiResponse<Slide>>> {
-    // Verify user owns the session
-    verify_session_ownership(&app_state.db_pool, &session_id, &user_id).await?;
+    let pool = app_state.db_pool.pool().await?;
+    verify_session_ownership(&pool, &session_id, &user_id).await?;
 
-    // Verify slide belongs to session
     let _slide: Slide = query_as("SELECT * FROM slides WHERE id = ? AND session_id = ?")
         .bind(&slide_id)
         .bind(&session_id)
-        .fetch_optional(&app_state.db_pool)
+        .fetch_optional(&pool)
         .await?
         .ok_or_else(|| AppError::NotFound("Slide not found".to_string()))?;
 
-    // Update fields if provided
     if let Some(slide_type) = payload.slide_type {
         query("UPDATE slides SET type = ? WHERE id = ?")
             .bind(&slide_type)
             .bind(&slide_id)
-            .execute(&app_state.db_pool)
+            .execute(&pool)
             .await?;
     }
 
@@ -98,18 +94,18 @@ pub async fn update_slide(
         query("UPDATE slides SET content = ? WHERE id = ?")
             .bind(sqlx::types::Json(&content))
             .bind(&slide_id)
-            .execute(&app_state.db_pool)
+            .execute(&pool)
             .await?;
     }
 
-    // Fetch updated slide
     let updated_slide = query_as::<_, Slide>("SELECT * FROM slides WHERE id = ?")
         .bind(&slide_id)
-        .fetch_one(&app_state.db_pool)
+        .fetch_one(&pool)
         .await?;
 
     Ok(Json(ApiResponse::success(updated_slide)))
 }
+
 
 /// Delete a slide
 pub async fn delete_slide(
@@ -117,13 +113,13 @@ pub async fn delete_slide(
     AuthUser { user_id, .. }: AuthUser,
     Path((session_id, slide_id)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>> {
-    // Verify user owns the session
-    verify_session_ownership(&app_state.db_pool, &session_id, &user_id).await?;
+    let pool = app_state.db_pool.pool().await?;
+    verify_session_ownership(&pool, &session_id, &user_id).await?;
 
     let result = query("DELETE FROM slides WHERE id = ? AND session_id = ?")
         .bind(&slide_id)
         .bind(&session_id)
-        .execute(&app_state.db_pool)
+        .execute(&pool)
         .await?;
 
     if result.rows_affected() == 0 {
@@ -140,16 +136,15 @@ pub async fn reorder_slides(
     Path(session_id): Path<String>,
     Json(payload): Json<ReorderSlidesRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>> {
-    // Verify user owns the session
-    verify_session_ownership(&app_state.db_pool, &session_id, &user_id).await?;
+    let pool = app_state.db_pool.pool().await?;
+    verify_session_ownership(&pool, &session_id, &user_id).await?;
 
-    // Update order_index for each slide
     for (index, slide_id) in payload.slide_ids.iter().enumerate() {
         query("UPDATE slides SET order_index = ? WHERE id = ? AND session_id = ?")
             .bind(index as i32)
             .bind(slide_id)
             .bind(&session_id)
-            .execute(&app_state.db_pool)
+            .execute(&pool)
             .await?;
     }
 

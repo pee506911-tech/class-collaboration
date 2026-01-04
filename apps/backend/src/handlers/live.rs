@@ -41,20 +41,20 @@ pub async fn set_current_slide(
     Path(session_id): Path<String>,
     Json(payload): Json<SetCurrentSlideRequest>,
 ) -> Result<Json<ApiResponse<Session>>> {
-    verify_session_ownership(&app_state.db_pool, &session_id, &user_id).await?;
+    let pool = app_state.db_pool.pool().await?;
+    verify_session_ownership(&pool, &session_id, &user_id).await?;
 
     sqlx::query("UPDATE sessions SET current_slide_id = ? WHERE id = ?")
         .bind(&payload.slide_id)
         .bind(&session_id)
-        .execute(&app_state.db_pool)
+        .execute(&pool)
         .await?;
 
     let session = query_as::<_, Session>("SELECT * FROM sessions WHERE id = ?")
         .bind(&session_id)
-        .fetch_one(&app_state.db_pool)
+        .fetch_one(&pool)
         .await?;
 
-    // Publish state update to Ably for real-time sync
     let state_payload = StateUpdatePayload {
         current_slide_id: session.current_slide_id.clone(),
         is_presentation_active: session.is_presentation_active,
@@ -72,20 +72,20 @@ pub async fn set_results_visibility(
     Path(session_id): Path<String>,
     Json(payload): Json<SetResultsVisibilityRequest>,
 ) -> Result<Json<ApiResponse<Session>>> {
-    verify_session_ownership(&app_state.db_pool, &session_id, &user_id).await?;
+    let pool = app_state.db_pool.pool().await?;
+    verify_session_ownership(&pool, &session_id, &user_id).await?;
 
     sqlx::query("UPDATE sessions SET is_results_visible = ? WHERE id = ?")
         .bind(payload.visible)
         .bind(&session_id)
-        .execute(&app_state.db_pool)
+        .execute(&pool)
         .await?;
 
     let session = query_as::<_, Session>("SELECT * FROM sessions WHERE id = ?")
         .bind(&session_id)
-        .fetch_one(&app_state.db_pool)
+        .fetch_one(&pool)
         .await?;
 
-    // Publish state update to Ably for real-time sync
     let state_payload = StateUpdatePayload {
         current_slide_id: session.current_slide_id.clone(),
         is_presentation_active: session.is_presentation_active,
@@ -96,6 +96,7 @@ pub async fn set_results_visibility(
     Ok(Json(ApiResponse::success(session)))
 }
 
+
 /// Update slide visibility
 pub async fn update_slide_visibility(
     State(app_state): State<crate::AppState>,
@@ -103,13 +104,14 @@ pub async fn update_slide_visibility(
     Path((session_id, slide_id)): Path<(String, String)>,
     Json(payload): Json<UpdateSlideVisibilityRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>> {
-    verify_session_ownership(&app_state.db_pool, &session_id, &user_id).await?;
+    let pool = app_state.db_pool.pool().await?;
+    verify_session_ownership(&pool, &session_id, &user_id).await?;
 
     sqlx::query("UPDATE slides SET is_hidden = ? WHERE id = ? AND session_id = ?")
         .bind(payload.is_hidden)
         .bind(&slide_id)
         .bind(&session_id)
-        .execute(&app_state.db_pool)
+        .execute(&pool)
         .await?;
 
     Ok(Json(ApiResponse::success(serde_json::json!({ "message": "Slide visibility updated" }))))
@@ -121,19 +123,19 @@ pub async fn go_live(
     AuthUser { user_id, .. }: AuthUser,
     Path(session_id): Path<String>,
 ) -> Result<Json<ApiResponse<Session>>> {
-    verify_session_ownership(&app_state.db_pool, &session_id, &user_id).await?;
+    let pool = app_state.db_pool.pool().await?;
+    verify_session_ownership(&pool, &session_id, &user_id).await?;
 
     sqlx::query("UPDATE sessions SET is_presentation_active = TRUE, status = 'published' WHERE id = ?")
         .bind(&session_id)
-        .execute(&app_state.db_pool)
+        .execute(&pool)
         .await?;
 
     let session = query_as::<_, Session>("SELECT * FROM sessions WHERE id = ?")
         .bind(&session_id)
-        .fetch_one(&app_state.db_pool)
+        .fetch_one(&pool)
         .await?;
 
-    // Publish state update to Ably for real-time sync
     let state_payload = StateUpdatePayload {
         current_slide_id: session.current_slide_id.clone(),
         is_presentation_active: session.is_presentation_active,
@@ -150,19 +152,19 @@ pub async fn stop_live(
     AuthUser { user_id, .. }: AuthUser,
     Path(session_id): Path<String>,
 ) -> Result<Json<ApiResponse<Session>>> {
-    verify_session_ownership(&app_state.db_pool, &session_id, &user_id).await?;
+    let pool = app_state.db_pool.pool().await?;
+    verify_session_ownership(&pool, &session_id, &user_id).await?;
 
     sqlx::query("UPDATE sessions SET is_presentation_active = FALSE WHERE id = ?")
         .bind(&session_id)
-        .execute(&app_state.db_pool)
+        .execute(&pool)
         .await?;
 
     let session = query_as::<_, Session>("SELECT * FROM sessions WHERE id = ?")
         .bind(&session_id)
-        .fetch_one(&app_state.db_pool)
+        .fetch_one(&pool)
         .await?;
 
-    // Publish state update to Ably for real-time sync
     let state_payload = StateUpdatePayload {
         current_slide_id: session.current_slide_id.clone(),
         is_presentation_active: session.is_presentation_active,

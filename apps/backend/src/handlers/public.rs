@@ -56,22 +56,21 @@ pub async fn public_set_current_slide(
     Path(session_id): Path<String>,
     Json(payload): Json<PublicSetSlideRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>> {
-    // Verify session exists
+    let pool = app_state.db_pool.pool().await?;
+    
     let session: Option<Session> = query_as("SELECT * FROM sessions WHERE id = ?")
         .bind(&session_id)
-        .fetch_optional(&app_state.db_pool)
+        .fetch_optional(&pool)
         .await?;
 
     let session = session.ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
 
-    // Update current slide
     sqlx::query("UPDATE sessions SET current_slide_id = ? WHERE id = ?")
         .bind(&payload.slide_id)
         .bind(&session_id)
-        .execute(&app_state.db_pool)
+        .execute(&pool)
         .await?;
 
-    // Publish state update to Ably
     let state_payload = StateUpdatePayload {
         current_slide_id: payload.slide_id,
         is_presentation_active: session.is_presentation_active,
@@ -88,22 +87,21 @@ pub async fn public_set_results_visibility(
     Path(session_id): Path<String>,
     Json(payload): Json<PublicSetResultsRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>> {
-    // Verify session exists
+    let pool = app_state.db_pool.pool().await?;
+    
     let session: Option<Session> = query_as("SELECT * FROM sessions WHERE id = ?")
         .bind(&session_id)
-        .fetch_optional(&app_state.db_pool)
+        .fetch_optional(&pool)
         .await?;
 
     let session = session.ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
 
-    // Update results visibility
     sqlx::query("UPDATE sessions SET is_results_visible = ? WHERE id = ?")
         .bind(payload.visible)
         .bind(&session_id)
-        .execute(&app_state.db_pool)
+        .execute(&pool)
         .await?;
 
-    // Publish state update to Ably
     let state_payload = StateUpdatePayload {
         current_slide_id: session.current_slide_id,
         is_presentation_active: session.is_presentation_active,

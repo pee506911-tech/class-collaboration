@@ -20,7 +20,7 @@ mod repositories;
 mod services;
 
 use config::Config;
-use db::{init_db, DbPool};
+use db::LazyDbPool;
 use repositories::session::SessionRepository;
 use repositories::sqlx_session::SqlxSessionRepository;
 use services::session::SessionService;
@@ -28,13 +28,13 @@ use services::session::SessionService;
 /// Application state shared across all handlers
 #[derive(Clone)]
 pub struct AppState {
-    pub db_pool: DbPool,
+    pub db_pool: LazyDbPool,
     pub session_service: Arc<SessionService>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize tracing
+    // Initialize tracing (fast, ~10ms)
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
@@ -42,46 +42,48 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Load config
+    let startup_time = std::time::Instant::now();
+    tracing::info!("Starting server (cold start optimization enabled)...");
+
+    // Load config (fast, ~5ms)
     let config = Config::from_env();
     let config_arc = Arc::new(config.clone());
 
-    // Initialize DB
-    let pool = init_db(&config.database_url).await?;
-    tracing::info!("Database connected");
-
-    // Initialize Services (Clean Architecture)
-    // Repository Layer (Infrastructure)
-    let session_repository: Arc<dyn SessionRepository> = 
-        Arc::new(SqlxSessionRepository::new(pool.clone()));
+    // Create lazy DB pool (instant, no blocking)
+    let lazy_pool = LazyDbPool::new();
     
-    // Service Layer (Application)
+    // Start background DB initialization
+    let run_migrations = !config.is_production(); // Skip migrations in prod
+    lazy_pool.clone().start_background_init(
+        config.database_url.clone(),
+        run_migrations,
+    );
+
+    // Initialize Services with lazy pool
+    let session_repository: Arc<dyn SessionRepository> = 
+        Arc::new(SqlxSessionRepository::new_lazy(lazy_pool.clone()));
     let session_service = Arc::new(SessionService::new(session_repository));
     
-    // Application State
     let app_state = AppState {
-        db_pool: pool.clone(),
+        db_pool: lazy_pool,
         session_service,
     };
     
-    tracing::info!("Services initialized (Clean Architecture)");
+    tracing::info!("App state created in {:?}", startup_time.elapsed());
 
     // Rate limiting configuration
-    // General API: 100 requests per minute per IP
     let general_governor_conf = Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(2) // ~120 per minute
+            .per_second(2)
             .burst_size(30)
             .key_extractor(SmartIpKeyExtractor)
             .finish()
             .unwrap(),
     );
 
-    // Strict rate limiting for public endpoints (votes, questions)
-    // 20 requests per minute per IP to prevent spam
     let strict_governor_conf = Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(1) // 60 per minute max
+            .per_second(1)
             .burst_size(10)
             .key_extractor(SmartIpKeyExtractor)
             .finish()
@@ -114,25 +116,27 @@ async fn main() -> anyhow::Result<()> {
 
     // Routes
     let app = Router::new()
+        // Health endpoints (no rate limiting, no auth)
         .route("/health", get(handlers::health::health_check))
+        .route("/health/live", get(handlers::health::liveness))
+        .route("/health/ready", get(handlers::health::readiness))
         
         // Authentication
         .route("/api/auth/register", post(handlers::auth::register))
         .route("/api/auth/login", post(handlers::auth::login))
         .route("/api/auth/ably", get(handlers::ably::get_ably_token))
         
-        // Public endpoints (no auth required) - MUST be before dynamic :id routes
+        // Public endpoints (no auth required)
         .route("/api/share/:token", get(handlers::public::get_session_by_share_token))
         .route("/api/session-by-token/:token", get(handlers::public::get_session_by_share_token))
         .route("/api/sessions/:id/state", get(handlers::public::get_session_state))
         
-        // Public clicker endpoints (for mobile clicker without auth)
+        // Public clicker endpoints
         .route("/api/sessions/:id/clicker/slide", put(handlers::public::public_set_current_slide))
         .route("/api/sessions/:id/clicker/results", put(handlers::public::public_set_results_visibility))
         
-        // Session stats - static "public" segment before dynamic :id
-        .route("/api/sessions/public/:id/stats",
-            get(handlers::stats::get_public_session_stats))
+        // Session stats
+        .route("/api/sessions/public/:id/stats", get(handlers::stats::get_public_session_stats))
         
         // Protected session endpoints
         .route("/api/sessions", 
@@ -142,26 +146,18 @@ async fn main() -> anyhow::Result<()> {
             get(handlers::session::get_session)
             .put(handlers::session::update_session)
             .delete(handlers::session::delete_session))
-        .route("/api/sessions/:id/duplicate", 
-            post(handlers::session::duplicate_session))
-        .route("/api/sessions/:id/archive", 
-            put(handlers::session::archive_session))
-        .route("/api/sessions/:id/restore", 
-            put(handlers::session::restore_session))
+        .route("/api/sessions/:id/duplicate", post(handlers::session::duplicate_session))
+        .route("/api/sessions/:id/archive", put(handlers::session::archive_session))
+        .route("/api/sessions/:id/restore", put(handlers::session::restore_session))
         
         // Session stats
-        .route("/api/sessions/:id/stats",
-            get(handlers::stats::get_session_stats))
+        .route("/api/sessions/:id/stats", get(handlers::stats::get_session_stats))
         
         // Live session controls
-        .route("/api/sessions/:id/current-slide",
-            put(handlers::live::set_current_slide))
-        .route("/api/sessions/:id/results-visibility",
-            put(handlers::live::set_results_visibility))
-        .route("/api/sessions/:id/go-live",
-            post(handlers::live::go_live))
-        .route("/api/sessions/:id/stop",
-            post(handlers::live::stop_live))
+        .route("/api/sessions/:id/current-slide", put(handlers::live::set_current_slide))
+        .route("/api/sessions/:id/results-visibility", put(handlers::live::set_results_visibility))
+        .route("/api/sessions/:id/go-live", post(handlers::live::go_live))
+        .route("/api/sessions/:id/stop", post(handlers::live::stop_live))
         
         // Slide management
         .route("/api/sessions/:id/slides", 
@@ -175,33 +171,25 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/sessions/:id/slides/reorder", 
             axum::routing::put(handlers::slide::reorder_slides))
         
-        // Student interaction endpoints (public - no auth required)
-        // These have stricter rate limiting to prevent spam
-        .route("/api/sessions/:id/vote",
-            post(handlers::student::submit_vote))
-        .route("/api/sessions/:id/questions",
-            post(handlers::student::submit_question))
+        // Student interaction endpoints
+        .route("/api/sessions/:id/vote", post(handlers::student::submit_vote))
+        .route("/api/sessions/:id/questions", post(handlers::student::submit_question))
         .route("/api/sessions/:session_id/questions/:question_id/upvote",
             post(handlers::student::upvote_question))
         .route("/api/sessions/:id/register-participant",
             post(handlers::student::register_participant))
         
-        // Apply strict rate limiting to public endpoints
-        .layer(GovernorLayer {
-            config: strict_governor_conf,
-        })
-        
-        .layer(GovernorLayer {
-            config: general_governor_conf,
-        })
+        // Rate limiting layers
+        .layer(GovernorLayer { config: strict_governor_conf })
+        .layer(GovernorLayer { config: general_governor_conf })
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .layer(Extension(config_arc))
         .with_state(app_state);
 
-    // Start server
+    // Start server IMMEDIATELY (don't wait for DB)
     let addr = format!("0.0.0.0:{}", config.port);
-    tracing::info!("Server listening on {}", addr);
+    tracing::info!("Server listening on {} (startup: {:?})", addr, startup_time.elapsed());
     
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
