@@ -1,13 +1,23 @@
 'use client';
 
-import { useEffect, useState, Fragment } from 'react';
+import { useEffect, useState, Fragment, Suspense } from 'react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Users, MessageSquare, BarChart2, Clock, CheckCircle2, ChevronDown, ChevronUp, Trophy, TrendingUp } from 'lucide-react';
 import { useWebSocket } from '@/lib/websocket';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, LabelList } from 'recharts';
+import dynamic from 'next/dynamic';
 import { Button } from '@/components/ui/button';
 import { LoadingState, EmptyState } from '@/components/ui/loading';
+
+// Dynamic imports for Recharts - only loaded when dashboard is viewed
+const BarChart = dynamic(() => import('recharts').then(mod => mod.BarChart), { ssr: false });
+const Bar = dynamic(() => import('recharts').then(mod => mod.Bar), { ssr: false });
+const XAxis = dynamic(() => import('recharts').then(mod => mod.XAxis), { ssr: false });
+const YAxis = dynamic(() => import('recharts').then(mod => mod.YAxis), { ssr: false });
+const Tooltip = dynamic(() => import('recharts').then(mod => mod.Tooltip), { ssr: false });
+const ResponsiveContainer = dynamic(() => import('recharts').then(mod => mod.ResponsiveContainer), { ssr: false });
+const Cell = dynamic(() => import('recharts').then(mod => mod.Cell), { ssr: false });
+const LabelList = dynamic(() => import('recharts').then(mod => mod.LabelList), { ssr: false });
 
 interface Interaction {
     name: string;

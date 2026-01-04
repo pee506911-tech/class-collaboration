@@ -4,10 +4,22 @@ import { Slide, PollSlideContent, StaticSlideContent, QuizSlideContent, QASlideC
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useWebSocket } from '@/lib/websocket';
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
-import confetti from 'canvas-confetti';
-import { useEffect, useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { useEffect, useState, lazy, Suspense } from 'react';
+import dynamic from 'next/dynamic';
+
+// Dynamic imports for heavy libraries - only loaded when needed
+const BarChart = dynamic(() => import('recharts').then(mod => mod.BarChart), { ssr: false });
+const Bar = dynamic(() => import('recharts').then(mod => mod.Bar), { ssr: false });
+const XAxis = dynamic(() => import('recharts').then(mod => mod.XAxis), { ssr: false });
+const YAxis = dynamic(() => import('recharts').then(mod => mod.YAxis), { ssr: false });
+const Tooltip = dynamic(() => import('recharts').then(mod => mod.Tooltip), { ssr: false });
+const ResponsiveContainer = dynamic(() => import('recharts').then(mod => mod.ResponsiveContainer), { ssr: false });
+
+// Lazy load confetti - only used on correct quiz answers
+const triggerConfetti = async () => {
+    const confetti = (await import('canvas-confetti')).default;
+    confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
+};
 
 interface SlideProps {
     slide: Slide;
@@ -15,7 +27,44 @@ interface SlideProps {
     isPreview?: boolean;
 }
 
-function StaticSlide({ slide, isPreview }: SlideProps) {
+// Simple CSS-based slide transition (replaces framer-motion)
+function SlideTransition({ children, slideId }: { children: React.ReactNode; slideId: string }) {
+    const [isVisible, setIsVisible] = useState(false);
+    
+    useEffect(() => {
+        setIsVisible(false);
+        const timer = setTimeout(() => setIsVisible(true), 50);
+        return () => clearTimeout(timer);
+    }, [slideId]);
+    
+    return (
+        <div 
+            className={`w-full h-full transition-all duration-300 ease-out ${
+                isVisible ? 'opacity-100 translate-x-0' : 'opacity-0 translate-x-4'
+            }`}
+        >
+            {children}
+        </div>
+    );
+}
+
+// Chart loading skeleton
+function ChartSkeleton() {
+    return (
+        <div className="w-full h-full flex items-center justify-center">
+            <div className="animate-pulse flex flex-col items-center gap-4 w-full px-8">
+                <div className="flex items-end gap-4 h-48 w-full justify-center">
+                    {[60, 80, 45, 90, 70].map((h, i) => (
+                        <div key={i} className="bg-slate-200 rounded-t w-16" style={{ height: `${h}%` }} />
+                    ))}
+                </div>
+                <div className="h-4 bg-slate-200 rounded w-3/4" />
+            </div>
+        </div>
+    );
+}
+
+function StaticSlide({ slide }: SlideProps) {
     const content = slide.content as StaticSlideContent;
     return (
         <Card className="w-full h-full flex flex-col justify-center items-center p-8 text-center">
@@ -49,9 +98,7 @@ function PollSlide({ slide, role, isPreview }: SlideProps) {
 
     const handleSubmit = () => {
         if (!selectedOption || hasSubmitted) return;
-
         sendMessage('SUBMIT_VOTE', { slideId: slide.id, optionId: selectedOption });
-
         if (content.limitSubmissions !== false) {
             localStorage.setItem(`voted_${slide.id}`, 'true');
             localStorage.setItem(`voted_option_${slide.id}`, selectedOption);
@@ -77,23 +124,22 @@ function PollSlide({ slide, role, isPreview }: SlideProps) {
                         <div
                             key={option.id}
                             onClick={() => handleSelect(option.id)}
-                            className={`p-4 rounded-xl border-2 transition-all flex items-center gap-4 relative overflow-hidden ${selectedOption === option.id
-                                ? 'border-blue-500 bg-blue-50 text-blue-700 shadow-sm'
-                                : hasSubmitted
-                                    ? 'border-slate-100 text-slate-400 bg-slate-50'
-                                    : 'border-slate-200 hover:border-blue-200 hover:bg-slate-50 cursor-pointer'
-                                } ${hasSubmitted && selectedOption !== option.id ? 'opacity-60' : ''}`}
+                            className={`p-4 rounded-xl border-2 transition-all flex items-center gap-4 ${
+                                selectedOption === option.id
+                                    ? 'border-blue-500 bg-blue-50 text-blue-700 shadow-sm'
+                                    : hasSubmitted
+                                        ? 'border-slate-100 text-slate-400 bg-slate-50'
+                                        : 'border-slate-200 hover:border-blue-200 hover:bg-slate-50 cursor-pointer'
+                            } ${hasSubmitted && selectedOption !== option.id ? 'opacity-60' : ''}`}
                         >
-                            <div className={`w-8 h-8 rounded-full flex items-center justify-center border-2 font-bold transition-colors ${selectedOption === option.id
-                                ? 'border-blue-500 bg-blue-500 text-white'
-                                : hasSubmitted
-                                    ? 'border-slate-200 text-slate-300'
-                                    : 'border-slate-300 text-slate-500'
-                                }`}>
+                            <div className={`w-8 h-8 rounded-full flex items-center justify-center border-2 font-bold ${
+                                selectedOption === option.id
+                                    ? 'border-blue-500 bg-blue-500 text-white'
+                                    : hasSubmitted ? 'border-slate-200 text-slate-300' : 'border-slate-300 text-slate-500'
+                            }`}>
                                 {String.fromCharCode(65 + index)}
                             </div>
                             <span className="text-lg font-medium poll-option-text flex-1">{option.text}</span>
-
                             {selectedOption === option.id && hasSubmitted && (
                                 <span className="text-xs font-bold uppercase tracking-wider text-blue-600 bg-blue-100 px-2 py-1 rounded-full">
                                     Your Answer
@@ -104,12 +150,7 @@ function PollSlide({ slide, role, isPreview }: SlideProps) {
                 </CardContent>
                 <div className="mt-6 pt-4 border-t flex justify-end">
                     {!hasSubmitted ? (
-                        <Button
-                            size="lg"
-                            onClick={handleSubmit}
-                            disabled={!selectedOption}
-                            className="w-full md:w-auto"
-                        >
+                        <Button size="lg" onClick={handleSubmit} disabled={!selectedOption} className="w-full md:w-auto">
                             Submit Answer
                         </Button>
                     ) : (
@@ -122,13 +163,10 @@ function PollSlide({ slide, role, isPreview }: SlideProps) {
         );
     }
 
-    // Staff/Projector View: Results Chart
+    // Staff/Projector View: Results Chart (lazy loaded)
     const results = voteResults?.[slide.id] || {};
     const options = content.options || [];
-    const chartData = options.map(o => ({
-        name: o.text,
-        votes: results[o.id] || 0
-    }));
+    const chartData = options.map(o => ({ name: o.text, votes: results[o.id] || 0 }));
 
     return (
         <Card className="w-full h-full flex flex-col p-6">
@@ -136,14 +174,16 @@ function PollSlide({ slide, role, isPreview }: SlideProps) {
                 <CardTitle className="text-3xl text-center mb-8 question-text">{content.question}</CardTitle>
             </CardHeader>
             <CardContent className="flex-1">
-                <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={chartData}>
-                        <XAxis dataKey="name" />
-                        <YAxis />
-                        <Tooltip />
-                        <Bar dataKey="votes" fill="#2563eb" />
-                    </BarChart>
-                </ResponsiveContainer>
+                <Suspense fallback={<ChartSkeleton />}>
+                    <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={chartData}>
+                            <XAxis dataKey="name" />
+                            <YAxis />
+                            <Tooltip />
+                            <Bar dataKey="votes" fill="#2563eb" />
+                        </BarChart>
+                    </ResponsiveContainer>
+                </Suspense>
             </CardContent>
         </Card>
     );
@@ -156,20 +196,11 @@ function QuizSlide({ slide, role, isPreview }: SlideProps) {
     const [timeLeft, setTimeLeft] = useState(content.timerDuration);
 
     useEffect(() => {
-        if (!slideStartTime) {
-            // If no start time from server, maybe we just started locally or it's not active
-            // For now, just show full duration if not started
-            return;
-        }
-
+        if (!slideStartTime) return;
         const interval = setInterval(() => {
-            // Calculate elapsed time based on server time offset
-            // serverTime = Date.now() + serverTimeOffset
-            // elapsed = serverTime - slideStartTime
             const currentServerTime = Date.now() + (serverTimeOffset || 0);
             const elapsed = (currentServerTime - slideStartTime) / 1000;
             const remaining = Math.max(0, content.timerDuration - elapsed);
-
             setTimeLeft(Math.floor(remaining));
             if (remaining <= 0) clearInterval(interval);
         }, 100);
@@ -183,21 +214,15 @@ function QuizSlide({ slide, role, isPreview }: SlideProps) {
         }
     }, [slide.id, role, isPreview]);
 
-    const handleVote = (optionId: string) => {
+    const handleVote = async (optionId: string) => {
         if (selectedOption) return;
         setSelectedOption(optionId);
-        const timeRemaining = timeLeft;
-        sendMessage('SUBMIT_ANSWER', { slideId: slide.id, answer: optionId, timeRemaining });
-
+        sendMessage('SUBMIT_ANSWER', { slideId: slide.id, answer: optionId, timeRemaining: timeLeft });
         localStorage.setItem(`voted_option_${slide.id}`, optionId);
 
         const option = (content.options || []).find(o => o.id === optionId);
         if (option?.isCorrect) {
-            confetti({
-                particleCount: 100,
-                spread: 70,
-                origin: { y: 0.6 }
-            });
+            triggerConfetti(); // Lazy loaded
         }
     };
 
@@ -205,27 +230,24 @@ function QuizSlide({ slide, role, isPreview }: SlideProps) {
         <Card className="w-full h-full flex flex-col p-6">
             <CardHeader>
                 <CardTitle className="text-2xl text-center mb-4 question-text">{content.question}</CardTitle>
-                <div className="text-center text-xl font-bold text-blue-600">
-                    Time Left: {timeLeft}s
-                </div>
+                <div className="text-center text-xl font-bold text-blue-600">Time Left: {timeLeft}s</div>
             </CardHeader>
             <CardContent className="flex-1 flex flex-col gap-4 justify-center">
                 {(content.options || []).map((option) => (
                     <Button
                         key={option.id}
-                        className={`h-16 text-lg poll-option-text ${state?.isResultsVisible && option.isCorrect ? 'bg-green-500 hover:bg-green-600 text-white' :
+                        className={`h-16 text-lg poll-option-text ${
+                            state?.isResultsVisible && option.isCorrect ? 'bg-green-500 hover:bg-green-600 text-white' :
                             state?.isResultsVisible && !option.isCorrect && selectedOption === option.id ? 'bg-red-500 hover:bg-red-600 text-white' :
-                                selectedOption === option.id ? 'bg-blue-500 text-white' : ''
-                            }`}
+                            selectedOption === option.id ? 'bg-blue-500 text-white' : ''
+                        }`}
                         variant="outline"
                         onClick={() => handleVote(option.id)}
                         disabled={!!selectedOption || timeLeft <= 0 || role === 'projector'}
                     >
                         {option.text}
                         {state?.isResultsVisible && (
-                            <span className="ml-2 text-sm">
-                                ({voteResults?.[slide.id]?.[option.id] || 0})
-                            </span>
+                            <span className="ml-2 text-sm">({voteResults?.[slide.id]?.[option.id] || 0})</span>
                         )}
                     </Button>
                 ))}
@@ -234,7 +256,7 @@ function QuizSlide({ slide, role, isPreview }: SlideProps) {
     );
 }
 
-function QASlide({ slide, role, isPreview }: SlideProps) {
+function QASlide({ slide, role }: SlideProps) {
     const { sendMessage, questions } = useWebSocket();
     const [newQuestion, setNewQuestion] = useState('');
     const content = slide.content as QASlideContent;
@@ -282,7 +304,6 @@ function QASlide({ slide, role, isPreview }: SlideProps) {
                         ))
                     )}
                 </div>
-
                 {role === 'student' && (
                     <form onSubmit={handleSubmit} className="flex gap-2 mt-auto pt-4 border-t">
                         <input
@@ -322,11 +343,7 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
             if (voted) {
                 setSubmitted(true);
                 if (votedOptions) {
-                    try {
-                        setSelectedOptions(JSON.parse(votedOptions));
-                    } catch (e) {
-                        console.error('Failed to parse voted options', e);
-                    }
+                    try { setSelectedOptions(JSON.parse(votedOptions)); } catch (e) {}
                 }
             }
         }
@@ -334,7 +351,6 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
 
     const handleSelect = (optionId: string) => {
         if (role !== 'student' || submitted) return;
-
         let newSelection;
         if (content.allowMultipleSelection) {
             newSelection = selectedOptions.includes(optionId)
@@ -348,9 +364,7 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
 
     const handleSubmit = () => {
         if (selectedOptions.length === 0) return;
-
         sendMessage('SUBMIT_VOTE', { slideId: slide.id, optionIds: selectedOptions });
-
         if (content.limitSubmissions !== false) {
             localStorage.setItem(`voted_${slide.id}`, 'true');
             localStorage.setItem(`voted_options_${slide.id}`, JSON.stringify(selectedOptions));
@@ -365,7 +379,7 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
                 <CardHeader>
                     <CardTitle className="text-2xl font-bold mb-2 question-text">{content.question}</CardTitle>
                     {submitted && (
-                        <div className="text-green-600 font-medium flex items-center gap-2 animate-in fade-in slide-in-from-top-2">
+                        <div className="text-green-600 font-medium flex items-center gap-2">
                             <span className="w-2 h-2 rounded-full bg-green-600" />
                             Answer Submitted
                         </div>
@@ -376,25 +390,24 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
                         <div
                             key={option.id}
                             onClick={() => handleSelect(option.id)}
-                            className={`p-4 rounded-xl border-2 transition-all flex items-center gap-4 relative overflow-hidden ${selectedOptions.includes(option.id)
-                                ? 'border-blue-500 bg-blue-50 text-blue-700 shadow-sm'
-                                : submitted
-                                    ? 'border-slate-100 text-slate-400 bg-slate-50'
-                                    : 'border-slate-200 hover:border-blue-200 hover:bg-slate-50 cursor-pointer'
-                                } ${submitted && !selectedOptions.includes(option.id) ? 'opacity-60' : ''}`}
+                            className={`p-4 rounded-xl border-2 transition-all flex items-center gap-4 ${
+                                selectedOptions.includes(option.id)
+                                    ? 'border-blue-500 bg-blue-50 text-blue-700 shadow-sm'
+                                    : submitted
+                                        ? 'border-slate-100 text-slate-400 bg-slate-50'
+                                        : 'border-slate-200 hover:border-blue-200 hover:bg-slate-50 cursor-pointer'
+                            } ${submitted && !selectedOptions.includes(option.id) ? 'opacity-60' : ''}`}
                         >
-                            <div className={`w-8 h-8 rounded-full flex items-center justify-center border-2 font-bold transition-colors ${selectedOptions.includes(option.id)
-                                ? 'border-blue-500 bg-blue-500 text-white'
-                                : submitted
-                                    ? 'border-slate-200 text-slate-300'
-                                    : 'border-slate-300 text-slate-500'
-                                }`}>
+                            <div className={`w-8 h-8 rounded-full flex items-center justify-center border-2 font-bold ${
+                                selectedOptions.includes(option.id)
+                                    ? 'border-blue-500 bg-blue-500 text-white'
+                                    : submitted ? 'border-slate-200 text-slate-300' : 'border-slate-300 text-slate-500'
+                            }`}>
                                 {String.fromCharCode(65 + index)}
                             </div>
                             <span className="text-lg font-medium poll-option-text flex-1">{option.text}</span>
-
                             {selectedOptions.includes(option.id) && submitted && (
-                                <span className="text-xs font-bold uppercase tracking-wider text-blue-600 bg-blue-100 px-2 py-1 rounded-full">
+                                <span className="text-xs font-bold uppercase text-blue-600 bg-blue-100 px-2 py-1 rounded-full">
                                     Your Answer
                                 </span>
                             )}
@@ -403,12 +416,7 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
                 </CardContent>
                 <div className="mt-6 pt-4 border-t flex justify-end">
                     {!submitted ? (
-                        <Button
-                            size="lg"
-                            onClick={handleSubmit}
-                            disabled={selectedOptions.length === 0}
-                            className="w-full md:w-auto"
-                        >
+                        <Button size="lg" onClick={handleSubmit} disabled={selectedOptions.length === 0} className="w-full md:w-auto">
                             Submit Answer
                         </Button>
                     ) : (
@@ -421,13 +429,10 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
         );
     }
 
-    // Staff/Projector View: Results Chart
+    // Staff/Projector View: Results Chart (lazy loaded)
     const results = voteResults?.[slide.id] || {};
     const options = content.options || [];
-    const chartData = options.map(o => ({
-        name: o.text,
-        votes: results[o.id] || 0
-    }));
+    const chartData = options.map(o => ({ name: o.text, votes: results[o.id] || 0 }));
 
     return (
         <Card className="w-full h-full flex flex-col p-6">
@@ -435,14 +440,16 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
                 <CardTitle className="text-3xl text-center mb-8 question-text">{content.question}</CardTitle>
             </CardHeader>
             <CardContent className="flex-1">
-                <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={chartData} layout="vertical">
-                        <XAxis type="number" />
-                        <YAxis dataKey="name" type="category" width={150} />
-                        <Tooltip />
-                        <Bar dataKey="votes" fill="#8b5cf6" radius={[0, 4, 4, 0]} />
-                    </BarChart>
-                </ResponsiveContainer>
+                <Suspense fallback={<ChartSkeleton />}>
+                    <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={chartData} layout="vertical">
+                            <XAxis type="number" />
+                            <YAxis dataKey="name" type="category" width={150} />
+                            <Tooltip />
+                            <Bar dataKey="votes" fill="#8b5cf6" radius={[0, 4, 4, 0]} />
+                        </BarChart>
+                    </ResponsiveContainer>
+                </Suspense>
             </CardContent>
         </Card>
     );
@@ -450,34 +457,18 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
 
 export function SlideRenderer({ slide, role, isPreview }: SlideProps) {
     return (
-        <AnimatePresence mode="wait">
-            <motion.div
-                key={slide.id}
-                initial={{ opacity: 0, x: 20 }}
-                animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: -20 }}
-                transition={{ duration: 0.3, ease: "easeInOut" }}
-                className="w-full h-full"
-            >
-                {(() => {
-                    switch (slide.type) {
-                        case 'static':
-                            return <StaticSlide slide={slide} role={role} isPreview={isPreview} />;
-                        case 'poll':
-                            return <PollSlide slide={slide} role={role} isPreview={isPreview} />;
-                        case 'multiple-choice':
-                            return <MultipleChoiceSlide slide={slide} role={role} isPreview={isPreview} />;
-                        case 'quiz':
-                            return <QuizSlide slide={slide} role={role} isPreview={isPreview} />;
-                        case 'qa':
-                            return <QASlide slide={slide} role={role} isPreview={isPreview} />;
-                        case 'leaderboard':
-                            return <LeaderboardSlide />;
-                        default:
-                            return <div>Unsupported slide type: {slide.type}</div>;
-                    }
-                })()}
-            </motion.div>
-        </AnimatePresence>
+        <SlideTransition slideId={slide.id}>
+            {(() => {
+                switch (slide.type) {
+                    case 'static': return <StaticSlide slide={slide} role={role} isPreview={isPreview} />;
+                    case 'poll': return <PollSlide slide={slide} role={role} isPreview={isPreview} />;
+                    case 'multiple-choice': return <MultipleChoiceSlide slide={slide} role={role} isPreview={isPreview} />;
+                    case 'quiz': return <QuizSlide slide={slide} role={role} isPreview={isPreview} />;
+                    case 'qa': return <QASlide slide={slide} role={role} isPreview={isPreview} />;
+                    case 'leaderboard': return <LeaderboardSlide />;
+                    default: return <div>Unsupported slide type: {slide.type}</div>;
+                }
+            })()}
+        </SlideTransition>
     );
 }
