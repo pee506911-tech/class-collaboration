@@ -12,7 +12,7 @@ import { ChevronLeft, ChevronRight, Smartphone, Layout } from 'lucide-react';
 import { SlideRenderer } from '@/components/slide-renderer';
 
 function ClickerContent() {
-    const { state, isConnected, lastSlideUpdate, updateState } = useWebSocket();
+    const { state, isConnected, lastSlideUpdate, updateState, initialStateLoaded } = useWebSocket();
     const params = useParams();
     const id = params?.id as string;
     const [slides, setSlides] = useState<Slide[]>([]);
@@ -74,10 +74,10 @@ function ClickerContent() {
     const hasPrev = currentIndex > 0;
     const hasNext = currentIndex < visibleSlides.length - 1;
 
-    if (!isConnected) {
+    if (!isConnected || !initialStateLoaded) {
         return (
             <div className="fixed inset-0 flex items-center justify-center bg-slate-900 text-white">
-                <div className="animate-pulse">Connecting to Clicker...</div>
+                <div className="animate-pulse">{!initialStateLoaded ? 'Loading session state...' : 'Connecting to Clicker...'}</div>
             </div>
         );
     }

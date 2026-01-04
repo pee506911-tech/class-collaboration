@@ -10,7 +10,16 @@ import { getSlides } from '@/lib/api';
 import { SlideRenderer } from '@/components/slide-renderer';
 
 function ProjectorContent() {
-    const { state } = useWebSocket();
+    const { state, initialStateLoaded } = useWebSocket();
+
+    // Show loading while initial state is being fetched
+    if (!initialStateLoaded) {
+        return (
+            <div className="min-h-screen bg-black text-white flex items-center justify-center text-2xl font-medium p-8 text-center">
+                <div className="animate-pulse">Connecting to session...</div>
+            </div>
+        );
+    }
 
     if (!state?.currentSlideId) {
         return (

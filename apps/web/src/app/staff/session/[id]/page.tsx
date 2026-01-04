@@ -20,7 +20,7 @@ import { toast } from 'sonner';
 import { Breadcrumb } from '@/components/ui/breadcrumb';
 
 function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: { slides: Slide[], setSlides: (slides: Slide[]) => void, loadSlides: () => void, session: Session | null, loadSession: () => void }) {
-    const { sendMessage, state, activeParticipants, updateState } = useWebSocket();
+    const { sendMessage, state, activeParticipants, updateState, initialStateLoaded } = useWebSocket();
     const params = useParams();
     const id = params?.id as string;
     const [showTypeSelector, setShowTypeSelector] = useState(false);
@@ -377,7 +377,12 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
                         {/* Live Status Pill */}
                         <div className="flex items-center gap-3 bg-slate-50 px-3 py-1.5 rounded-full border border-slate-200">
                             <div className="text-xs font-medium text-slate-500 flex items-center gap-2">
-                                {state?.isPresentationActive ? (
+                                {!initialStateLoaded ? (
+                                    <span className="flex items-center gap-1.5 text-slate-400">
+                                        <span className="h-2 w-2 rounded-full bg-slate-300 animate-pulse"></span>
+                                        Loading...
+                                    </span>
+                                ) : state?.isPresentationActive ? (
                                     <span className="text-green-600 flex items-center gap-1.5 font-bold">
                                         <span className="relative flex h-2 w-2">
                                             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
@@ -413,15 +418,18 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
                             </Button>
                         </div>
 
-                        {/* Primary Action */}
+                        {/* Primary Action - Only show after initial state is loaded */}
                         <Button
                             size="sm"
                             onClick={handleToggleLive}
-                            className={`${state?.isPresentationActive
+                            disabled={!initialStateLoaded}
+                            className={`${initialStateLoaded && state?.isPresentationActive
                                 ? "bg-red-600 hover:bg-red-700 shadow-red-600/20"
                                 : "bg-green-600 hover:bg-green-700 shadow-green-600/20"} text-white shadow-lg px-5 font-semibold ml-2 transition-all`}
                         >
-                            {state?.isPresentationActive ? (
+                            {!initialStateLoaded ? (
+                                <>Loading...</>
+                            ) : state?.isPresentationActive ? (
                                 <>
                                     <Square className="w-3.5 h-3.5 mr-2 fill-current" /> Stop Session
                                 </>

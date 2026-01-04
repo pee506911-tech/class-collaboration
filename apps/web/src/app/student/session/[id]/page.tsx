@@ -38,7 +38,7 @@ function StudentSlideView({ slideId, slides }: { slideId: string; slides: Slide[
 }
 
 function ConnectedStudentView({ session, shareToken }: { session: Session & { slides: Slide[]; isPresentationActive?: boolean; allowQuestions?: boolean }; shareToken: string }) {
-    const { state, isConnected, sendMessage, lastSlideUpdate } = useWebSocket();
+    const { state, isConnected, sendMessage, lastSlideUpdate, initialStateLoaded } = useWebSocket();
     const [slides, setSlides] = useState<Slide[]>(session.slides || []);
     const [showQA, setShowQA] = useState(false);
     const [globalQuestion, setGlobalQuestion] = useState('');
@@ -74,8 +74,19 @@ function ConnectedStudentView({ session, shareToken }: { session: Session & { sl
         setShowQA(false);
     };
 
-    // Determine if presentation is active
-    const isLive = state?.isPresentationActive !== undefined ? state.isPresentationActive : session.isPresentationActive;
+    // Determine if presentation is active - only use state after initial load
+    const isLive = initialStateLoaded 
+        ? (state?.isPresentationActive ?? false)
+        : undefined; // undefined means "still loading"
+
+    // Show loading while initial state is being fetched
+    if (!initialStateLoaded) {
+        return (
+            <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
+                <LoadingState message="Connecting to session..." />
+            </div>
+        );
+    }
 
     if (!isLive) {
         return (

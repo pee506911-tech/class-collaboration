@@ -53,6 +53,7 @@ interface WebSocketContextType {
     activeParticipants: number;
     lastSlideUpdate: number;
     socket: any | null;
+    initialStateLoaded: boolean;
 }
 
 const WebSocketContext = createContext<WebSocketContextType | null>(null);
@@ -72,6 +73,7 @@ export function WebSocketProvider({
     const [isConnecting, setIsConnecting] = useState(true);
     const [connectionError, setConnectionError] = useState<string | null>(null);
     const [state, setState] = useState<StateUpdatePayload | null>(null);
+    const [initialStateLoaded, setInitialStateLoaded] = useState(false);
     const [voteResults, setVoteResults] = useState<Record<string, Record<string, number>>>({});
     const [lostCount] = useState(0);
     const [serverTimeOffset] = useState(0);
@@ -104,6 +106,31 @@ export function WebSocketProvider({
     useEffect(() => { stateRef.current = state; }, [state]);
     useEffect(() => { voteResultsRef.current = voteResults; }, [voteResults]);
     useEffect(() => { questionsRef.current = questions; }, [questions]);
+
+    // Fetch initial state IMMEDIATELY on mount (before Ably connection)
+    // This prevents the flash of incorrect UI state
+    useEffect(() => {
+        if (!sessionId || initialStateLoaded) return;
+        
+        const fetchInitialStateEarly = async () => {
+            try {
+                const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
+                const res = await fetch(`${apiBase}/sessions/${sessionId}/state`);
+                if (res.ok) {
+                    const data = await res.json();
+                    setState(data);
+                    if (data.questions) setQuestions(data.questions);
+                    if (data.voteCounts) setVoteResults(data.voteCounts);
+                }
+            } catch (e) {
+                console.error('Failed to fetch initial state early:', e);
+            } finally {
+                setInitialStateLoaded(true);
+            }
+        };
+        
+        fetchInitialStateEarly();
+    }, [sessionId, initialStateLoaded]);
 
     useEffect(() => {
         let pid = localStorage.getItem('participantId');
@@ -610,7 +637,8 @@ export function WebSocketProvider({
             questions,
             activeParticipants,
             lastSlideUpdate,
-            socket: ablyClient
+            socket: ablyClient,
+            initialStateLoaded
         }}>
             {children}
         </WebSocketContext.Provider>
