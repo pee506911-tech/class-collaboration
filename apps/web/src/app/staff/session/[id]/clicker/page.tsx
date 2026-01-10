@@ -18,14 +18,17 @@ function ClickerContent() {
     const [slides, setSlides] = useState<Slide[]>([]);
     const [currentIndex, setCurrentIndex] = useState(-1);
     const [currentTime, setCurrentTime] = useState<Date | null>(null);
-    const [isNavigating, setIsNavigating] = useState(false);
     
     // Use ref to track the latest index for rapid clicks
     const currentIndexRef = useRef(currentIndex);
     currentIndexRef.current = currentIndex;
     
-    // Track if we're the source of the navigation to avoid sync conflicts
-    const isLocalNavigationRef = useRef(false);
+    // Track pending API call - only send the latest slide, cancel previous
+    const pendingSlideRef = useRef<string | null>(null);
+    const apiTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    
+    // Track when we last navigated locally to ignore server sync briefly
+    const lastLocalNavRef = useRef<number>(0);
 
     useEffect(() => {
         setCurrentTime(new Date());
@@ -51,8 +54,9 @@ function ClickerContent() {
     useEffect(() => {
         if (visibleSlides.length > 0) {
             if (state?.currentSlideId) {
-                // Only sync with server state if we're not actively navigating
-                if (!isLocalNavigationRef.current) {
+                // Ignore server sync for 1 second after local navigation
+                const timeSinceLocalNav = Date.now() - lastLocalNavRef.current;
+                if (timeSinceLocalNav > 1000) {
                     const index = visibleSlides.findIndex(s => s.id === state.currentSlideId);
                     if (index !== -1) {
                         setCurrentIndex(index);
@@ -65,57 +69,62 @@ function ClickerContent() {
         }
     }, [slides, state?.currentSlideId]); // Re-run when slides change (visibility might change)
 
-    const handleNext = useCallback(async () => {
+    // Debounced API call - only sends the final slide after rapid clicks settle
+    const sendSlideToServer = useCallback((slideId: string) => {
+        pendingSlideRef.current = slideId;
+        
+        // Clear any pending API call
+        if (apiTimeoutRef.current) {
+            clearTimeout(apiTimeoutRef.current);
+        }
+        
+        // Debounce: wait 150ms before sending to server
+        // This batches rapid clicks and only sends the final destination
+        apiTimeoutRef.current = setTimeout(() => {
+            if (pendingSlideRef.current) {
+                publicSetCurrentSlide(id, pendingSlideRef.current);
+                pendingSlideRef.current = null;
+            }
+        }, 150);
+    }, [id]);
+
+    const handleNext = useCallback(() => {
         const slides = visibleSlidesRef.current;
         const idx = currentIndexRef.current;
         
-        if (isNavigating || idx >= slides.length - 1) return;
+        if (idx >= slides.length - 1) return;
         
-        setIsNavigating(true);
-        isLocalNavigationRef.current = true;
+        lastLocalNavRef.current = Date.now();
         
         const nextIndex = idx + 1;
         const nextSlide = slides[nextIndex];
         
+        // Immediate UI update
         setCurrentIndex(nextIndex);
         updateState({ currentSlideId: nextSlide.id });
         
-        try {
-            await publicSetCurrentSlide(id, nextSlide.id);
-        } finally {
-            setIsNavigating(false);
-            // Reset local navigation flag after a short delay to allow state to settle
-            setTimeout(() => {
-                isLocalNavigationRef.current = false;
-            }, 500);
-        }
-    }, [id, updateState, isNavigating]);
+        // Debounced server update
+        sendSlideToServer(nextSlide.id);
+    }, [updateState, sendSlideToServer]);
 
-    const handlePrev = useCallback(async () => {
+    const handlePrev = useCallback(() => {
         const slides = visibleSlidesRef.current;
         const idx = currentIndexRef.current;
         
-        if (isNavigating || idx <= 0) return;
+        if (idx <= 0) return;
         
-        setIsNavigating(true);
-        isLocalNavigationRef.current = true;
+        lastLocalNavRef.current = Date.now();
         
         const prevIndex = idx - 1;
         const prevSlide = slides[prevIndex];
         
+        // Immediate UI update
         setCurrentIndex(prevIndex);
         updateState({ currentSlideId: prevSlide.id });
         
-        try {
-            await publicSetCurrentSlide(id, prevSlide.id);
-        } finally {
-            setIsNavigating(false);
-            // Reset local navigation flag after a short delay to allow state to settle
-            setTimeout(() => {
-                isLocalNavigationRef.current = false;
-            }, 500);
-        }
-    }, [id, updateState, isNavigating]);
+        // Debounced server update
+        sendSlideToServer(prevSlide.id);
+    }, [updateState, sendSlideToServer]);
 
     const currentSlide = visibleSlides[currentIndex];
 
