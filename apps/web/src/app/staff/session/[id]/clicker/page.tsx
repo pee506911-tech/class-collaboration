@@ -2,7 +2,7 @@
 
 export const runtime = 'edge';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import { Slide } from 'shared';
 import { publicGetSlides, publicSetCurrentSlide } from '@/lib/api';
@@ -18,6 +18,14 @@ function ClickerContent() {
     const [slides, setSlides] = useState<Slide[]>([]);
     const [currentIndex, setCurrentIndex] = useState(-1);
     const [currentTime, setCurrentTime] = useState<Date | null>(null);
+    const [isNavigating, setIsNavigating] = useState(false);
+    
+    // Use ref to track the latest index for rapid clicks
+    const currentIndexRef = useRef(currentIndex);
+    currentIndexRef.current = currentIndex;
+    
+    // Track if we're the source of the navigation to avoid sync conflicts
+    const isLocalNavigationRef = useRef(false);
 
     useEffect(() => {
         setCurrentTime(new Date());
@@ -37,13 +45,19 @@ function ClickerContent() {
 
     // Filter out hidden slides for navigation logic
     const visibleSlides = slides.filter(s => !s.isHidden);
+    const visibleSlidesRef = useRef(visibleSlides);
+    visibleSlidesRef.current = visibleSlides;
 
     useEffect(() => {
         if (visibleSlides.length > 0) {
             if (state?.currentSlideId) {
-                // Sync with server state
-                const index = visibleSlides.findIndex(s => s.id === state.currentSlideId);
-                setCurrentIndex(index);
+                // Only sync with server state if we're not actively navigating
+                if (!isLocalNavigationRef.current) {
+                    const index = visibleSlides.findIndex(s => s.id === state.currentSlideId);
+                    if (index !== -1) {
+                        setCurrentIndex(index);
+                    }
+                }
             } else if (currentIndex === -1) {
                 // Initialize to first slide if no state yet
                 setCurrentIndex(0);
@@ -51,23 +65,57 @@ function ClickerContent() {
         }
     }, [slides, state?.currentSlideId]); // Re-run when slides change (visibility might change)
 
-    const handleNext = async () => {
-        if (currentIndex < visibleSlides.length - 1) {
-            const nextSlide = visibleSlides[currentIndex + 1];
-            setCurrentIndex(currentIndex + 1);
-            updateState({ currentSlideId: nextSlide.id });
+    const handleNext = useCallback(async () => {
+        const slides = visibleSlidesRef.current;
+        const idx = currentIndexRef.current;
+        
+        if (isNavigating || idx >= slides.length - 1) return;
+        
+        setIsNavigating(true);
+        isLocalNavigationRef.current = true;
+        
+        const nextIndex = idx + 1;
+        const nextSlide = slides[nextIndex];
+        
+        setCurrentIndex(nextIndex);
+        updateState({ currentSlideId: nextSlide.id });
+        
+        try {
             await publicSetCurrentSlide(id, nextSlide.id);
+        } finally {
+            setIsNavigating(false);
+            // Reset local navigation flag after a short delay to allow state to settle
+            setTimeout(() => {
+                isLocalNavigationRef.current = false;
+            }, 500);
         }
-    };
+    }, [id, updateState, isNavigating]);
 
-    const handlePrev = async () => {
-        if (currentIndex > 0) {
-            const prevSlide = visibleSlides[currentIndex - 1];
-            setCurrentIndex(currentIndex - 1);
-            updateState({ currentSlideId: prevSlide.id });
+    const handlePrev = useCallback(async () => {
+        const slides = visibleSlidesRef.current;
+        const idx = currentIndexRef.current;
+        
+        if (isNavigating || idx <= 0) return;
+        
+        setIsNavigating(true);
+        isLocalNavigationRef.current = true;
+        
+        const prevIndex = idx - 1;
+        const prevSlide = slides[prevIndex];
+        
+        setCurrentIndex(prevIndex);
+        updateState({ currentSlideId: prevSlide.id });
+        
+        try {
             await publicSetCurrentSlide(id, prevSlide.id);
+        } finally {
+            setIsNavigating(false);
+            // Reset local navigation flag after a short delay to allow state to settle
+            setTimeout(() => {
+                isLocalNavigationRef.current = false;
+            }, 500);
         }
-    };
+    }, [id, updateState, isNavigating]);
 
     const currentSlide = visibleSlides[currentIndex];
 
