@@ -233,8 +233,8 @@ pub async fn register_participant(
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct GetMyVotesQuery {
+    #[serde(rename = "participantId")]
     pub participant_id: String,
 }
 
@@ -253,6 +253,8 @@ pub async fn get_my_votes(
 ) -> Result<Json<ApiResponse<MyVotesResponse>>> {
     let pool = app_state.db_pool.pool().await?;
     
+    tracing::info!("get_my_votes called for session {} with participantId {}", session_id, query.participant_id);
+    
     if query.participant_id.trim().is_empty() {
         return Err(AppError::Input("Participant ID is required".to_string()));
     }
@@ -265,6 +267,8 @@ pub async fn get_my_votes(
     .bind(&query.participant_id)
     .fetch_all(&pool)
     .await?;
+    
+    tracing::info!("Found {} votes for participant {}", votes.len(), query.participant_id);
     
     // Group by slide_id
     let mut votes_map: HashMap<String, Vec<String>> = HashMap::new();

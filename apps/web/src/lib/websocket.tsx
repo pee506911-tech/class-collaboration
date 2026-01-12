@@ -97,16 +97,22 @@ export function WebSocketProvider({
         if (forRole === 'student') {
             const studentKey = `studentParticipantId_${sessionId}`;
             let studentPid = localStorage.getItem(studentKey);
+            console.log('[DEBUG] getOrCreateParticipantId - studentKey:', studentKey, 'existing:', studentPid);
+            
             if (!studentPid) {
+                // Create a new stable ID for this student
                 if (typeof crypto !== 'undefined' && crypto.randomUUID) {
                     studentPid = crypto.randomUUID();
                 } else {
                     studentPid = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
                 }
                 localStorage.setItem(studentKey, studentPid);
+                console.log('[DEBUG] Created new studentPid:', studentPid);
             }
             // Ensure it fits in database (36 chars max)
-            return studentPid.substring(0, 36);
+            const finalPid = studentPid.substring(0, 36);
+            console.log('[DEBUG] Using participantId:', finalPid);
+            return finalPid;
         }
         
         // For staff/projector, use the original logic
@@ -257,9 +263,12 @@ export function WebSocketProvider({
                 
                 // Fetch previous votes to restore state after app reopen
                 try {
+                    console.log('[DEBUG] Fetching my-votes for participantId:', participantIdRef.current);
                     const votesRes = await fetch(`${apiBase}/sessions/${sessionId}/my-votes?participantId=${encodeURIComponent(participantIdRef.current)}`);
+                    console.log('[DEBUG] my-votes response status:', votesRes.status);
                     if (votesRes.ok && isMountedRef.current) {
                         const votesData = await votesRes.json();
+                        console.log('[DEBUG] my-votes data:', votesData);
                         if (votesData.data?.votes) {
                             setMyVotes(votesData.data.votes);
                             // Also update localStorage to keep it in sync
@@ -274,9 +283,11 @@ export function WebSocketProvider({
                                 }
                             });
                         }
+                    } else {
+                        console.log('[DEBUG] my-votes failed or component unmounted');
                     }
                 } catch (e) {
-                    console.error('Failed to fetch previous votes:', e);
+                    console.error('[DEBUG] Failed to fetch previous votes:', e);
                 }
                 
                 fetch(`${apiBase}/sessions/${sessionId}/register-participant`, {
@@ -621,6 +632,7 @@ export function WebSocketProvider({
         try {
             switch (type) {
                 case 'SUBMIT_VOTE':
+                    console.log('[DEBUG] Submitting vote with participantId:', participantIdRef.current);
                     await fetch(`${apiBase}/sessions/${sessionId}/vote`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
