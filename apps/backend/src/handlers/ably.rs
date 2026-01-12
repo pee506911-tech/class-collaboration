@@ -49,9 +49,22 @@ pub async fn get_ably_token(
         }
     };
 
-    // Set client ID for tracking
+    // Set client ID for tracking - CRITICAL: each participant must have a unique ID
     let client_id = params.participant_id.clone()
         .unwrap_or_else(|| format!("{}-{}", params.role, params.session_id));
+    
+    // Warn if participant_id is empty (this causes all students to share the same connection)
+    if params.participant_id.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+        tracing::warn!(
+            "Empty or missing participant_id for session {} role {}. Using fallback: {}. This may cause connection sharing issues!",
+            params.session_id, params.role, client_id
+        );
+    } else {
+        tracing::info!(
+            "Generating Ably token for session {} role {} participant {}",
+            params.session_id, params.role, client_id
+        );
+    }
 
     // Generate timestamp (in milliseconds) and nonce
     let timestamp = std::time::SystemTime::now()

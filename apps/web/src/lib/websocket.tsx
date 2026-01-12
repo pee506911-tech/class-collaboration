@@ -83,7 +83,30 @@ export function WebSocketProvider({
     const [lastSlideUpdate, setLastSlideUpdate] = useState(0);
     const [ablyClient, setAblyClient] = useState<Ably.Realtime | null>(null);
 
-    const participantIdRef = useRef<string>('');
+    // Initialize participantId synchronously to avoid race condition with Ably connection
+    const getOrCreateParticipantId = (forRole: string): string => {
+        if (typeof window === 'undefined') return '';
+        let basePid = localStorage.getItem('participantId');
+        if (!basePid) {
+            if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+                basePid = crypto.randomUUID();
+            } else {
+                basePid = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+            }
+            localStorage.setItem('participantId', basePid);
+        }
+        // For students, create a unique ID per window by combining base + tab ID
+        // Keep total length <= 36 chars to fit in database
+        if (forRole === 'student') {
+            // Use first 27 chars of base + 8 chars of TAB_ID = 35 chars (with separator)
+            const shortBase = basePid.replace(/-/g, '').substring(0, 27);
+            const shortTab = TAB_ID.replace(/-/g, '').substring(0, 8);
+            return `${shortBase}${shortTab}`;
+        }
+        return basePid;
+    };
+    
+    const participantIdRef = useRef<string>(getOrCreateParticipantId(role));
     const ablyClientRef = useRef<Ably.Realtime | null>(null);
     const isLeaderRef = useRef<boolean>(false);
     const leaderSinceRef = useRef<number>(0); // When we became leader
@@ -132,18 +155,8 @@ export function WebSocketProvider({
         fetchInitialStateEarly();
     }, [sessionId, initialStateLoaded]);
 
-    useEffect(() => {
-        let pid = localStorage.getItem('participantId');
-        if (!pid) {
-            if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-                pid = crypto.randomUUID();
-            } else {
-                pid = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-            }
-            localStorage.setItem('participantId', pid);
-        }
-        participantIdRef.current = pid;
-    }, []);
+    // participantId is now initialized synchronously in useRef above
+    // This effect is kept for backwards compatibility but the ref is already set
 
     // Handle incoming Ably messages (for both leader and follower)
     const handleAblyMessage = useCallback((messageName: string, data: any) => {
@@ -194,7 +207,10 @@ export function WebSocketProvider({
     useEffect(() => {
         if (!sessionId) return;
 
-        const hasBroadcastChannel = typeof BroadcastChannel !== 'undefined';
+        // IMPORTANT: Disable BroadcastChannel for students so each window gets its own Ably connection
+        // This ensures each student has a unique connection even in the same browser
+        // BroadcastChannel is only useful for staff who might have multiple tabs open
+        const hasBroadcastChannel = typeof BroadcastChannel !== 'undefined' && role !== 'student';
 
         isMountedRef.current = true;
         let client: Ably.Realtime | null = null;
@@ -237,10 +253,17 @@ export function WebSocketProvider({
             if (client) return;
 
             const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
+            
+            // Ensure participantId is set before creating connection
+            const participantId = participantIdRef.current;
+            if (!participantId) {
+                console.error('participantId is empty, this will cause connection issues');
+            }
 
+            console.log(`Creating Ably connection for ${role} with participantId: ${participantId}`);
 
             client = new Ably.Realtime({
-                authUrl: `${apiBase}/auth/ably?sessionId=${sessionId}&role=${role}&participantId=${participantIdRef.current}`,
+                authUrl: `${apiBase}/auth/ably?sessionId=${sessionId}&role=${role}&participantId=${participantId}`,
                 authMethod: 'GET',
                 disconnectedRetryTimeout: 5000,
                 suspendedRetryTimeout: 10000,

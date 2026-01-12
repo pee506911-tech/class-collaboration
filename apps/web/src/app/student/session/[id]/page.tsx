@@ -266,7 +266,8 @@ export default function StudentSession() {
         if (id) {
             getSessionByToken(id).then(data => {
                 setSession(data);
-                const storedName = localStorage.getItem(`studentName_${id}`);
+                // Use sessionStorage for window-specific name (allows testing multiple students)
+                const storedName = sessionStorage.getItem(`studentName_${id}`);
 
                 if (storedName && storedName.trim()) {
                     setStudentName(storedName);
@@ -291,7 +292,8 @@ export default function StudentSession() {
         // Simulate small delay for UX
         setTimeout(() => {
             if (studentName.trim()) {
-                localStorage.setItem(`studentName_${id}`, studentName);
+                // Use sessionStorage for window-specific name
+                sessionStorage.setItem(`studentName_${id}`, studentName);
             }
             setHasJoined(true);
             setJoining(false);

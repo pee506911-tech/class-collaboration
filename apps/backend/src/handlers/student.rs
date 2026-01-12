@@ -29,6 +29,12 @@ pub async fn submit_vote(
 ) -> Result<Json<ApiResponse<serde_json::Value>>> {
     let pool = app_state.db_pool.pool().await?;
     
+    // Validate participant_id is not empty
+    if payload.participant_id.trim().is_empty() {
+        tracing::warn!("Vote submission rejected: empty participant_id for session {}", session_id);
+        return Err(AppError::Input("Participant ID is required".to_string()));
+    }
+    
     tracing::info!("Vote submission for session {}: slide={}, participant={}", 
         session_id, payload.slide_id, payload.participant_id);
     
