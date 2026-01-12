@@ -496,12 +496,13 @@ export function SlideRenderer({ slide, role, isPreview }: SlideProps) {
         <SlideTransition slideId={slide.id}>
             {(() => {
                 switch (slide.type) {
-                    case 'static': return <StaticSlide slide={slide} role={role} isPreview={isPreview} />;
-                    case 'poll': return <PollSlide slide={slide} role={role} isPreview={isPreview} />;
-                    case 'multiple-choice': return <MultipleChoiceSlide slide={slide} role={role} isPreview={isPreview} />;
-                    case 'quiz': return <QuizSlide slide={slide} role={role} isPreview={isPreview} />;
-                    case 'qa': return <QASlide slide={slide} role={role} isPreview={isPreview} />;
-                    case 'leaderboard': return <LeaderboardSlide />;
+                    // Key by slide.id so each slide remounts and state (like hasSubmitted) doesn't leak between slides
+                    case 'static': return <StaticSlide key={slide.id} slide={slide} role={role} isPreview={isPreview} />;
+                    case 'poll': return <PollSlide key={slide.id} slide={slide} role={role} isPreview={isPreview} />;
+                    case 'multiple-choice': return <MultipleChoiceSlide key={slide.id} slide={slide} role={role} isPreview={isPreview} />;
+                    case 'quiz': return <QuizSlide key={slide.id} slide={slide} role={role} isPreview={isPreview} />;
+                    case 'qa': return <QASlide key={slide.id} slide={slide} role={role} isPreview={isPreview} />;
+                    case 'leaderboard': return <LeaderboardSlide key={slide.id} />;
                     default: return <div>Unsupported slide type: {slide.type}</div>;
                 }
             })()}
