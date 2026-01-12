@@ -266,13 +266,16 @@ export default function StudentSession() {
         if (id) {
             getSessionByToken(id).then(data => {
                 setSession(data);
-                // Prefer window-specific name; fall back to browser-persisted name so returning users skip the prompt
+                // Prefer window-specific name. If only a browser-wide name exists, prefill but still require confirmation.
                 const sessionKey = `studentName_${id}`;
-                const storedName = sessionStorage.getItem(sessionKey) || localStorage.getItem(sessionKey);
+                const windowName = sessionStorage.getItem(sessionKey);
+                const browserName = windowName ? null : localStorage.getItem(sessionKey);
 
-                if (storedName && storedName.trim()) {
-                    setStudentName(storedName);
+                if (windowName && windowName.trim()) {
+                    setStudentName(windowName);
                     setHasJoined(true);
+                } else if (browserName && browserName.trim()) {
+                    setStudentName(browserName); // Prefill but keep hasJoined=false so new windows still prompt
                 } else if (data.requireName === false) {
                     setHasJoined(true);
                 }
