@@ -271,14 +271,15 @@ export function WebSocketProvider({
                         console.log('[DEBUG] my-votes data:', votesData);
                         if (votesData.data?.votes) {
                             setMyVotes(votesData.data.votes);
+                            const voteKeyPrefix = `${sessionId}_${participantIdRef.current || 'anon'}`;
                             // Also update localStorage to keep it in sync
                             Object.entries(votesData.data.votes as Record<string, string[]>).forEach(([slideId, optionIds]) => {
                                 if (optionIds.length > 0) {
-                                    localStorage.setItem(`voted_${sessionId}_${slideId}`, 'true');
+                                    localStorage.setItem(`voted_${voteKeyPrefix}_${slideId}`, 'true');
                                     if (optionIds.length === 1) {
-                                        localStorage.setItem(`voted_option_${sessionId}_${slideId}`, optionIds[0]);
+                                        localStorage.setItem(`voted_option_${voteKeyPrefix}_${slideId}`, optionIds[0]);
                                     } else {
-                                        localStorage.setItem(`voted_options_${sessionId}_${slideId}`, JSON.stringify(optionIds));
+                                        localStorage.setItem(`voted_options_${voteKeyPrefix}_${slideId}`, JSON.stringify(optionIds));
                                     }
                                 }
                             });

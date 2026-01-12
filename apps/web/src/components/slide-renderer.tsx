@@ -76,17 +76,18 @@ function StaticSlide({ slide }: SlideProps) {
 }
 
 function PollSlide({ slide, role, isPreview }: SlideProps) {
-    const { sendMessage, voteResults, myVotes } = useWebSocket();
+    const { sendMessage, voteResults, myVotes, participantId } = useWebSocket();
     const content = slide.content as PollSlideContent;
     const [hasSubmitted, setHasSubmitted] = useState(false);
     const [selectedOption, setSelectedOption] = useState<string | null>(null);
     const storageSessionKey = (slide as any)?.sessionId || 'default';
+    const voteKeyPrefix = `${storageSessionKey}_${participantId || 'anon'}`;
 
     useEffect(() => {
         if (role === 'student' && content.limitSubmissions !== false && !isPreview) {
             // First check localStorage
-            const voted = localStorage.getItem(`voted_${storageSessionKey}_${slide.id}`);
-            const votedOption = localStorage.getItem(`voted_option_${storageSessionKey}_${slide.id}`);
+            const voted = localStorage.getItem(`voted_${voteKeyPrefix}_${slide.id}`);
+            const votedOption = localStorage.getItem(`voted_option_${voteKeyPrefix}_${slide.id}`);
             if (voted) {
                 setHasSubmitted(true);
                 if (votedOption) setSelectedOption(votedOption);
@@ -96,7 +97,7 @@ function PollSlide({ slide, role, isPreview }: SlideProps) {
                 setSelectedOption(myVotes[slide.id][0]);
             }
         }
-    }, [slide.id, role, content.limitSubmissions, isPreview, storageSessionKey, myVotes]);
+    }, [slide.id, role, content.limitSubmissions, isPreview, voteKeyPrefix, myVotes]);
 
     const handleSelect = (optionId: string) => {
         if (hasSubmitted) return;
@@ -107,8 +108,8 @@ function PollSlide({ slide, role, isPreview }: SlideProps) {
         if (!selectedOption || hasSubmitted) return;
         sendMessage('SUBMIT_VOTE', { slideId: slide.id, optionId: selectedOption });
         if (content.limitSubmissions !== false) {
-            localStorage.setItem(`voted_${storageSessionKey}_${slide.id}`, 'true');
-            localStorage.setItem(`voted_option_${storageSessionKey}_${slide.id}`, selectedOption);
+            localStorage.setItem(`voted_${voteKeyPrefix}_${slide.id}`, 'true');
+            localStorage.setItem(`voted_option_${voteKeyPrefix}_${slide.id}`, selectedOption);
             setHasSubmitted(true);
         }
     };
@@ -197,11 +198,12 @@ function PollSlide({ slide, role, isPreview }: SlideProps) {
 }
 
 function QuizSlide({ slide, role, isPreview }: SlideProps) {
-    const { sendMessage, state, voteResults, slideStartTime, serverTimeOffset, myVotes } = useWebSocket();
+    const { sendMessage, state, voteResults, slideStartTime, serverTimeOffset, myVotes, participantId } = useWebSocket();
     const content = slide.content as QuizSlideContent;
     const [selectedOption, setSelectedOption] = useState<string | null>(null);
     const [timeLeft, setTimeLeft] = useState(content.timerDuration);
     const storageSessionKey = (slide as any)?.sessionId || 'default';
+    const voteKeyPrefix = `${storageSessionKey}_${participantId || 'anon'}`;
 
     useEffect(() => {
         if (!slideStartTime) return;
@@ -217,7 +219,7 @@ function QuizSlide({ slide, role, isPreview }: SlideProps) {
 
     useEffect(() => {
         if (role === 'student' && !isPreview) {
-            const votedOption = localStorage.getItem(`voted_option_${storageSessionKey}_${slide.id}`);
+            const votedOption = localStorage.getItem(`voted_option_${voteKeyPrefix}_${slide.id}`);
             if (votedOption) {
                 setSelectedOption(votedOption);
             } else if (myVotes[slide.id]?.length > 0) {
@@ -225,13 +227,13 @@ function QuizSlide({ slide, role, isPreview }: SlideProps) {
                 setSelectedOption(myVotes[slide.id][0]);
             }
         }
-    }, [slide.id, role, isPreview, storageSessionKey, myVotes]);
+    }, [slide.id, role, isPreview, voteKeyPrefix, myVotes]);
 
     const handleVote = async (optionId: string) => {
         if (selectedOption) return;
         setSelectedOption(optionId);
         sendMessage('SUBMIT_ANSWER', { slideId: slide.id, answer: optionId, timeRemaining: timeLeft });
-        localStorage.setItem(`voted_option_${storageSessionKey}_${slide.id}`, optionId);
+        localStorage.setItem(`voted_option_${voteKeyPrefix}_${slide.id}`, optionId);
 
         const option = (content.options || []).find(o => o.id === optionId);
         if (option?.isCorrect) {
@@ -344,16 +346,17 @@ function LeaderboardSlide() {
 }
 
 function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
-    const { sendMessage, voteResults, myVotes } = useWebSocket();
+    const { sendMessage, voteResults, myVotes, participantId } = useWebSocket();
     const content = slide.content as MultipleChoiceSlideContent;
     const [selectedOptions, setSelectedOptions] = useState<string[]>([]);
     const [submitted, setSubmitted] = useState(false);
     const storageSessionKey = (slide as any)?.sessionId || 'default';
+    const voteKeyPrefix = `${storageSessionKey}_${participantId || 'anon'}`;
 
     useEffect(() => {
         if (role === 'student' && content.limitSubmissions !== false && !isPreview) {
-            const voted = localStorage.getItem(`voted_${storageSessionKey}_${slide.id}`);
-            const votedOptions = localStorage.getItem(`voted_options_${storageSessionKey}_${slide.id}`);
+            const voted = localStorage.getItem(`voted_${voteKeyPrefix}_${slide.id}`);
+            const votedOptions = localStorage.getItem(`voted_options_${voteKeyPrefix}_${slide.id}`);
             if (voted) {
                 setSubmitted(true);
                 if (votedOptions) {
@@ -365,7 +368,7 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
                 setSelectedOptions(myVotes[slide.id]);
             }
         }
-    }, [slide.id, role, content.limitSubmissions, isPreview, storageSessionKey, myVotes]);
+    }, [slide.id, role, content.limitSubmissions, isPreview, voteKeyPrefix, myVotes]);
 
     const handleSelect = (optionId: string) => {
         if (role !== 'student' || submitted) return;
@@ -384,8 +387,8 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
         if (selectedOptions.length === 0) return;
         sendMessage('SUBMIT_VOTE', { slideId: slide.id, optionIds: selectedOptions });
         if (content.limitSubmissions !== false) {
-            localStorage.setItem(`voted_${storageSessionKey}_${slide.id}`, 'true');
-            localStorage.setItem(`voted_options_${storageSessionKey}_${slide.id}`, JSON.stringify(selectedOptions));
+            localStorage.setItem(`voted_${voteKeyPrefix}_${slide.id}`, 'true');
+            localStorage.setItem(`voted_options_${voteKeyPrefix}_${slide.id}`, JSON.stringify(selectedOptions));
         }
         setSubmitted(true);
     };

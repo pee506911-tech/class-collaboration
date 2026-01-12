@@ -143,7 +143,7 @@ function ConnectedStudentView({ session, shareToken }: { session: Session & { sl
 
                 {state?.currentSlideId ? (
                     <div className="h-full">
-                        <StudentSlideView slideId={state.currentSlideId} slides={slides} sessionId={shareToken} />
+                        <StudentSlideView slideId={state.currentSlideId} slides={slides} sessionId={session.id} />
                     </div>
                 ) : (
                     <Card className="shadow-md">
