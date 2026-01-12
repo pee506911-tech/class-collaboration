@@ -54,6 +54,8 @@ interface WebSocketContextType {
     lastSlideUpdate: number;
     socket: any | null;
     initialStateLoaded: boolean;
+    participantId: string;
+    myVotes: Record<string, string[]>; // slide_id -> [option_ids]
 }
 
 const WebSocketContext = createContext<WebSocketContextType | null>(null);
@@ -82,10 +84,32 @@ export function WebSocketProvider({
     const [activeParticipants, setActiveParticipants] = useState(0);
     const [lastSlideUpdate, setLastSlideUpdate] = useState(0);
     const [ablyClient, setAblyClient] = useState<Ably.Realtime | null>(null);
+    const [myVotes, setMyVotes] = useState<Record<string, string[]>>({});
 
     // Initialize participantId synchronously to avoid race condition with Ably connection
+    // For students, use a stable ID that persists across browser sessions
+    // This ensures answers are preserved when closing and reopening the app
     const getOrCreateParticipantId = (forRole: string): string => {
         if (typeof window === 'undefined') return '';
+        
+        // For students, use a session-specific stable ID
+        // This allows the same student to see their previous answers
+        if (forRole === 'student') {
+            const studentKey = `studentParticipantId_${sessionId}`;
+            let studentPid = localStorage.getItem(studentKey);
+            if (!studentPid) {
+                if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+                    studentPid = crypto.randomUUID();
+                } else {
+                    studentPid = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+                }
+                localStorage.setItem(studentKey, studentPid);
+            }
+            // Ensure it fits in database (36 chars max)
+            return studentPid.substring(0, 36);
+        }
+        
+        // For staff/projector, use the original logic
         let basePid = localStorage.getItem('participantId');
         if (!basePid) {
             if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -94,14 +118,6 @@ export function WebSocketProvider({
                 basePid = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
             }
             localStorage.setItem('participantId', basePid);
-        }
-        // For students, create a unique ID per window by combining base + tab ID
-        // Keep total length <= 36 chars to fit in database
-        if (forRole === 'student') {
-            // Use first 27 chars of base + 8 chars of TAB_ID = 35 chars (with separator)
-            const shortBase = basePid.replace(/-/g, '').substring(0, 27);
-            const shortTab = TAB_ID.replace(/-/g, '').substring(0, 8);
-            return `${shortBase}${shortTab}`;
         }
         return basePid;
     };
@@ -238,6 +254,31 @@ export function WebSocketProvider({
 
             if (role === 'student') {
                 const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
+                
+                // Fetch previous votes to restore state after app reopen
+                try {
+                    const votesRes = await fetch(`${apiBase}/sessions/${sessionId}/my-votes?participantId=${encodeURIComponent(participantIdRef.current)}`);
+                    if (votesRes.ok && isMountedRef.current) {
+                        const votesData = await votesRes.json();
+                        if (votesData.data?.votes) {
+                            setMyVotes(votesData.data.votes);
+                            // Also update localStorage to keep it in sync
+                            Object.entries(votesData.data.votes as Record<string, string[]>).forEach(([slideId, optionIds]) => {
+                                if (optionIds.length > 0) {
+                                    localStorage.setItem(`voted_${sessionId}_${slideId}`, 'true');
+                                    if (optionIds.length === 1) {
+                                        localStorage.setItem(`voted_option_${sessionId}_${slideId}`, optionIds[0]);
+                                    } else {
+                                        localStorage.setItem(`voted_options_${sessionId}_${slideId}`, JSON.stringify(optionIds));
+                                    }
+                                }
+                            });
+                        }
+                    }
+                } catch (e) {
+                    console.error('Failed to fetch previous votes:', e);
+                }
+                
                 fetch(`${apiBase}/sessions/${sessionId}/register-participant`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -661,7 +702,9 @@ export function WebSocketProvider({
             activeParticipants,
             lastSlideUpdate,
             socket: ablyClient,
-            initialStateLoaded
+            initialStateLoaded,
+            participantId: participantIdRef.current,
+            myVotes
         }}>
             {children}
         </WebSocketContext.Provider>

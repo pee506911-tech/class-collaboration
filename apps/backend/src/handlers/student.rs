@@ -231,3 +231,46 @@ pub async fn register_participant(
         "participantId": payload.participant_id
     }))))
 }
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetMyVotesQuery {
+    pub participant_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MyVotesResponse {
+    pub votes: HashMap<String, Vec<String>>, // slide_id -> [option_ids]
+}
+
+/// Get a student's previous votes for a session
+/// This allows restoring vote state when reopening the app
+pub async fn get_my_votes(
+    State(app_state): State<crate::AppState>,
+    Path(session_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<GetMyVotesQuery>,
+) -> Result<Json<ApiResponse<MyVotesResponse>>> {
+    let pool = app_state.db_pool.pool().await?;
+    
+    if query.participant_id.trim().is_empty() {
+        return Err(AppError::Input("Participant ID is required".to_string()));
+    }
+    
+    // Fetch all votes for this participant in this session
+    let votes: Vec<(String, String)> = sqlx::query_as(
+        "SELECT slide_id, option_id FROM votes WHERE session_id = ? AND participant_id = ?"
+    )
+    .bind(&session_id)
+    .bind(&query.participant_id)
+    .fetch_all(&pool)
+    .await?;
+    
+    // Group by slide_id
+    let mut votes_map: HashMap<String, Vec<String>> = HashMap::new();
+    for (slide_id, option_id) in votes {
+        votes_map.entry(slide_id).or_default().push(option_id);
+    }
+    
+    Ok(Json(ApiResponse::success(MyVotesResponse { votes: votes_map })))
+}

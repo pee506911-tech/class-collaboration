@@ -76,7 +76,7 @@ function StaticSlide({ slide }: SlideProps) {
 }
 
 function PollSlide({ slide, role, isPreview }: SlideProps) {
-    const { sendMessage, voteResults } = useWebSocket();
+    const { sendMessage, voteResults, myVotes } = useWebSocket();
     const content = slide.content as PollSlideContent;
     const [hasSubmitted, setHasSubmitted] = useState(false);
     const [selectedOption, setSelectedOption] = useState<string | null>(null);
@@ -84,14 +84,19 @@ function PollSlide({ slide, role, isPreview }: SlideProps) {
 
     useEffect(() => {
         if (role === 'student' && content.limitSubmissions !== false && !isPreview) {
+            // First check localStorage
             const voted = localStorage.getItem(`voted_${storageSessionKey}_${slide.id}`);
             const votedOption = localStorage.getItem(`voted_option_${storageSessionKey}_${slide.id}`);
             if (voted) {
                 setHasSubmitted(true);
                 if (votedOption) setSelectedOption(votedOption);
+            } else if (myVotes[slide.id]?.length > 0) {
+                // Fallback to myVotes from backend (restored after app reopen)
+                setHasSubmitted(true);
+                setSelectedOption(myVotes[slide.id][0]);
             }
         }
-    }, [slide.id, role, content.limitSubmissions, isPreview, storageSessionKey]);
+    }, [slide.id, role, content.limitSubmissions, isPreview, storageSessionKey, myVotes]);
 
     const handleSelect = (optionId: string) => {
         if (hasSubmitted) return;
@@ -192,7 +197,7 @@ function PollSlide({ slide, role, isPreview }: SlideProps) {
 }
 
 function QuizSlide({ slide, role, isPreview }: SlideProps) {
-    const { sendMessage, state, voteResults, slideStartTime, serverTimeOffset } = useWebSocket();
+    const { sendMessage, state, voteResults, slideStartTime, serverTimeOffset, myVotes } = useWebSocket();
     const content = slide.content as QuizSlideContent;
     const [selectedOption, setSelectedOption] = useState<string | null>(null);
     const [timeLeft, setTimeLeft] = useState(content.timerDuration);
@@ -213,9 +218,14 @@ function QuizSlide({ slide, role, isPreview }: SlideProps) {
     useEffect(() => {
         if (role === 'student' && !isPreview) {
             const votedOption = localStorage.getItem(`voted_option_${storageSessionKey}_${slide.id}`);
-            if (votedOption) setSelectedOption(votedOption);
+            if (votedOption) {
+                setSelectedOption(votedOption);
+            } else if (myVotes[slide.id]?.length > 0) {
+                // Fallback to myVotes from backend (restored after app reopen)
+                setSelectedOption(myVotes[slide.id][0]);
+            }
         }
-    }, [slide.id, role, isPreview, storageSessionKey]);
+    }, [slide.id, role, isPreview, storageSessionKey, myVotes]);
 
     const handleVote = async (optionId: string) => {
         if (selectedOption) return;
@@ -334,7 +344,7 @@ function LeaderboardSlide() {
 }
 
 function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
-    const { sendMessage, voteResults } = useWebSocket();
+    const { sendMessage, voteResults, myVotes } = useWebSocket();
     const content = slide.content as MultipleChoiceSlideContent;
     const [selectedOptions, setSelectedOptions] = useState<string[]>([]);
     const [submitted, setSubmitted] = useState(false);
@@ -349,9 +359,13 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
                 if (votedOptions) {
                     try { setSelectedOptions(JSON.parse(votedOptions)); } catch (e) {}
                 }
+            } else if (myVotes[slide.id]?.length > 0) {
+                // Fallback to myVotes from backend (restored after app reopen)
+                setSubmitted(true);
+                setSelectedOptions(myVotes[slide.id]);
             }
         }
-    }, [slide.id, role, content.limitSubmissions, isPreview, storageSessionKey]);
+    }, [slide.id, role, content.limitSubmissions, isPreview, storageSessionKey, myVotes]);
 
     const handleSelect = (optionId: string) => {
         if (role !== 'student' || submitted) return;

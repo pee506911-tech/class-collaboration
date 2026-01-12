@@ -173,6 +173,7 @@ async fn main() -> anyhow::Result<()> {
         
         // Student interaction endpoints
         .route("/api/sessions/:id/vote", post(handlers::student::submit_vote))
+        .route("/api/sessions/:id/my-votes", get(handlers::student::get_my_votes))
         .route("/api/sessions/:id/questions", post(handlers::student::submit_question))
         .route("/api/sessions/:session_id/questions/:question_id/upvote",
             post(handlers::student::upvote_question))
