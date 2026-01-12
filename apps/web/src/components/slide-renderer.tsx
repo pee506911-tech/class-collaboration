@@ -25,6 +25,7 @@ interface SlideProps {
     slide: Slide;
     role: 'staff' | 'student' | 'projector';
     isPreview?: boolean;
+    sessionId?: string; // used for localStorage vote persistence per session
 }
 
 // Simple CSS-based slide transition (replaces framer-motion)
@@ -79,29 +80,18 @@ function PollSlide({ slide, role, isPreview }: SlideProps) {
     const content = slide.content as PollSlideContent;
     const [hasSubmitted, setHasSubmitted] = useState(false);
     const [selectedOption, setSelectedOption] = useState<string | null>(null);
-    const [windowPid, setWindowPid] = useState<string>('');
-    
-    // Initialize window-specific participantId on client only
-    useEffect(() => {
-        let pid = sessionStorage.getItem('windowParticipantId');
-        if (!pid) {
-            pid = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2);
-            sessionStorage.setItem('windowParticipantId', pid);
-        }
-        setWindowPid(pid);
-    }, []);
+    const storageSessionKey = (slide as any)?.sessionId || 'default';
 
     useEffect(() => {
-        if (!windowPid) return; // Wait for windowPid to be set
         if (role === 'student' && content.limitSubmissions !== false && !isPreview) {
-            const voted = sessionStorage.getItem(`voted_${slide.id}_${windowPid}`);
-            const votedOption = sessionStorage.getItem(`voted_option_${slide.id}_${windowPid}`);
+            const voted = localStorage.getItem(`voted_${storageSessionKey}_${slide.id}`);
+            const votedOption = localStorage.getItem(`voted_option_${storageSessionKey}_${slide.id}`);
             if (voted) {
                 setHasSubmitted(true);
                 if (votedOption) setSelectedOption(votedOption);
             }
         }
-    }, [slide.id, role, content.limitSubmissions, isPreview, windowPid]);
+    }, [slide.id, role, content.limitSubmissions, isPreview, storageSessionKey]);
 
     const handleSelect = (optionId: string) => {
         if (hasSubmitted) return;
@@ -109,11 +99,11 @@ function PollSlide({ slide, role, isPreview }: SlideProps) {
     };
 
     const handleSubmit = () => {
-        if (!selectedOption || hasSubmitted || !windowPid) return;
+        if (!selectedOption || hasSubmitted) return;
         sendMessage('SUBMIT_VOTE', { slideId: slide.id, optionId: selectedOption });
         if (content.limitSubmissions !== false) {
-            sessionStorage.setItem(`voted_${slide.id}_${windowPid}`, 'true');
-            sessionStorage.setItem(`voted_option_${slide.id}_${windowPid}`, selectedOption);
+            localStorage.setItem(`voted_${storageSessionKey}_${slide.id}`, 'true');
+            localStorage.setItem(`voted_option_${storageSessionKey}_${slide.id}`, selectedOption);
             setHasSubmitted(true);
         }
     };
@@ -206,17 +196,7 @@ function QuizSlide({ slide, role, isPreview }: SlideProps) {
     const content = slide.content as QuizSlideContent;
     const [selectedOption, setSelectedOption] = useState<string | null>(null);
     const [timeLeft, setTimeLeft] = useState(content.timerDuration);
-    const [windowPid, setWindowPid] = useState<string>('');
-
-    // Initialize window-specific participantId on client only
-    useEffect(() => {
-        let pid = sessionStorage.getItem('windowParticipantId');
-        if (!pid) {
-            pid = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2);
-            sessionStorage.setItem('windowParticipantId', pid);
-        }
-        setWindowPid(pid);
-    }, []);
+    const storageSessionKey = (slide as any)?.sessionId || 'default';
 
     useEffect(() => {
         if (!slideStartTime) return;
@@ -231,18 +211,17 @@ function QuizSlide({ slide, role, isPreview }: SlideProps) {
     }, [slideStartTime, serverTimeOffset, content.timerDuration]);
 
     useEffect(() => {
-        if (!windowPid) return;
         if (role === 'student' && !isPreview) {
-            const votedOption = sessionStorage.getItem(`voted_option_${slide.id}_${windowPid}`);
+            const votedOption = localStorage.getItem(`voted_option_${storageSessionKey}_${slide.id}`);
             if (votedOption) setSelectedOption(votedOption);
         }
-    }, [slide.id, role, isPreview, windowPid]);
+    }, [slide.id, role, isPreview, storageSessionKey]);
 
     const handleVote = async (optionId: string) => {
-        if (selectedOption || !windowPid) return;
+        if (selectedOption) return;
         setSelectedOption(optionId);
         sendMessage('SUBMIT_ANSWER', { slideId: slide.id, answer: optionId, timeRemaining: timeLeft });
-        sessionStorage.setItem(`voted_option_${slide.id}_${windowPid}`, optionId);
+        localStorage.setItem(`voted_option_${storageSessionKey}_${slide.id}`, optionId);
 
         const option = (content.options || []).find(o => o.id === optionId);
         if (option?.isCorrect) {
@@ -359,23 +338,12 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
     const content = slide.content as MultipleChoiceSlideContent;
     const [selectedOptions, setSelectedOptions] = useState<string[]>([]);
     const [submitted, setSubmitted] = useState(false);
-    const [windowPid, setWindowPid] = useState<string>('');
-
-    // Initialize window-specific participantId on client only
-    useEffect(() => {
-        let pid = sessionStorage.getItem('windowParticipantId');
-        if (!pid) {
-            pid = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2);
-            sessionStorage.setItem('windowParticipantId', pid);
-        }
-        setWindowPid(pid);
-    }, []);
+    const storageSessionKey = (slide as any)?.sessionId || 'default';
 
     useEffect(() => {
-        if (!windowPid) return;
         if (role === 'student' && content.limitSubmissions !== false && !isPreview) {
-            const voted = sessionStorage.getItem(`voted_${slide.id}_${windowPid}`);
-            const votedOptions = sessionStorage.getItem(`voted_options_${slide.id}_${windowPid}`);
+            const voted = localStorage.getItem(`voted_${storageSessionKey}_${slide.id}`);
+            const votedOptions = localStorage.getItem(`voted_options_${storageSessionKey}_${slide.id}`);
             if (voted) {
                 setSubmitted(true);
                 if (votedOptions) {
@@ -383,7 +351,7 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
                 }
             }
         }
-    }, [slide.id, role, content.limitSubmissions, isPreview, windowPid]);
+    }, [slide.id, role, content.limitSubmissions, isPreview, storageSessionKey]);
 
     const handleSelect = (optionId: string) => {
         if (role !== 'student' || submitted) return;
@@ -399,11 +367,11 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
     };
 
     const handleSubmit = () => {
-        if (selectedOptions.length === 0 || !windowPid) return;
+        if (selectedOptions.length === 0) return;
         sendMessage('SUBMIT_VOTE', { slideId: slide.id, optionIds: selectedOptions });
         if (content.limitSubmissions !== false) {
-            sessionStorage.setItem(`voted_${slide.id}_${windowPid}`, 'true');
-            sessionStorage.setItem(`voted_options_${slide.id}_${windowPid}`, JSON.stringify(selectedOptions));
+            localStorage.setItem(`voted_${storageSessionKey}_${slide.id}`, 'true');
+            localStorage.setItem(`voted_options_${storageSessionKey}_${slide.id}`, JSON.stringify(selectedOptions));
         }
         setSubmitted(true);
     };
@@ -491,17 +459,19 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
     );
 }
 
-export function SlideRenderer({ slide, role, isPreview }: SlideProps) {
+export function SlideRenderer({ slide, role, isPreview, sessionId }: SlideProps) {
+    // Attach sessionId to slide instance for storage keying where needed
+    const slideWithSession = { ...slide, sessionId };
     return (
         <SlideTransition slideId={slide.id}>
             {(() => {
                 switch (slide.type) {
                     // Key by slide.id so each slide remounts and state (like hasSubmitted) doesn't leak between slides
-                    case 'static': return <StaticSlide key={slide.id} slide={slide} role={role} isPreview={isPreview} />;
-                    case 'poll': return <PollSlide key={slide.id} slide={slide} role={role} isPreview={isPreview} />;
-                    case 'multiple-choice': return <MultipleChoiceSlide key={slide.id} slide={slide} role={role} isPreview={isPreview} />;
-                    case 'quiz': return <QuizSlide key={slide.id} slide={slide} role={role} isPreview={isPreview} />;
-                    case 'qa': return <QASlide key={slide.id} slide={slide} role={role} isPreview={isPreview} />;
+                    case 'static': return <StaticSlide key={slide.id} slide={slideWithSession} role={role} isPreview={isPreview} />;
+                    case 'poll': return <PollSlide key={slide.id} slide={slideWithSession} role={role} isPreview={isPreview} />;
+                    case 'multiple-choice': return <MultipleChoiceSlide key={slide.id} slide={slideWithSession} role={role} isPreview={isPreview} />;
+                    case 'quiz': return <QuizSlide key={slide.id} slide={slideWithSession} role={role} isPreview={isPreview} />;
+                    case 'qa': return <QASlide key={slide.id} slide={slideWithSession} role={role} isPreview={isPreview} />;
                     case 'leaderboard': return <LeaderboardSlide key={slide.id} />;
                     default: return <div>Unsupported slide type: {slide.type}</div>;
                 }

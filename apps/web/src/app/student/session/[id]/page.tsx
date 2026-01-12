@@ -24,7 +24,7 @@ async function getSessionByToken(token: string): Promise<any> {
     return json.data;
 }
 
-function StudentSlideView({ slideId, slides }: { slideId: string; slides: Slide[] }) {
+function StudentSlideView({ slideId, slides, sessionId }: { slideId: string; slides: Slide[]; sessionId: string }) {
     const [slide, setSlide] = useState<Slide | null>(null);
 
     useEffect(() => {
@@ -34,7 +34,7 @@ function StudentSlideView({ slideId, slides }: { slideId: string; slides: Slide[
 
     if (!slide) return <LoadingState message="Loading slide..." size="sm" />;
 
-    return <SlideRenderer slide={slide} role="student" />;
+    return <SlideRenderer slide={slide} role="student" sessionId={sessionId} />;
 }
 
 function ConnectedStudentView({ session, shareToken }: { session: Session & { slides: Slide[]; isPresentationActive?: boolean; allowQuestions?: boolean }; shareToken: string }) {
@@ -143,7 +143,7 @@ function ConnectedStudentView({ session, shareToken }: { session: Session & { sl
 
                 {state?.currentSlideId ? (
                     <div className="h-full">
-                        <StudentSlideView slideId={state.currentSlideId} slides={slides} />
+                        <StudentSlideView slideId={state.currentSlideId} slides={slides} sessionId={shareToken} />
                     </div>
                 ) : (
                     <Card className="shadow-md">
