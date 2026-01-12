@@ -266,8 +266,9 @@ export default function StudentSession() {
         if (id) {
             getSessionByToken(id).then(data => {
                 setSession(data);
-                // Use sessionStorage for window-specific name (allows testing multiple students)
-                const storedName = sessionStorage.getItem(`studentName_${id}`);
+                // Prefer window-specific name; fall back to browser-persisted name so returning users skip the prompt
+                const sessionKey = `studentName_${id}`;
+                const storedName = sessionStorage.getItem(sessionKey) || localStorage.getItem(sessionKey);
 
                 if (storedName && storedName.trim()) {
                     setStudentName(storedName);
@@ -292,8 +293,10 @@ export default function StudentSession() {
         // Simulate small delay for UX
         setTimeout(() => {
             if (studentName.trim()) {
-                // Use sessionStorage for window-specific name
-                sessionStorage.setItem(`studentName_${id}`, studentName);
+                // Persist for this window and for future visits in this browser
+                const sessionKey = `studentName_${id}`;
+                sessionStorage.setItem(sessionKey, studentName);
+                localStorage.setItem(sessionKey, studentName);
             }
             setHasJoined(true);
             setJoining(false);
