@@ -475,7 +475,8 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
 
 export function SlideRenderer({ slide, role, isPreview, sessionId }: SlideProps) {
     // Attach sessionId to slide instance for storage keying where needed
-    const slideWithSession = { ...slide, sessionId };
+    // Use 'default' as fallback to ensure type safety
+    const slideWithSession = { ...slide, sessionId: sessionId || 'default' };
     return (
         <SlideTransition slideId={slide.id}>
             {(() => {
