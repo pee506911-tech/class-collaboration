@@ -90,11 +90,25 @@ function PollSlide({ slide, role, isPreview }: SlideProps) {
             const votedOption = localStorage.getItem(`voted_option_${voteKeyPrefix}_${slide.id}`);
             if (voted) {
                 setHasSubmitted(true);
-                if (votedOption) setSelectedOption(votedOption);
+                if (votedOption) {
+                    setSelectedOption(votedOption);
+                    console.log('[DEBUG] PollSlide restore from localStorage', {
+                        slideId: slide.id,
+                        participantId,
+                        voteKeyPrefix,
+                        optionId: votedOption
+                    });
+                }
             } else if (myVotes[slide.id]?.length > 0) {
                 // Fallback to myVotes from backend (restored after app reopen)
                 setHasSubmitted(true);
                 setSelectedOption(myVotes[slide.id][0]);
+                console.log('[DEBUG] PollSlide restore from my-votes', {
+                    slideId: slide.id,
+                    participantId,
+                    voteKeyPrefix,
+                    optionIds: myVotes[slide.id]
+                });
             }
         }
     }, [slide.id, role, content.limitSubmissions, isPreview, voteKeyPrefix, myVotes]);
@@ -222,9 +236,21 @@ function QuizSlide({ slide, role, isPreview }: SlideProps) {
             const votedOption = localStorage.getItem(`voted_option_${voteKeyPrefix}_${slide.id}`);
             if (votedOption) {
                 setSelectedOption(votedOption);
+                console.log('[DEBUG] QuizSlide restore from localStorage', {
+                    slideId: slide.id,
+                    participantId,
+                    voteKeyPrefix,
+                    optionId: votedOption
+                });
             } else if (myVotes[slide.id]?.length > 0) {
                 // Fallback to myVotes from backend (restored after app reopen)
                 setSelectedOption(myVotes[slide.id][0]);
+                console.log('[DEBUG] QuizSlide restore from my-votes', {
+                    slideId: slide.id,
+                    participantId,
+                    voteKeyPrefix,
+                    optionIds: myVotes[slide.id]
+                });
             }
         }
     }, [slide.id, role, isPreview, voteKeyPrefix, myVotes]);
@@ -361,11 +387,23 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
                 setSubmitted(true);
                 if (votedOptions) {
                     try { setSelectedOptions(JSON.parse(votedOptions)); } catch (e) {}
+                    console.log('[DEBUG] MultipleChoiceSlide restore from localStorage', {
+                        slideId: slide.id,
+                        participantId,
+                        voteKeyPrefix,
+                        optionIds: votedOptions
+                    });
                 }
             } else if (myVotes[slide.id]?.length > 0) {
                 // Fallback to myVotes from backend (restored after app reopen)
                 setSubmitted(true);
                 setSelectedOptions(myVotes[slide.id]);
+                console.log('[DEBUG] MultipleChoiceSlide restore from my-votes', {
+                    slideId: slide.id,
+                    participantId,
+                    voteKeyPrefix,
+                    optionIds: myVotes[slide.id]
+                });
             }
         }
     }, [slide.id, role, content.limitSubmissions, isPreview, voteKeyPrefix, myVotes]);
