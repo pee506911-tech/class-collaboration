@@ -273,8 +273,12 @@ export default function StudentSession() {
                 const storedName = windowName || browserName;
 
                 if (storedName && storedName.trim()) {
-                    setStudentName(storedName);
-                    setHasJoined(true);
+                    const normalizedName = storedName.trim();
+                    const isAnonymous = normalizedName.toLowerCase() === 'anonymous';
+                    if (!data.requireName || !isAnonymous) {
+                        setStudentName(normalizedName);
+                        setHasJoined(true);
+                    }
                 } else if (data.requireName === false) {
                     setHasJoined(true);
                 }
@@ -286,19 +290,22 @@ export default function StudentSession() {
         }
     }, [id]);
 
+    const trimmedName = studentName.trim();
+    const isAnonymousName = trimmedName.toLowerCase() === 'anonymous';
+
     const handleJoin = (e: React.FormEvent) => {
         e.preventDefault();
         if (!session) return;
-        if (session.requireName && !studentName.trim()) return;
+        if (session.requireName && (!trimmedName || isAnonymousName)) return;
 
         setJoining(true);
         // Simulate small delay for UX
         setTimeout(() => {
-            if (studentName.trim()) {
+            if (trimmedName) {
                 // Persist for this window and for future visits in this browser
                 const sessionKey = `studentName_${id}`;
-                sessionStorage.setItem(sessionKey, studentName);
-                localStorage.setItem(sessionKey, studentName);
+                sessionStorage.setItem(sessionKey, trimmedName);
+                localStorage.setItem(sessionKey, trimmedName);
             }
             setHasJoined(true);
             setJoining(false);
@@ -361,7 +368,7 @@ export default function StudentSession() {
                             <Button
                                 type="submit"
                                 className="w-full h-12 text-base font-semibold bg-blue-600 hover:bg-blue-700 shadow-lg shadow-blue-600/20 transition-all hover:-translate-y-0.5"
-                                disabled={joining || (session.requireName && !studentName.trim())}
+                                disabled={joining || (session.requireName && (!trimmedName || isAnonymousName))}
                             >
                                 {joining ? (
                                     <>

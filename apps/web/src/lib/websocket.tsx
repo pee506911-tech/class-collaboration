@@ -291,14 +291,19 @@ export function WebSocketProvider({
                     console.error('[DEBUG] Failed to fetch previous votes:', e);
                 }
                 
-                fetch(`${apiBase}/sessions/${sessionId}/register-participant`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        participantId: participantIdRef.current,
-                        name: name || 'Anonymous'
-                    })
-                }).catch(() => { });
+                // Only register participant if they have a name
+                // When requireName is true, students must provide a name before joining
+                // When requireName is false, we still register them but only if they provided a name
+                if (name && name.trim()) {
+                    fetch(`${apiBase}/sessions/${sessionId}/register-participant`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            participantId: participantIdRef.current,
+                            name: name.trim()
+                        })
+                    }).catch(() => { });
+                }
             }
         };
 

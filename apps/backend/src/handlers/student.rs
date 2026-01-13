@@ -210,19 +210,39 @@ pub async fn register_participant(
     let pool = app_state.db_pool.pool().await?;
     
     let name = payload.name.trim();
-    if name.is_empty() {
-        return Err(AppError::Input("Name cannot be empty".to_string()));
+    
+    // Check if session exists and get require_name setting
+    let session_info: Option<(bool,)> = sqlx::query_as(
+        "SELECT require_name FROM sessions WHERE id = ?"
+    )
+    .bind(&session_id)
+    .fetch_optional(&pool)
+    .await?;
+    
+    let require_name = match session_info {
+        Some((require_name,)) => require_name,
+        None => return Err(AppError::NotFound("Session not found".to_string())),
+    };
+    
+    // If session requires name, reject empty names
+    let is_anonymous = name.eq_ignore_ascii_case("anonymous");
+    if require_name && (name.is_empty() || is_anonymous) {
+        tracing::warn!("Participant registration rejected: empty name for session {} which requires name", session_id);
+        return Err(AppError::Input("Name is required for this session".to_string()));
     }
+    
+    // If name is empty and not required, don't register (just return success)
+    if name.is_empty() {
+        return Ok(Json(ApiResponse::success(serde_json::json!({ 
+            "message": "Participant joined anonymously",
+            "participantId": payload.participant_id
+        }))));
+    }
+    
     if name.len() > MAX_NAME_LENGTH {
         return Err(AppError::Input(format!("Name too long (max {} characters)", MAX_NAME_LENGTH)));
     }
     let sanitized_name = name.replace('<', "&lt;").replace('>', "&gt;");
-
-    let session_exists: Option<bool> = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)")
-        .bind(&session_id).fetch_optional(&pool).await?;
-    if session_exists != Some(true) {
-        return Err(AppError::NotFound("Session not found".to_string()));
-    }
 
     Participant::create(&pool, &payload.participant_id, &session_id, &sanitized_name).await?;
 
