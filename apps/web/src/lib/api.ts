@@ -21,16 +21,26 @@ async function fetchWithRetry(
     let lastError: Error | null = null;
     
     for (let attempt = 0; attempt <= retries; attempt++) {
+        let abortListener: (() => void) | null = null;
+        let timeoutId: ReturnType<typeof setTimeout> | null = null;
+        const controller = new AbortController();
+
         try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
+            if (options.signal) {
+                if (options.signal.aborted) {
+                    controller.abort();
+                } else {
+                    abortListener = () => controller.abort();
+                    options.signal.addEventListener('abort', abortListener);
+                }
+            }
+
+            timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
             
             const response = await fetch(url, {
                 ...options,
                 signal: controller.signal,
             });
-            
-            clearTimeout(timeoutId);
             
             // Retry on 503 (service unavailable - cold start)
             if (response.status === 503 && attempt < retries) {
@@ -44,18 +54,29 @@ async function fetchWithRetry(
             }
             
             return response;
-        } catch (error: any) {
-            lastError = error;
+        } catch (error: unknown) {
+            const errorName = error instanceof Error ? error.name : '';
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            lastError = error instanceof Error ? error : new Error(errorMessage);
+
+            if (options.signal?.aborted) {
+                throw lastError;
+            }
             
             // Retry on network errors or timeouts
-            if (attempt < retries && (error.name === 'AbortError' || error.name === 'TypeError')) {
+            if (attempt < retries && (errorName === 'AbortError' || errorName === 'TypeError')) {
                 const delay = Math.min(
                     RETRY_CONFIG.baseDelay * Math.pow(2, attempt),
                     RETRY_CONFIG.maxDelay
                 );
-                console.log(`Request failed, retrying in ${delay}ms...`, error.message);
+                console.log(`Request failed, retrying in ${delay}ms...`, errorMessage);
                 await sleep(delay);
                 continue;
+            }
+        } finally {
+            if (timeoutId) clearTimeout(timeoutId);
+            if (abortListener && options.signal) {
+                options.signal.removeEventListener('abort', abortListener);
             }
         }
     }
@@ -68,6 +89,46 @@ function getHeaders(): HeadersInit {
     const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
     if (token) headers['Authorization'] = `Bearer ${token}`;
     return headers;
+}
+
+export type SharedSlide = Slide & {
+    stats?: {
+        votes?: Record<string, number>;
+    };
+};
+
+export type SharedSessionData = {
+    id: string;
+    title: string;
+    status: string;
+    createdAt: string;
+    slides: SharedSlide[];
+    questions: Array<{
+        id: string;
+        content: string;
+        upvotes: number;
+        createdAt: string;
+        slideId?: string;
+    }>;
+    participants: Array<{
+        id: string;
+        name: string;
+        joinedAt: string;
+    }>;
+};
+
+export async function getSharedSession(token: string, options?: { signal?: AbortSignal }): Promise<SharedSessionData> {
+    const res = await fetchWithRetry(`${API_URL}/share/${encodeURIComponent(token)}`, {
+        method: 'GET',
+        signal: options?.signal,
+    });
+
+    if (res.status === 404) throw new Error('Session not found');
+    if (!res.ok) throw new Error('Failed to load session');
+
+    const json: ApiResponse<SharedSessionData> = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to load session');
+    return json.data;
 }
 
 export async function login(email: string, password: string) {
@@ -189,7 +250,7 @@ export async function getSlides(sessionId: string): Promise<Slide[]> {
     return json.data;
 }
 
-export async function createSlide(sessionId: string, type: string, content: any): Promise<Slide> {
+export async function createSlide(sessionId: string, type: string, content: unknown): Promise<Slide> {
     const res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides`, {
         method: 'POST',
         headers: getHeaders(),
@@ -201,7 +262,7 @@ export async function createSlide(sessionId: string, type: string, content: any)
     return json.data;
 }
 
-export async function updateSlide(sessionId: string, slideId: string, content: any): Promise<void> {
+export async function updateSlide(sessionId: string, slideId: string, content: unknown): Promise<void> {
     const res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides/${slideId}`, {
         method: 'PUT',
         headers: getHeaders(),
