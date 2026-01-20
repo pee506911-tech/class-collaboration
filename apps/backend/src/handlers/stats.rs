@@ -130,35 +130,66 @@ pub async fn get_session_stats(
         return Err(AppError::Auth("Unauthorized access to session".to_string()));
     }
 
-    // Get slides for this session
-    let slides = query_as::<_, Slide>(
+    // Run independent reads in parallel to reduce tail latency
+    let slides_fut = query_as::<_, Slide>(
         "SELECT * FROM slides WHERE session_id = ? ORDER BY order_index"
     )
     .bind(&id)
-    .fetch_all(&pool)
-    .await?;
+    .fetch_all(&pool);
 
-    // Get vote counts per slide and option
-    let vote_counts: Vec<VoteCount> = sqlx::query_as(
-        "SELECT slide_id, option_id, COUNT(*) as count FROM votes WHERE session_id = ? GROUP BY slide_id, option_id"
-    )
-    .bind(&id)
-    .fetch_all(&pool)
-    .await
-    .unwrap_or_default();
+    let vote_counts_fut = async {
+        sqlx::query_as::<_, VoteCount>(
+            "SELECT slide_id, option_id, COUNT(*) as count FROM votes WHERE session_id = ? GROUP BY slide_id, option_id"
+        )
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default()
+    };
 
-    // Get vote interactions with participant names
-    let vote_interactions: Vec<VoteInteraction> = sqlx::query_as(
-        "SELECT v.slide_id, v.option_id, COALESCE(p.name, 'Anonymous') as participant_name, v.created_at 
-         FROM votes v 
-         LEFT JOIN participants p ON v.participant_id = p.id AND v.session_id = p.session_id
-         WHERE v.session_id = ?
-         ORDER BY v.created_at DESC"
-    )
-    .bind(&id)
-    .fetch_all(&pool)
-    .await
-    .unwrap_or_default();
+    let vote_interactions_fut = async {
+        sqlx::query_as::<_, VoteInteraction>(
+            "SELECT v.slide_id, v.option_id, COALESCE(p.name, 'Anonymous') as participant_name, v.created_at 
+             FROM votes v 
+             LEFT JOIN participants p ON v.participant_id = p.id AND v.session_id = p.session_id
+             WHERE v.session_id = ?
+             ORDER BY v.created_at DESC"
+        )
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default()
+    };
+
+    let participants_fut = async {
+        sqlx::query_as::<_, DbParticipant>(
+            "SELECT id, name, joined_at FROM participants WHERE session_id = ? ORDER BY joined_at DESC"
+        )
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default()
+    };
+
+    let questions_fut = async {
+        sqlx::query_as::<_, DbQuestionWithAuthor>(
+            "SELECT q.id, q.content, q.upvotes, q.participant_id, q.created_at, q.slide_id,
+                    COALESCE(p.name, 'Anonymous') as author_name
+             FROM questions q 
+             LEFT JOIN participants p ON q.participant_id = p.id AND q.session_id = p.session_id
+             WHERE q.session_id = ? 
+             ORDER BY q.upvotes DESC, q.created_at DESC"
+        )
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default()
+    };
+
+    let (slides, vote_counts, vote_interactions, db_participants, questions) =
+        tokio::join!(slides_fut, vote_counts_fut, vote_interactions_fut, participants_fut, questions_fut);
+
+    let slides = slides?;
 
     // Build vote maps
     let mut vote_map: HashMap<String, HashMap<String, i32>> = HashMap::new();
@@ -219,44 +250,20 @@ pub async fn get_session_stats(
         }
     }).collect();
 
-    // Get participants
-    let db_participants: Vec<DbParticipant> = sqlx::query_as(
-        "SELECT id, name, joined_at FROM participants WHERE session_id = ? ORDER BY joined_at DESC"
-    )
-    .bind(&id)
-    .fetch_all(&pool)
-    .await
-    .unwrap_or_default();
-
     let participants: Vec<Participant> = db_participants.into_iter().map(|p| Participant {
         id: p.id,
         name: p.name,
         joined_at: p.joined_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
     }).collect();
 
-    // Get questions with author names in a single query (fixes N+1)
-    let questions: Vec<Question> = sqlx::query_as::<_, DbQuestionWithAuthor>(
-        "SELECT q.id, q.content, q.upvotes, q.participant_id, q.created_at, q.slide_id,
-                COALESCE(p.name, 'Anonymous') as author_name
-         FROM questions q 
-         LEFT JOIN participants p ON q.participant_id = p.id AND q.session_id = p.session_id
-         WHERE q.session_id = ? 
-         ORDER BY q.upvotes DESC, q.created_at DESC"
-    )
-    .bind(&id)
-    .fetch_all(&pool)
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(|q| Question {
+    let questions: Vec<Question> = questions.into_iter().map(|q| Question {
         id: q.id,
         content: q.content,
         upvotes: q.upvotes,
         author: q.author_name,
         created_at: q.created_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
         slide_id: q.slide_id,
-    })
-    .collect();
+    }).collect();
 
     Ok(Json(SessionStats {
         participants,
@@ -279,35 +286,65 @@ pub async fn get_public_session_stats(
         .await?
         .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
 
-    // Get slides for this session (only non-hidden)
-    let slides = query_as::<_, Slide>(
+    let slides_fut = query_as::<_, Slide>(
         "SELECT * FROM slides WHERE session_id = ? AND is_hidden = FALSE ORDER BY order_index"
     )
     .bind(&id)
-    .fetch_all(&pool)
-    .await?;
+    .fetch_all(&pool);
 
-    // Get vote counts per slide and option
-    let vote_counts: Vec<VoteCount> = sqlx::query_as(
-        "SELECT slide_id, option_id, COUNT(*) as count FROM votes WHERE session_id = ? GROUP BY slide_id, option_id"
-    )
-    .bind(&id)
-    .fetch_all(&pool)
-    .await
-    .unwrap_or_default();
+    let vote_counts_fut = async {
+        sqlx::query_as::<_, VoteCount>(
+            "SELECT slide_id, option_id, COUNT(*) as count FROM votes WHERE session_id = ? GROUP BY slide_id, option_id"
+        )
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default()
+    };
 
-    // Get vote interactions with participant names for public dashboard
-    let vote_interactions: Vec<VoteInteraction> = sqlx::query_as(
-        "SELECT v.slide_id, v.option_id, COALESCE(p.name, 'Anonymous') as participant_name, v.created_at 
-         FROM votes v 
-         LEFT JOIN participants p ON v.participant_id = p.id AND v.session_id = p.session_id
-         WHERE v.session_id = ?
-         ORDER BY v.created_at DESC"
-    )
-    .bind(&id)
-    .fetch_all(&pool)
-    .await
-    .unwrap_or_default();
+    let vote_interactions_fut = async {
+        sqlx::query_as::<_, VoteInteraction>(
+            "SELECT v.slide_id, v.option_id, COALESCE(p.name, 'Anonymous') as participant_name, v.created_at 
+             FROM votes v 
+             LEFT JOIN participants p ON v.participant_id = p.id AND v.session_id = p.session_id
+             WHERE v.session_id = ?
+             ORDER BY v.created_at DESC"
+        )
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default()
+    };
+
+    let participants_fut = async {
+        sqlx::query_as::<_, DbParticipant>(
+            "SELECT id, name, joined_at FROM participants WHERE session_id = ? ORDER BY joined_at DESC"
+        )
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default()
+    };
+
+    let questions_fut = async {
+        sqlx::query_as::<_, DbQuestionWithAuthor>(
+            "SELECT q.id, q.content, q.upvotes, q.participant_id, q.created_at, q.slide_id,
+                    COALESCE(p.name, 'Anonymous') as author_name
+             FROM questions q 
+             LEFT JOIN participants p ON q.participant_id = p.id AND q.session_id = p.session_id
+             WHERE q.session_id = ? 
+             ORDER BY q.upvotes DESC, q.created_at DESC"
+        )
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default()
+    };
+
+    let (slides, vote_counts, vote_interactions, db_participants, questions) =
+        tokio::join!(slides_fut, vote_counts_fut, vote_interactions_fut, participants_fut, questions_fut);
+
+    let slides = slides?;
 
     // Build vote maps
     let mut vote_map: HashMap<String, HashMap<String, i32>> = HashMap::new();
@@ -366,44 +403,20 @@ pub async fn get_public_session_stats(
         }
     }).collect();
 
-    // Get participants
-    let db_participants: Vec<DbParticipant> = sqlx::query_as(
-        "SELECT id, name, joined_at FROM participants WHERE session_id = ? ORDER BY joined_at DESC"
-    )
-    .bind(&id)
-    .fetch_all(&pool)
-    .await
-    .unwrap_or_default();
-
     let participants: Vec<Participant> = db_participants.into_iter().map(|p| Participant {
         id: p.id,
         name: p.name,
         joined_at: p.joined_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
     }).collect();
 
-    // Get questions with author names
-    let questions: Vec<Question> = sqlx::query_as::<_, DbQuestionWithAuthor>(
-        "SELECT q.id, q.content, q.upvotes, q.participant_id, q.created_at, q.slide_id,
-                COALESCE(p.name, 'Anonymous') as author_name
-         FROM questions q 
-         LEFT JOIN participants p ON q.participant_id = p.id AND q.session_id = p.session_id
-         WHERE q.session_id = ? 
-         ORDER BY q.upvotes DESC, q.created_at DESC"
-    )
-    .bind(&id)
-    .fetch_all(&pool)
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(|q| Question {
+    let questions: Vec<Question> = questions.into_iter().map(|q| Question {
         id: q.id,
         content: q.content,
         upvotes: q.upvotes,
         author: q.author_name,
         created_at: q.created_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
         slide_id: q.slide_id,
-    })
-    .collect();
+    }).collect();
 
     Ok(Json(SessionStats {
         participants,

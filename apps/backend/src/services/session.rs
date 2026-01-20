@@ -214,10 +214,13 @@ impl SessionService {
         let session = self.repository.find_by_share_token(token).await?
             .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
 
-        let slides = self.repository.get_slides(&session.id).await?;
-        let questions = self.repository.get_questions(&session.id).await?;
-        let participants = self.repository.get_participants(&session.id).await?;
-        let vote_counts_raw = self.repository.get_vote_counts(&session.id).await?;
+        let slides_fut = self.repository.get_slides(&session.id);
+        let questions_fut = self.repository.get_questions(&session.id);
+        let participants_fut = self.repository.get_participants(&session.id);
+        let vote_counts_fut = self.repository.get_vote_counts(&session.id);
+
+        let (slides, questions, participants, vote_counts_raw) =
+            tokio::try_join!(slides_fut, questions_fut, participants_fut, vote_counts_fut)?;
 
         // Process vote counts
         let mut vote_map: std::collections::HashMap<String, std::collections::HashMap<String, i32>> = std::collections::HashMap::new();
@@ -249,9 +252,12 @@ impl SessionService {
         let session = self.repository.find_by_id(session_id).await?
              .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
 
-        let slides = self.repository.get_slides(session_id).await?;
-        let questions = self.repository.get_questions(session_id).await?;
-        let vote_counts_raw = self.repository.get_vote_counts(session_id).await?;
+        let slides_fut = self.repository.get_slides(session_id);
+        let questions_fut = self.repository.get_questions(session_id);
+        let vote_counts_fut = self.repository.get_vote_counts(session_id);
+
+        let (slides, questions, vote_counts_raw) =
+            tokio::try_join!(slides_fut, questions_fut, vote_counts_fut)?;
 
         let mut vote_counts: std::collections::HashMap<String, std::collections::HashMap<String, i32>> = std::collections::HashMap::new();
         for (slide_id, option_id, count) in vote_counts_raw {

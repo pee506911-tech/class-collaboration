@@ -1,5 +1,5 @@
 use axum::{extract::{State, Path}, Json};
-use sqlx::{query_as, query};
+use sqlx::{query_as, query, MySql};
 use uuid::Uuid;
 
 use crate::error::{AppError, Result};
@@ -139,14 +139,29 @@ pub async fn reorder_slides(
     let pool = app_state.db_pool.pool().await?;
     verify_session_ownership(&pool, &session_id, &user_id).await?;
 
-    for (index, slide_id) in payload.slide_ids.iter().enumerate() {
-        query("UPDATE slides SET order_index = ? WHERE id = ? AND session_id = ?")
-            .bind(index as i32)
-            .bind(slide_id)
-            .bind(&session_id)
-            .execute(&pool)
-            .await?;
+    if payload.slide_ids.is_empty() {
+        return Err(AppError::Input("No slides to reorder".to_string()));
     }
+
+    let mut qb = sqlx::QueryBuilder::<MySql>::new("UPDATE slides SET order_index = CASE id ");
+    for (index, slide_id) in payload.slide_ids.iter().enumerate() {
+        qb.push("WHEN ");
+        qb.push_bind(slide_id);
+        qb.push(" THEN ");
+        qb.push_bind(index as i32);
+        qb.push(" ");
+    }
+    qb.push("ELSE order_index END WHERE session_id = ");
+    qb.push_bind(&session_id);
+    qb.push(" AND id IN (");
+    let mut separated = qb.separated(", ");
+    for slide_id in &payload.slide_ids {
+        separated.push_bind(slide_id);
+    }
+    drop(separated);
+    qb.push(")");
+
+    qb.build().execute(&pool).await?;
 
     Ok(Json(ApiResponse::success(serde_json::json!({ "message": "Slides reordered successfully" }))))
 }

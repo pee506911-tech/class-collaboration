@@ -3,6 +3,8 @@ use sqlx::FromRow;
 use chrono::{DateTime, Utc};
 use crate::db::DbPool;
 use crate::error::Result;
+use uuid::Uuid;
+use sqlx::MySql;
 
 // ============================================
 // Participant Model
@@ -116,6 +118,36 @@ impl Vote {
             option_id: option_id.to_string(),
             created_at: Some(Utc::now()),
         })
+    }
+
+    pub async fn create_many(
+        pool: &DbPool,
+        session_id: &str,
+        slide_id: &str,
+        participant_id: &str,
+        option_ids: &[String],
+    ) -> Result<()> {
+        if option_ids.is_empty() {
+            return Ok(());
+        }
+
+        let mut query = sqlx::QueryBuilder::<MySql>::new(
+            "INSERT INTO votes (id, session_id, slide_id, participant_id, option_id) "
+        );
+
+        query.push_values(option_ids.iter(), |mut row, option_id| {
+            let vote_id = Uuid::new_v4().to_string();
+            row.push_bind(vote_id);
+            row.push_bind(session_id);
+            row.push_bind(slide_id);
+            row.push_bind(participant_id);
+            row.push_bind(option_id);
+        });
+
+        query.push(" ON DUPLICATE KEY UPDATE option_id = VALUES(option_id)");
+
+        query.build().execute(pool).await?;
+        Ok(())
     }
 
     pub async fn find_by_slide(pool: &DbPool, slide_id: &str) -> Result<Vec<Self>> {

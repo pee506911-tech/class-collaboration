@@ -69,17 +69,26 @@ pub async fn submit_vote(
         }
     }
 
-    for option_id in &option_ids {
-        let vote_id = Uuid::new_v4().to_string();
-        if let Err(e) = Vote::create(&pool, &vote_id, &session_id, &payload.slide_id, &payload.participant_id, option_id).await {
-            tracing::error!("Failed to insert vote: {:?}", e);
-            return Err(AppError::Internal(format!("Failed to save vote: {}", e)));
-        }
-    }
+    Vote::create_many(
+        &pool,
+        &session_id,
+        &payload.slide_id,
+        &payload.participant_id,
+        &option_ids,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to insert votes: {:?}", e);
+        AppError::Internal(format!("Failed to save vote: {}", e))
+    })?;
 
     let vote_counts = Vote::get_vote_counts(&pool, &payload.slide_id).await.unwrap_or_default();
     let results: HashMap<String, i32> = vote_counts.into_iter().map(|(option_id, count)| (option_id, count as i32)).collect();
-    publish_vote_update(&session_id, &payload.slide_id, &results).await;
+    let session_id_for_publish = session_id.clone();
+    let slide_id_for_publish = payload.slide_id.clone();
+    tokio::spawn(async move {
+        publish_vote_update(&session_id_for_publish, &slide_id_for_publish, &results).await;
+    });
 
     Ok(Json(ApiResponse::success(serde_json::json!({ "message": "Vote submitted successfully" }))))
 }
@@ -149,7 +158,10 @@ pub async fn submit_question(
         .await.map_err(|e| AppError::Internal(format!("Failed to save question: {}", e)))?;
 
     let all_questions = Question::find_by_session(&pool, &session_id).await.unwrap_or_default();
-    publish_qa_update(&session_id, &all_questions).await;
+    let session_id_for_publish = session_id.clone();
+    tokio::spawn(async move {
+        publish_qa_update(&session_id_for_publish, &all_questions).await;
+    });
 
     Ok(Json(ApiResponse::success(question.into())))
 }
@@ -188,7 +200,10 @@ pub async fn upvote_question(
 
     let new_upvotes = Question::upvote(&pool, &question_id).await?;
     let all_questions = Question::find_by_session(&pool, &session_id).await.unwrap_or_default();
-    publish_qa_update(&session_id, &all_questions).await;
+    let session_id_for_publish = session_id.clone();
+    tokio::spawn(async move {
+        publish_qa_update(&session_id_for_publish, &all_questions).await;
+    });
 
     Ok(Json(ApiResponse::success(serde_json::json!({ "message": "Question upvoted", "upvotes": new_upvotes }))))
 }

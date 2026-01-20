@@ -1,7 +1,7 @@
 use sqlx::mysql::MySqlPoolOptions;
 use sqlx::{MySql, Pool};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use crate::error::{AppError, Result};
 
@@ -13,6 +13,7 @@ pub struct LazyDbPool {
     pool: Arc<RwLock<Option<DbPool>>>,
     ready: Arc<AtomicBool>,
     error: Arc<RwLock<Option<String>>>,
+    notify: Arc<Notify>,
 }
 
 impl LazyDbPool {
@@ -21,6 +22,7 @@ impl LazyDbPool {
             pool: Arc::new(RwLock::new(None)),
             ready: Arc::new(AtomicBool::new(false)),
             error: Arc::new(RwLock::new(None)),
+            notify: Arc::new(Notify::new()),
         }
     }
 
@@ -46,21 +48,23 @@ impl LazyDbPool {
             return Ok(pool);
         }
 
-        // Wait for initialization (with timeout)
-        let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(30);
-        
-        while start.elapsed() < timeout {
-            if let Some(err) = self.error.read().await.clone() {
-                return Err(AppError::Internal(err));
+
+        let wait_for_ready = async {
+            loop {
+                if let Some(err) = self.error.read().await.clone() {
+                    return Err(AppError::Internal(err));
+                }
+                if let Some(pool) = self.pool.read().await.clone() {
+                    return Ok(pool);
+                }
+                self.notify.notified().await;
             }
-            if let Some(pool) = self.pool.read().await.clone() {
-                return Ok(pool);
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        
-        Err(AppError::Internal("Database connection timeout".to_string()))
+        };
+
+        tokio::time::timeout(timeout, wait_for_ready)
+            .await
+            .map_err(|_| AppError::Internal("Database connection timeout".to_string()))?
     }
 
     /// Initialize the pool in the background
@@ -72,12 +76,14 @@ impl LazyDbPool {
                 Ok(pool) => {
                     *self.pool.write().await = Some(pool);
                     self.ready.store(true, Ordering::SeqCst);
+                    self.notify.notify_waiters();
                     tracing::info!("Database ready!");
                 }
                 Err(e) => {
                     let err_msg = format!("Database init failed: {}", e);
                     tracing::error!("{}", err_msg);
                     *self.error.write().await = Some(err_msg);
+                    self.notify.notify_waiters();
                 }
             }
         });

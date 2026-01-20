@@ -69,7 +69,10 @@ pub async fn register(
         return Err(AppError::Input("Invalid email format".to_string()));
     }
 
-    let password_hash = hash(payload.password, DEFAULT_COST)?;
+    let password = payload.password;
+    let password_hash = tokio::task::spawn_blocking(move || hash(password, DEFAULT_COST))
+        .await
+        .map_err(|e| AppError::Internal(format!("Password hash task failed: {}", e)))??;
     let id = Uuid::new_v4().to_string();
     let role = payload.role.unwrap_or_else(|| "student".to_string());
 
@@ -112,7 +115,13 @@ pub async fn login(
         .await?
         .ok_or_else(|| AppError::Auth("Invalid email or password".to_string()))?;
 
-    if !verify(payload.password, &user.password_hash)? {
+    let password = payload.password;
+    let password_hash = user.password_hash.clone();
+    let is_valid = tokio::task::spawn_blocking(move || verify(password, &password_hash))
+        .await
+        .map_err(|e| AppError::Internal(format!("Password verify task failed: {}", e)))??;
+
+    if !is_valid {
         return Err(AppError::Auth("Invalid email or password".to_string()));
     }
 

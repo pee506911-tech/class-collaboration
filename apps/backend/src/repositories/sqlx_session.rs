@@ -8,6 +8,23 @@ use crate::repositories::session::{NewSession, SessionRepository, SessionUpdates
 use crate::models::slide::Slide;
 use crate::models::student::{Question, Participant};
 
+#[derive(sqlx::FromRow)]
+struct SessionWithSlideCountRow {
+    id: String,
+    creator_id: String,
+    title: String,
+    status: String,
+    share_token: Option<String>,
+    current_slide_id: Option<String>,
+    is_results_visible: bool,
+    is_presentation_active: bool,
+    allow_questions: bool,
+    require_name: bool,
+    created_at: Option<chrono::DateTime<chrono::Utc>>,
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    slide_count: i64,
+}
+
 /// SQLx implementation of SessionRepository
 /// This is the Infrastructure Layer - it knows about databases
 pub struct SqlxSessionRepository {
@@ -53,26 +70,58 @@ impl SessionRepository for SqlxSessionRepository {
 
     async fn find_by_creator_with_slide_count(&self, creator_id: &str) -> Result<Vec<(Session, i64)>> {
         let pool = self.get_pool().await?;
-        let sessions = query_as::<_, Session>(
-            "SELECT * FROM sessions WHERE creator_id = ? ORDER BY created_at DESC"
+        let rows = query_as::<_, SessionWithSlideCountRow>(
+            r#"
+            SELECT
+                s.id,
+                s.creator_id,
+                s.title,
+                s.status,
+                s.share_token,
+                s.current_slide_id,
+                s.is_results_visible,
+                s.is_presentation_active,
+                s.allow_questions,
+                s.require_name,
+                s.created_at,
+                s.updated_at,
+                COALESCE(sc.slide_count, 0) as slide_count
+            FROM sessions s
+            LEFT JOIN (
+                SELECT session_id, COUNT(*) as slide_count
+                FROM slides
+                GROUP BY session_id
+            ) sc ON sc.session_id = s.id
+            WHERE s.creator_id = ?
+            ORDER BY s.created_at DESC
+            "#
         )
         .bind(creator_id)
         .fetch_all(&pool)
         .await?;
 
-        let mut result = Vec::new();
-        for session in sessions {
-            let count: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM slides WHERE session_id = ?"
-            )
-            .bind(&session.id)
-            .fetch_one(&pool)
-            .await?;
-            
-            result.push((session, count.0));
-        }
-
-        Ok(result)
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                (
+                    Session {
+                        id: r.id,
+                        creator_id: r.creator_id,
+                        title: r.title,
+                        status: r.status,
+                        share_token: r.share_token,
+                        current_slide_id: r.current_slide_id,
+                        is_results_visible: r.is_results_visible,
+                        is_presentation_active: r.is_presentation_active,
+                        allow_questions: r.allow_questions,
+                        require_name: r.require_name,
+                        created_at: r.created_at,
+                        updated_at: r.updated_at,
+                    },
+                    r.slide_count,
+                )
+            })
+            .collect())
     }
 
     async fn find_by_id(&self, id: &str) -> Result<Option<Session>> {

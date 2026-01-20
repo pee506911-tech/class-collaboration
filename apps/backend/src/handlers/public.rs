@@ -76,7 +76,10 @@ pub async fn public_set_current_slide(
         is_presentation_active: session.is_presentation_active,
         is_results_visible: session.is_results_visible,
     };
-    publish_state_update(&session_id, &state_payload).await;
+    let session_id_for_publish = session_id.clone();
+    tokio::spawn(async move {
+        publish_state_update(&session_id_for_publish, &state_payload).await;
+    });
 
     Ok(Json(ApiResponse::success(serde_json::json!({ "message": "Slide updated" }))))
 }
@@ -107,7 +110,10 @@ pub async fn public_set_results_visibility(
         is_presentation_active: session.is_presentation_active,
         is_results_visible: payload.visible,
     };
-    publish_state_update(&session_id, &state_payload).await;
+    let session_id_for_publish = session_id.clone();
+    tokio::spawn(async move {
+        publish_state_update(&session_id_for_publish, &state_payload).await;
+    });
 
     Ok(Json(ApiResponse::success(serde_json::json!({ "message": "Results visibility updated" }))))
 }
