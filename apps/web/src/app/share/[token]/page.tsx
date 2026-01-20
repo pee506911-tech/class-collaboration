@@ -5,58 +5,68 @@ export const runtime = 'edge';
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { getPublicSessionByShareToken, type PublicSessionResponse } from "@/lib/api";
 
-type SlideOption = { id: string; text: string };
+interface Slide {
+    id: string;
+    type: string;
+    content: any;
+    orderIndex: number;
+    stats?: {
+        votes?: Record<string, number>;
+    };
+}
 
-function getErrorMessage(error: unknown) {
-    if (error instanceof Error) return error.message;
-    return "Failed to load session";
+interface Question {
+    id: string;
+    content: string;
+    upvotes: number;
+    createdAt: string;
+    slideId?: string;
+}
+
+interface SessionData {
+    id: string;
+    title: string;
+    status: string;
+    createdAt: string;
+    slides: Slide[];
+    questions: Question[];
+    participants: { id: string; name: string; joinedAt: string }[];
 }
 
 export default function SharedSessionPage() {
     const params = useParams();
-    const token = typeof params?.token === "string" ? params.token : "";
-    const [session, setSession] = useState<PublicSessionResponse | null>(null);
+    const token = params.token as string;
+    const [session, setSession] = useState<SessionData | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
 
     useEffect(() => {
         if (!token) return;
 
-        let cancelled = false;
-        let pollTimeout: ReturnType<typeof setTimeout> | null = null;
-
-        const fetchSession = async (isInitial = false) => {
+        const fetchSession = async () => {
             try {
-                const data = await getPublicSessionByShareToken(token);
-                if (cancelled) return;
-                setSession(data);
-                setError("");
-            } catch (err: unknown) {
-                if (cancelled) return;
-                setError(getErrorMessage(err));
+                const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/api/share/${token}`);
+                if (!res.ok) {
+                    throw new Error("Session not found");
+                }
+                const data = await res.json();
+                if (data.success) {
+                    setSession(data.data);
+                } else {
+                    setError("Failed to load session");
+                }
+            } catch (err: any) {
+                setError(err.message);
             } finally {
-                if (cancelled) return;
-                if (isInitial) setLoading(false);
+                setLoading(false);
             }
         };
 
-        const poll = async () => {
-            await fetchSession(false);
-            if (cancelled) return;
-            pollTimeout = setTimeout(poll, 5000);
-        };
-
-        void fetchSession(true).then(() => {
-            if (cancelled) return;
-            pollTimeout = setTimeout(poll, 5000);
-        });
-
-        return () => {
-            cancelled = true;
-            if (pollTimeout) clearTimeout(pollTimeout);
-        };
+        fetchSession();
+        // Poll every 5 seconds for updates
+        const interval = setInterval(fetchSession, 5000);
+        return () => clearInterval(interval);
     }, [token]);
 
     if (loading) return <div className="p-8 text-center">Loading session data...</div>;
@@ -86,11 +96,9 @@ export default function SharedSessionPage() {
                                     <div className="p-4 bg-gray-100 rounded-md">
                                         {slide.type === 'poll' ? (
                                             <div>
-                                                <p className="font-medium mb-2">
-                                                    {(slide.content as { question?: string } | null)?.question}
-                                                </p>
+                                                <p className="font-medium mb-2">{slide.content.question}</p>
                                                 <ul className="list-disc pl-5">
-                                                    {((slide.content as { options?: SlideOption[] } | null)?.options || []).map((opt) => (
+                                                    {slide.content.options?.map((opt: any) => (
                                                         <li key={opt.id}>{opt.text}</li>
                                                     ))}
                                                 </ul>
@@ -105,38 +113,27 @@ export default function SharedSessionPage() {
                                     <div>
                                         <h3 className="font-medium text-gray-700 mb-2">Results:</h3>
                                         <div className="space-y-2">
-                                            {(() => {
-                                                const votes = slide.stats?.votes || {};
-                                                const totalVotes = Object.values(votes).reduce((a, b) => a + b, 0);
-                                                const options = (slide.content as { options?: SlideOption[] } | null)?.options || [];
+                                            {slide.content.options?.map((opt: any) => {
+                                                const count = slide.stats?.votes?.[opt.id] || 0;
+                                                const total = Object.values(slide.stats?.votes || {}).reduce((a, b) => a + b, 0);
+                                                const percentage = total > 0 ? Math.round((count / total) * 100) : 0;
 
                                                 return (
-                                                    <>
-                                                        {options.map((opt) => {
-                                                            const count = votes[opt.id] || 0;
-                                                            const percentage = totalVotes > 0 ? Math.round((count / totalVotes) * 100) : 0;
-
-                                                            return (
-                                                                <div key={opt.id} className="flex items-center gap-4">
-                                                                    <div className="w-1/3 text-sm truncate">{opt.text}</div>
-                                                                    <div className="flex-1 h-4 bg-gray-200 rounded-full overflow-hidden">
-                                                                        <div
-                                                                            className="h-full bg-blue-500 transition-all duration-500"
-                                                                            style={{ width: `${percentage}%` }}
-                                                                        />
-                                                                    </div>
-                                                                    <div className="w-16 text-sm text-right">
-                                                                        {count} ({percentage}%)
-                                                                    </div>
-                                                                </div>
-                                                            );
-                                                        })}
-                                                        <div className="mt-2 text-sm text-gray-500 text-right">
-                                                            Total Votes: {totalVotes}
+                                                    <div key={opt.id} className="flex items-center gap-4">
+                                                        <div className="w-1/3 text-sm truncate">{opt.text}</div>
+                                                        <div className="flex-1 h-4 bg-gray-200 rounded-full overflow-hidden">
+                                                            <div
+                                                                className="h-full bg-blue-500 transition-all duration-500"
+                                                                style={{ width: `${percentage}%` }}
+                                                            />
                                                         </div>
-                                                    </>
+                                                        <div className="w-16 text-sm text-right">{count} ({percentage}%)</div>
+                                                    </div>
                                                 );
-                                            })()}
+                                            })}
+                                            <div className="mt-2 text-sm text-gray-500 text-right">
+                                                Total Votes: {Object.values(slide.stats?.votes || {}).reduce((a, b) => a + b, 0)}
+                                            </div>
                                         </div>
                                     </div>
                                 )}
