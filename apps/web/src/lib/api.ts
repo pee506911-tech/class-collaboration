@@ -1,4 +1,4 @@
-import { ApiResponse, Session, Slide } from 'shared';
+import { ApiResponse, Participant, Question, Session, Slide } from 'shared';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
 
@@ -44,16 +44,18 @@ async function fetchWithRetry(
             }
             
             return response;
-        } catch (error: any) {
-            lastError = error;
+        } catch (error: unknown) {
+            lastError = error instanceof Error ? error : new Error('Request failed');
             
             // Retry on network errors or timeouts
-            if (attempt < retries && (error.name === 'AbortError' || error.name === 'TypeError')) {
+            const isAbortError = error instanceof DOMException && error.name === 'AbortError';
+            const isTypeError = error instanceof TypeError;
+            if (attempt < retries && (isAbortError || isTypeError)) {
                 const delay = Math.min(
                     RETRY_CONFIG.baseDelay * Math.pow(2, attempt),
                     RETRY_CONFIG.maxDelay
                 );
-                console.log(`Request failed, retrying in ${delay}ms...`, error.message);
+                console.log(`Request failed, retrying in ${delay}ms...`, lastError.message);
                 await sleep(delay);
                 continue;
             }
@@ -114,6 +116,33 @@ export async function getSession(sessionId: string): Promise<Session> {
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
     const json: ApiResponse<Session> = await res.json();
     if (!json.success) throw new Error(json.error || 'Failed to fetch session');
+    return json.data;
+}
+
+export type VoteStats = {
+    votes?: Record<string, number>;
+};
+
+export type SlideWithStats = Slide & {
+    stats?: VoteStats | null;
+};
+
+export type PublicSessionResponse = {
+    id: string;
+    title: string;
+    status: string;
+    createdAt: string;
+    updatedAt?: string;
+    slides: SlideWithStats[];
+    questions: Question[];
+    participants: Participant[];
+};
+
+export async function getPublicSessionByShareToken(token: string): Promise<PublicSessionResponse> {
+    const res = await fetchWithRetry(`${API_URL}/share/${token}`);
+    if (!res.ok) throw new Error('Session not found');
+    const json: ApiResponse<PublicSessionResponse> = await res.json();
+    if (!json.success) throw new Error(json.error || 'Failed to load session');
     return json.data;
 }
 
@@ -189,7 +218,7 @@ export async function getSlides(sessionId: string): Promise<Slide[]> {
     return json.data;
 }
 
-export async function createSlide(sessionId: string, type: string, content: any): Promise<Slide> {
+export async function createSlide(sessionId: string, type: string, content: unknown): Promise<Slide> {
     const res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides`, {
         method: 'POST',
         headers: getHeaders(),
@@ -201,7 +230,7 @@ export async function createSlide(sessionId: string, type: string, content: any)
     return json.data;
 }
 
-export async function updateSlide(sessionId: string, slideId: string, content: any): Promise<void> {
+export async function updateSlide(sessionId: string, slideId: string, content: unknown): Promise<void> {
     const res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides/${slideId}`, {
         method: 'PUT',
         headers: getHeaders(),

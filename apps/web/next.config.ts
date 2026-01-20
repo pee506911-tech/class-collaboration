@@ -5,6 +5,10 @@ const nextConfig: NextConfig = {
   reactCompiler: true,
   reactStrictMode: false, // Disable strict mode to prevent double-mounting in dev (causes connection leaks)
 
+  experimental: {
+    optimizePackageImports: ['lucide-react'],
+  },
+
   // Empty turbopack config to silence the warning (we're using webpack config)
   turbopack: {},
 

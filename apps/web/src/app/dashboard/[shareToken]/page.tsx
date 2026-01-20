@@ -8,6 +8,7 @@ import { SessionDashboard } from '@/components/session-dashboard';
 import { Card, CardContent } from '@/components/ui/card';
 import { BarChart2, Lock, AlertCircle } from 'lucide-react';
 import { WebSocketProvider } from '@/lib/websocket';
+import { getPublicSessionByShareToken } from '@/lib/api';
 
 export default function PublicDashboardPage() {
     const params = useParams();
@@ -20,18 +21,11 @@ export default function PublicDashboardPage() {
     useEffect(() => {
         async function fetchSessionInfo() {
             try {
-                const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
-                const res = await fetch(`${apiUrl}/session-by-token/${shareToken}`);
-
-                if (!res.ok) {
-                    throw new Error('Session not found or invalid share link');
-                }
-
-                const data = await res.json();
-                setSessionId(data.data.id);
-                setSessionTitle(data.data.title);
-            } catch (err: any) {
-                setError(err.message || 'Failed to load dashboard');
+                const session = await getPublicSessionByShareToken(shareToken);
+                setSessionId(session.id);
+                setSessionTitle(session.title);
+            } catch (err: unknown) {
+                setError(err instanceof Error ? err.message : 'Failed to load dashboard');
             } finally {
                 setLoading(false);
             }
