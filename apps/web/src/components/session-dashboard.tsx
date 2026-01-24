@@ -8,6 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import dynamic from 'next/dynamic';
 import { Button } from '@/components/ui/button';
 import { LoadingState, EmptyState } from '@/components/ui/loading';
+import { Dialog } from '@/components/ui/dialog';
 
 // Dynamic imports for Recharts - only loaded when dashboard is viewed
 const BarChart = dynamic(() => import('recharts').then(mod => mod.BarChart), { ssr: false });
@@ -50,6 +51,12 @@ export function SessionDashboard({ sessionId, isPublic = false }: { sessionId: s
     const [filteredQuestions, setFilteredQuestions] = useState<Stats['questions'] | null>(null);
     const [lastFetchTime, setLastFetchTime] = useState(0);
     const { socket } = useWebSocket();
+    const [respondersDialog, setRespondersDialog] = useState<{
+        slide: SlideStats;
+        optionId: string;
+        optionLabel: string;
+        optionText: string;
+    } | null>(null);
 
     const fetchStats = async (force = false) => {
         // Debounce: don't fetch more than once per 5 seconds unless forced
@@ -181,6 +188,18 @@ export function SessionDashboard({ sessionId, isPublic = false }: { sessionId: s
     };
 
     const pollableSlides = stats.slides.filter(s => (s.type === 'poll' || s.type === 'quiz' || s.type === 'multiple-choice') && s.options);
+
+    const getRespondersForOption = (slide: SlideStats, optionId: string) => {
+        const counts = new Map<string, number>();
+        for (const interaction of slide.interactions || []) {
+            if (interaction.answer !== optionId) continue;
+            const name = interaction.name?.trim() || 'Anonymous';
+            counts.set(name, (counts.get(name) || 0) + 1);
+        }
+        return Array.from(counts.entries())
+            .map(([name, count]) => ({ name, count }))
+            .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+    };
 
     return (
         <div className="space-y-6 animate-fade-in">
@@ -339,9 +358,22 @@ export function SessionDashboard({ sessionId, isPublic = false }: { sessionId: s
                                                                     <div className="flex items-center gap-2">
                                                                         <Trophy className="w-4 h-4 text-amber-500 flex-shrink-0" />
                                                                         <div className="flex-1 min-w-0">
-                                                                            <div className="font-semibold text-slate-900 truncate">
+                                                                            <button
+                                                                                type="button"
+                                                                                className="text-left font-semibold text-slate-900 truncate hover:underline"
+                                                                                onClick={(e) => {
+                                                                                    e.stopPropagation();
+                                                                                    setRespondersDialog({
+                                                                                        slide,
+                                                                                        optionId: topAnswer.id,
+                                                                                        optionLabel: topAnswer.shortLabel,
+                                                                                        optionText: topAnswer.text,
+                                                                                    });
+                                                                                }}
+                                                                                title="View students who selected this answer"
+                                                                            >
                                                                                 {topAnswer.shortLabel}: {topAnswer.text}
-                                                                            </div>
+                                                                            </button>
                                                                             <div className="text-xs text-slate-500">
                                                                                 {topAnswer.count} votes ({topAnswer.percentage}%)
                                                                             </div>
@@ -381,7 +413,20 @@ export function SessionDashboard({ sessionId, isPublic = false }: { sessionId: s
                                                                                     </h4>
                                                                                     <div className="space-y-3">
                                                                                         {distribution.map((item, index) => (
-                                                                                            <div key={item.id} className="bg-white p-3 rounded-lg border">
+                                                                                            <button
+                                                                                                key={item.id}
+                                                                                                type="button"
+                                                                                                className="w-full text-left bg-white p-3 rounded-lg border hover:border-slate-300 hover:bg-slate-50 transition-colors"
+                                                                                                onClick={() => {
+                                                                                                    setRespondersDialog({
+                                                                                                        slide,
+                                                                                                        optionId: item.id,
+                                                                                                        optionLabel: item.shortLabel,
+                                                                                                        optionText: item.text,
+                                                                                                    });
+                                                                                                }}
+                                                                                                title="Click to view students who selected this answer"
+                                                                                            >
                                                                                                 <div className="flex items-center justify-between mb-2">
                                                                                                     <div className="flex items-center gap-2 flex-1 min-w-0">
                                                                                                         <span
@@ -412,7 +457,7 @@ export function SessionDashboard({ sessionId, isPublic = false }: { sessionId: s
                                                                                                         }}
                                                                                                     />
                                                                                                 </div>
-                                                                                            </div>
+                                                                                            </button>
                                                                                         ))}
                                                                                     </div>
                                                                                 </div>
@@ -689,6 +734,68 @@ export function SessionDashboard({ sessionId, isPublic = false }: { sessionId: s
                     </Card>
                 </TabsContent>
             </Tabs>
+
+            <Dialog
+                isOpen={respondersDialog !== null}
+                onClose={() => setRespondersDialog(null)}
+                title={
+                    respondersDialog
+                        ? `${respondersDialog.optionLabel}: ${respondersDialog.optionText}`
+                        : 'Answer Responders'
+                }
+                description={respondersDialog?.slide?.question ? respondersDialog.slide.question : undefined}
+                className="max-w-2xl"
+            >
+                {respondersDialog ? (
+                    (() => {
+                        const responders = getRespondersForOption(respondersDialog.slide, respondersDialog.optionId);
+                        const totalSelections = responders.reduce((sum, r) => sum + r.count, 0);
+
+                        if (totalSelections === 0) {
+                            return (
+                                <EmptyState
+                                    icon={<Users className="w-12 h-12 text-slate-300" />}
+                                    title="No responses for this answer"
+                                    description="No students have selected this option yet."
+                                />
+                            );
+                        }
+
+                        return (
+                            <div className="space-y-4">
+                                <div className="text-sm text-slate-600">
+                                    {totalSelections} {totalSelections === 1 ? 'selection' : 'selections'} from{' '}
+                                    {responders.length} {responders.length === 1 ? 'student' : 'students'}
+                                </div>
+                                <div className="max-h-80 overflow-auto rounded-lg border bg-white">
+                                    <table className="w-full">
+                                        <thead className="bg-slate-50 border-b">
+                                            <tr>
+                                                <th className="text-left p-3 text-xs font-semibold text-slate-600 uppercase tracking-wide">
+                                                    Student
+                                                </th>
+                                                <th className="text-right p-3 text-xs font-semibold text-slate-600 uppercase tracking-wide w-24">
+                                                    Count
+                                                </th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100">
+                                            {responders.map((r) => (
+                                                <tr key={r.name} className="hover:bg-slate-50">
+                                                    <td className="p-3 text-sm text-slate-800">{r.name}</td>
+                                                    <td className="p-3 text-right text-sm font-semibold text-slate-800">
+                                                        {r.count}
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        );
+                    })()
+                ) : null}
+            </Dialog>
         </div>
     );
 }
