@@ -47,6 +47,7 @@ export function SessionDashboard({ sessionId, isPublic = false }: { sessionId: s
     const [stats, setStats] = useState<Stats | null>(null);
     const [loading, setLoading] = useState(true);
     const [expandedSlides, setExpandedSlides] = useState<Set<string>>(new Set());
+    const [answerFilterBySlideId, setAnswerFilterBySlideId] = useState<Record<string, string | null>>({});
     const [filteredQuestions, setFilteredQuestions] = useState<Stats['questions'] | null>(null);
     const [lastFetchTime, setLastFetchTime] = useState(0);
     const { socket } = useWebSocket();
@@ -178,6 +179,24 @@ export function SessionDashboard({ sessionId, isPublic = false }: { sessionId: s
         });
 
         return distribution.sort((a, b) => b.count - a.count);
+    };
+
+    const getOptionLabelById = (slide: SlideStats, optionId: string) => {
+        const index = slide.options?.findIndex(o => o.id === optionId) ?? -1;
+        if (index < 0) return null;
+        const option = slide.options?.[index];
+        if (!option) return null;
+        return {
+            shortLabel: String.fromCharCode(65 + index),
+            text: option.text,
+        };
+    };
+
+    const getFilteredInteractions = (slide: SlideStats) => {
+        const interactions = slide.interactions ?? [];
+        const selectedOptionId = answerFilterBySlideId[slide.id];
+        if (!selectedOptionId) return interactions;
+        return interactions.filter((interaction) => interaction.answer === selectedOptionId);
     };
 
     const pollableSlides = stats.slides.filter(s => (s.type === 'poll' || s.type === 'quiz' || s.type === 'multiple-choice') && s.options);
@@ -362,31 +381,45 @@ export function SessionDashboard({ sessionId, isPublic = false }: { sessionId: s
                                                             </td>
                                                         </tr>
 
-                                                        {/* Expanded Details Row */}
-                                                        {isExpanded && (
-                                                            <tr>
-                                                                <td colSpan={6} className="p-0 bg-slate-50">
-                                                                    <div className="p-6 space-y-6">
+	                                                        {/* Expanded Details Row */}
+	                                                        {isExpanded && (
+	                                                            <tr>
+	                                                                <td colSpan={6} className="p-0 bg-slate-50">
+	                                                                    <div className="p-6 space-y-6">
                                                                         {totalResponses === 0 ? (
                                                                             <div className="text-center py-8 text-slate-400">
                                                                                 <p>No responses yet</p>
                                                                             </div>
                                                                         ) : (
-                                                                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                                                                                {/* Left: Answer Distribution */}
-                                                                                <div>
-                                                                                    <h4 className="text-sm font-semibold text-slate-700 mb-4 uppercase tracking-wide flex items-center gap-2">
-                                                                                        <BarChart2 className="w-4 h-4" />
-                                                                                        Answer Distribution
-                                                                                    </h4>
-                                                                                    <div className="space-y-3">
-                                                                                        {distribution.map((item, index) => (
-                                                                                            <div key={item.id} className="bg-white p-3 rounded-lg border">
-                                                                                                <div className="flex items-center justify-between mb-2">
-                                                                                                    <div className="flex items-center gap-2 flex-1 min-w-0">
-                                                                                                        <span
-                                                                                                            className="w-7 h-7 rounded-md flex items-center justify-center text-white font-bold text-xs flex-shrink-0"
-                                                                                                            style={{ backgroundColor: COLORS[index % COLORS.length] }}
+	                                                                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+	                                                                                {/* Left: Answer Distribution */}
+	                                                                                <div>
+	                                                                                    <h4 className="text-sm font-semibold text-slate-700 mb-4 uppercase tracking-wide flex items-center gap-2">
+	                                                                                        <BarChart2 className="w-4 h-4" />
+	                                                                                        Answer Distribution
+	                                                                                    </h4>
+	                                                                                    <div className="space-y-3">
+	                                                                                        {distribution.map((item, index) => (
+	                                                                                            <button
+	                                                                                                key={item.id}
+	                                                                                                type="button"
+	                                                                                                aria-pressed={answerFilterBySlideId[slide.id] === item.id}
+	                                                                                                onClick={() => {
+	                                                                                                    setAnswerFilterBySlideId((prev) => ({
+	                                                                                                        ...prev,
+	                                                                                                        [slide.id]: prev[slide.id] === item.id ? null : item.id,
+	                                                                                                    }));
+	                                                                                                }}
+	                                                                                                className={[
+	                                                                                                    'bg-white p-3 rounded-lg border w-full text-left transition-colors',
+	                                                                                                    answerFilterBySlideId[slide.id] === item.id ? 'border-blue-300 ring-2 ring-blue-100' : 'hover:bg-slate-50',
+	                                                                                                ].join(' ')}
+	                                                                                            >
+	                                                                                                <div className="flex items-center justify-between mb-2">
+	                                                                                                    <div className="flex items-center gap-2 flex-1 min-w-0">
+	                                                                                                        <span
+	                                                                                                            className="w-7 h-7 rounded-md flex items-center justify-center text-white font-bold text-xs flex-shrink-0"
+	                                                                                                            style={{ backgroundColor: COLORS[index % COLORS.length] }}
                                                                                                         >
                                                                                                             {item.shortLabel}
                                                                                                         </span>
@@ -398,70 +431,113 @@ export function SessionDashboard({ sessionId, isPublic = false }: { sessionId: s
                                                                                                         <span className="text-sm font-bold text-slate-900">
                                                                                                             {item.count}
                                                                                                         </span>
-                                                                                                        <span className="text-xs font-semibold text-slate-600 w-12 text-right">
-                                                                                                            {item.percentage}%
-                                                                                                        </span>
-                                                                                                    </div>
-                                                                                                </div>
-                                                                                                <div className="w-full bg-slate-200 rounded-full h-2">
-                                                                                                    <div
-                                                                                                        className="h-2 rounded-full transition-all duration-500"
-                                                                                                        style={{
-                                                                                                            width: `${item.percentage}%`,
-                                                                                                            backgroundColor: COLORS[index % COLORS.length]
-                                                                                                        }}
-                                                                                                    />
-                                                                                                </div>
-                                                                                            </div>
-                                                                                        ))}
-                                                                                    </div>
-                                                                                </div>
+	                                                                                                        <span className="text-xs font-semibold text-slate-600 w-12 text-right">
+	                                                                                                            {item.percentage}%
+	                                                                                                        </span>
+	                                                                                                    </div>
+	                                                                                                </div>
+	                                                                                                <div className="w-full bg-slate-200 rounded-full h-2">
+	                                                                                                    <div
+	                                                                                                        className="h-2 rounded-full transition-all duration-500"
+	                                                                                                        style={{
+	                                                                                                            width: `${item.percentage}%`,
+	                                                                                                            backgroundColor: COLORS[index % COLORS.length]
+	                                                                                                        }}
+	                                                                                                    />
+	                                                                                                </div>
+	                                                                                            </button>
+	                                                                                        ))}
+	                                                                                    </div>
+	                                                                                </div>
 
-                                                                                {/* Right: Individual Responses */}
-                                                                                <div>
-                                                                                    {slide.interactions && slide.interactions.length > 0 && (
-                                                                                        <Fragment>
-                                                                                            <h4 className="text-sm font-semibold text-slate-700 mb-4 uppercase tracking-wide flex items-center gap-2">
-                                                                                                <Users className="w-4 h-4" />
-                                                                                                Individual Responses ({slide.interactions.length})
-                                                                                            </h4>
-                                                                                            <div className="bg-white border rounded-lg max-h-80 overflow-y-auto">
-                                                                                                <table className="w-full text-sm">
-                                                                                                    <thead className="bg-slate-50 sticky top-0 border-b">
-                                                                                                        <tr>
-                                                                                                            <th className="text-left p-2 font-semibold text-slate-600">Student</th>
+	                                                                                {/* Right: Individual Responses */}
+	                                                                                <div>
+	                                                                                    {slide.interactions && slide.interactions.length > 0 && (
+	                                                                                        <Fragment>
+	                                                                                            <h4 className="text-sm font-semibold text-slate-700 mb-4 uppercase tracking-wide flex items-center gap-2">
+	                                                                                                <Users className="w-4 h-4" />
+	                                                                                                {(() => {
+	                                                                                                    const allInteractions = slide.interactions ?? [];
+	                                                                                                    const selectedOptionId = answerFilterBySlideId[slide.id];
+	                                                                                                    const filteredInteractions = getFilteredInteractions(slide);
+	                                                                                                    if (!selectedOptionId) {
+	                                                                                                        return `Individual Responses (${allInteractions.length})`;
+	                                                                                                    }
+	                                                                                                    return `Individual Responses (${filteredInteractions.length} of ${allInteractions.length})`;
+	                                                                                                })()}
+	                                                                                            </h4>
+	                                                                                            {(() => {
+	                                                                                                const selectedOptionId = answerFilterBySlideId[slide.id];
+	                                                                                                if (!selectedOptionId) return null;
+	                                                                                                const label = getOptionLabelById(slide, selectedOptionId);
+	                                                                                                return (
+	                                                                                                    <div className="flex items-center justify-between gap-3 mb-3">
+	                                                                                                        <div className="text-xs text-slate-600 min-w-0">
+	                                                                                                            Filtering by <span className="font-semibold text-slate-900">{label ? `${label.shortLabel}: ${label.text}` : 'selected option'}</span>
+	                                                                                                        </div>
+	                                                                                                        <Button
+	                                                                                                            variant="ghost"
+	                                                                                                            size="sm"
+	                                                                                                            className="h-7 px-2 text-xs"
+	                                                                                                            onClick={() => {
+	                                                                                                                setAnswerFilterBySlideId((prev) => ({ ...prev, [slide.id]: null }));
+	                                                                                                            }}
+	                                                                                                        >
+	                                                                                                            Clear
+	                                                                                                        </Button>
+	                                                                                                    </div>
+	                                                                                                );
+	                                                                                            })()}
+	                                                                                            <div className="bg-white border rounded-lg max-h-80 overflow-y-auto">
+	                                                                                                <table className="w-full text-sm">
+	                                                                                                    <thead className="bg-slate-50 sticky top-0 border-b">
+	                                                                                                        <tr>
+	                                                                                                            <th className="text-left p-2 font-semibold text-slate-600">Student</th>
                                                                                                             <th className="text-left p-2 font-semibold text-slate-600">Answer</th>
                                                                                                             <th className="text-right p-2 font-semibold text-slate-600">Time</th>
                                                                                                         </tr>
-                                                                                                    </thead>
-                                                                                                    <tbody className="divide-y">
-                                                                                                        {slide.interactions.map((interaction, idx) => (
-                                                                                                            <tr key={idx} className="hover:bg-slate-50">
-                                                                                                                <td className="p-2">
-                                                                                                                    <div className="flex items-center gap-2">
-                                                                                                                        <div className="w-6 h-6 rounded-full bg-gradient-to-br from-blue-400 to-blue-600 flex items-center justify-center text-white font-semibold text-xs flex-shrink-0">
-                                                                                                                            {interaction.name.substring(0, 2).toUpperCase()}
-                                                                                                                        </div>
-                                                                                                                        <span className="font-medium text-slate-900 truncate">
-                                                                                                                            {interaction.name}
-                                                                                                                        </span>
-                                                                                                                    </div>
-                                                                                                                </td>
-                                                                                                                <td className="p-2">
-                                                                                                                    <span className="inline-flex px-2 py-0.5 bg-blue-50 text-blue-900 rounded text-xs font-medium">
-                                                                                                                        {getAnswerText(slide, interaction)}
-                                                                                                                    </span>
-                                                                                                                </td>
-                                                                                                                <td className="p-2 text-right text-slate-500 text-xs whitespace-nowrap">
-                                                                                                                    {new Date(interaction.answeredAt).toLocaleTimeString()}
-                                                                                                                </td>
-                                                                                                            </tr>
-                                                                                                        ))}
-                                                                                                    </tbody>
-                                                                                                </table>
-                                                                                            </div>
-                                                                                        </Fragment>
-                                                                                    )}
+	                                                                                                    </thead>
+	                                                                                                    <tbody className="divide-y">
+	                                                                                                        {(() => {
+	                                                                                                            const interactions = getFilteredInteractions(slide);
+	                                                                                                            if (interactions.length === 0) {
+	                                                                                                                return (
+	                                                                                                                    <tr>
+	                                                                                                                        <td colSpan={3} className="p-4 text-center text-sm text-slate-500">
+	                                                                                                                            No responses for this choice yet.
+	                                                                                                                        </td>
+	                                                                                                                    </tr>
+	                                                                                                                );
+	                                                                                                            }
+
+	                                                                                                            return interactions.map((interaction, idx) => (
+	                                                                                                                <tr key={idx} className="hover:bg-slate-50">
+	                                                                                                                    <td className="p-2">
+	                                                                                                                        <div className="flex items-center gap-2">
+	                                                                                                                            <div className="w-6 h-6 rounded-full bg-gradient-to-br from-blue-400 to-blue-600 flex items-center justify-center text-white font-semibold text-xs flex-shrink-0">
+	                                                                                                                                {interaction.name.substring(0, 2).toUpperCase()}
+	                                                                                                                            </div>
+	                                                                                                                            <span className="font-medium text-slate-900 truncate">
+	                                                                                                                                {interaction.name}
+	                                                                                                                            </span>
+	                                                                                                                        </div>
+	                                                                                                                    </td>
+	                                                                                                                    <td className="p-2">
+	                                                                                                                        <span className="inline-flex px-2 py-0.5 bg-blue-50 text-blue-900 rounded text-xs font-medium">
+	                                                                                                                            {getAnswerText(slide, interaction)}
+	                                                                                                                        </span>
+	                                                                                                                    </td>
+	                                                                                                                    <td className="p-2 text-right text-slate-500 text-xs whitespace-nowrap">
+	                                                                                                                        {new Date(interaction.answeredAt).toLocaleTimeString()}
+	                                                                                                                    </td>
+	                                                                                                                </tr>
+	                                                                                                            ));
+	                                                                                                        })()}
+	                                                                                                    </tbody>
+	                                                                                                </table>
+	                                                                                            </div>
+	                                                                                        </Fragment>
+	                                                                                    )}
                                                                                 </div>
                                                                             </div>
                                                                         )}
