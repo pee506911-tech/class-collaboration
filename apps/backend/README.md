@@ -317,6 +317,12 @@ ALLOWED_ORIGINS=http://localhost:3000
 
 # Environment
 ENVIRONMENT=development
+
+# Optional DB pool tuning (useful for low-connection DB plans)
+DB_MAX_CONNECTIONS=5
+DB_MIN_CONNECTIONS=0
+DB_ACQUIRE_TIMEOUT_SECONDS=30
+DB_IDLE_TIMEOUT_SECONDS=600
 ```
 
 ## 🐛 Debugging
