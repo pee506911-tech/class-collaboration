@@ -231,7 +231,7 @@ impl SessionRepository for SqlxSessionRepository {
     async fn get_slides(&self, session_id: &str) -> Result<Vec<Slide>> {
         let pool = self.get_pool().await?;
         let slides = query_as::<_, Slide>(
-            "SELECT * FROM slides WHERE session_id = ? AND is_hidden = FALSE ORDER BY order_index"
+            "SELECT * FROM slides WHERE session_id = ? AND is_hidden = FALSE ORDER BY order_index, id"
         )
         .bind(session_id)
         .fetch_all(&pool)

@@ -132,7 +132,7 @@ pub async fn get_session_stats(
 
     // Run independent reads in parallel to reduce tail latency
     let slides_fut = query_as::<_, Slide>(
-        "SELECT * FROM slides WHERE session_id = ? ORDER BY order_index"
+        "SELECT * FROM slides WHERE session_id = ? ORDER BY order_index, id"
     )
     .bind(&id)
     .fetch_all(&pool);
@@ -287,7 +287,7 @@ pub async fn get_public_session_stats(
         .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
 
     let slides_fut = query_as::<_, Slide>(
-        "SELECT * FROM slides WHERE session_id = ? AND is_hidden = FALSE ORDER BY order_index"
+        "SELECT * FROM slides WHERE session_id = ? AND is_hidden = FALSE ORDER BY order_index, id"
     )
     .bind(&id)
     .fetch_all(&pool);

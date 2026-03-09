@@ -250,11 +250,20 @@ export async function getSlides(sessionId: string): Promise<Slide[]> {
     return json.data;
 }
 
-export async function createSlide(sessionId: string, type: string, content: unknown): Promise<Slide> {
+export async function createSlide(
+    sessionId: string,
+    type: string,
+    content: unknown,
+    options?: { insertAfterSlideId?: string }
+): Promise<Slide> {
     const res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides`, {
         method: 'POST',
         headers: getHeaders(),
-        body: JSON.stringify({ type, content }),
+        body: JSON.stringify({
+            type,
+            content,
+            ...(options?.insertAfterSlideId ? { insertAfterSlideId: options.insertAfterSlideId } : {}),
+        }),
     });
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
     const json: ApiResponse<Slide> = await res.json();

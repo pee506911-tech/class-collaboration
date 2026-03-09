@@ -20,10 +20,12 @@ pub struct Slide {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateSlideRequest {
     #[serde(rename = "type")]
     pub slide_type: String,
     pub content: serde_json::Value,
+    pub insert_after_slide_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

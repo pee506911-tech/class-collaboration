@@ -100,8 +100,9 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
         if (type === 'leaderboard') content = { title: 'Leaderboard' };
 
         try {
-            await createSlide(id, type, content);
-            loadSlides();
+            const newSlide = await createSlide(id, type, content);
+            await loadSlides();
+            setPreviewSlideId(newSlide.id);
             setShowTypeSelector(false);
             toast.success('Slide created successfully');
         } catch (e) {
@@ -158,8 +159,11 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
         const slide = slides.find(s => s.id === slideId);
         if (!slide) return;
         try {
-            await createSlide(id, slide.type, slide.content);
-            loadSlides();
+            const duplicatedSlide = await createSlide(id, slide.type, slide.content, {
+                insertAfterSlideId: slideId,
+            });
+            await loadSlides();
+            setPreviewSlideId(duplicatedSlide.id);
             toast.success('Slide duplicated');
         } catch (e) {
             toast.error('Failed to duplicate slide');
