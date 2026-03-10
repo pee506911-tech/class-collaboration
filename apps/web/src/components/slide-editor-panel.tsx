@@ -14,29 +14,57 @@ interface SlideEditorPanelProps {
 }
 
 export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelProps) {
-    const content = slide.content;
-    const [localQuestion, setLocalQuestion] = useState(content.question || content.title || '');
-    const [localOptions, setLocalOptions] = useState(content.options || []);
+    const [localContent, setLocalContent] = useState<any>(slide.content);
     const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
     const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
     // Sync local state when slide changes
     useEffect(() => {
-        setLocalQuestion(content.question || content.title || '');
-        setLocalOptions(content.options || []);
+        setLocalContent(slide.content);
         setHasUnsavedChanges(false);
-    }, [slide.id, content.question, content.title, content.options]);
+        if (debounceTimerRef.current) {
+            clearTimeout(debounceTimerRef.current);
+        }
+    }, [slide]);
+
+    const persistContent = useCallback((nextContent: any) => {
+        onUpdate(nextContent);
+        setHasUnsavedChanges(false);
+    }, [onUpdate]);
 
     // Debounced save function
     const debouncedSave = useCallback((newContent: any) => {
         if (debounceTimerRef.current) {
             clearTimeout(debounceTimerRef.current);
         }
+        setHasUnsavedChanges(true);
         debounceTimerRef.current = setTimeout(() => {
-            onUpdate(newContent);
-            setHasUnsavedChanges(false);
-        }, 1000); // Save after 1 second of no typing
-    }, [onUpdate]);
+            persistContent(newContent);
+        }, 500);
+    }, [persistContent]);
+
+    const flushSave = useCallback((contentToSave = localContent, showToast = false) => {
+        if (debounceTimerRef.current) {
+            clearTimeout(debounceTimerRef.current);
+            debounceTimerRef.current = null;
+        }
+        persistContent(contentToSave);
+        if (showToast) {
+            onSave();
+        }
+    }, [localContent, onSave, persistContent]);
+
+    const updateContent = useCallback((updater: (currentContent: any) => any, immediate = false) => {
+        const nextContent = updater(localContent);
+        setLocalContent(nextContent);
+
+        if (immediate) {
+            flushSave(nextContent);
+            return;
+        }
+
+        debouncedSave(nextContent);
+    }, [debouncedSave, flushSave, localContent]);
 
     // Cleanup timer on unmount
     useEffect(() => {
@@ -47,44 +75,40 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
         };
     }, []);
 
-    const updateField = (field: string, value: any) => {
-        onUpdate({ ...content, [field]: value });
+    const updateField = (field: string, value: any, immediate = false) => {
+        updateContent((currentContent) => ({ ...currentContent, [field]: value }), immediate);
     };
 
     const handleOptionChange = (id: string, text: string) => {
-        // Update local state immediately for responsive UI
+        const localOptions = localContent.options || [];
         const newOptions = localOptions.map((o: any) =>
             o.id === id ? { ...o, text } : o
         );
-        setLocalOptions(newOptions);
-        setHasUnsavedChanges(true);
-        
-        // Debounce the actual save
-        debouncedSave({ ...content, options: newOptions });
+        updateField('options', newOptions);
     };
 
     const addOption = () => {
+        const localOptions = localContent.options || [];
         const newOption = { id: Math.random().toString(36).substr(2, 9), text: `Option ${localOptions.length + 1}` };
         if (slide.type === 'quiz') {
             (newOption as any).isCorrect = false;
         }
         const newOptions = [...localOptions, newOption];
-        setLocalOptions(newOptions);
         updateField('options', newOptions);
     };
 
     const removeOption = (id: string) => {
+        const localOptions = localContent.options || [];
         const newOptions = localOptions.filter((o: any) => o.id !== id);
-        setLocalOptions(newOptions);
         updateField('options', newOptions);
     };
 
     const onDragEnd = (result: DropResult) => {
         if (!result.destination) return;
+        const localOptions = localContent.options || [];
         const items = Array.from(localOptions);
         const [reorderedItem] = items.splice(result.source.index, 1);
         items.splice(result.destination.index, 0, reorderedItem);
-        setLocalOptions(items);
         updateField('options', items);
     };
 
@@ -114,9 +138,9 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                                 {slide.type === 'static' ? 'Title' : 'Question'}
                             </label>
                             <Input
-                                value={localQuestion}
-                                onChange={(e) => setLocalQuestion(e.target.value)}
-                                onBlur={() => updateField(content.question !== undefined ? 'question' : 'title', localQuestion)}
+                                value={localContent.question || localContent.title || ''}
+                                onChange={(e) => updateField(localContent.question !== undefined ? 'question' : 'title', e.target.value)}
+                                onBlur={() => flushSave()}
                                 placeholder="Enter your question or title"
                                 className="text-lg font-medium px-4 py-3 h-auto"
                             />
@@ -126,7 +150,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                             <div className="space-y-3">
                                 <label className="text-sm font-medium text-slate-700">Body Content</label>
                                 <textarea
-                                    value={content.body || ''}
+                                    value={localContent.body || ''}
                                     onChange={(e) => updateField('body', e.target.value)}
                                     placeholder="Enter slide content (Markdown supported)"
                                     className="w-full min-h-[300px] p-4 border rounded-lg text-sm leading-relaxed focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
@@ -138,14 +162,14 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                             <div className="space-y-4">
                                 <div className="flex justify-between items-center">
                                     <label className="text-sm font-medium text-slate-700">Answer Options</label>
-                                    <span className="text-xs text-slate-400">{localOptions.length} options</span>
+                                    <span className="text-xs text-slate-400">{(localContent.options || []).length} options</span>
                                 </div>
 
                                 <DragDropContext onDragEnd={onDragEnd}>
                                     <Droppable droppableId="options">
                                         {(provided) => (
                                             <div {...provided.droppableProps} ref={provided.innerRef} className="space-y-2">
-                                                {localOptions.map((option: any, index: number) => (
+                                                {(localContent.options || []).map((option: any, index: number) => (
                                                     <Draggable key={option.id} draggableId={option.id} index={index}>
                                                         {(provided, snapshot) => (
                                                             <div
@@ -170,11 +194,10 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                                                                         variant="ghost"
                                                                         size="sm"
                                                                         onClick={() => {
-                                                                            const newOptions = localOptions.map((o: any) => ({
+                                                                            const newOptions = (localContent.options || []).map((o: any) => ({
                                                                                 ...o,
                                                                                 isCorrect: o.id === option.id
                                                                             }));
-                                                                            setLocalOptions(newOptions);
                                                                             updateField('options', newOptions);
                                                                         }}
                                                                         className={`h-7 px-2 text-xs ${option.isCorrect ? "bg-green-100 text-green-700 hover:bg-green-200" : "text-slate-400 hover:text-slate-600"}`}
@@ -213,16 +236,16 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                                         <label className="text-xs font-medium text-slate-500">Duration (seconds)</label>
                                         <Input
                                             type="number"
-                                            value={content.timerDuration || 30}
-                                            onChange={(e) => updateField('timerDuration', parseInt(e.target.value))}
+                                            value={localContent.timerDuration || 30}
+                                            onChange={(e) => updateField('timerDuration', parseInt(e.target.value, 10))}
                                         />
                                     </div>
                                     <div className="space-y-2">
                                         <label className="text-xs font-medium text-slate-500">Points</label>
                                         <Input
                                             type="number"
-                                            value={content.points || 1000}
-                                            onChange={(e) => updateField('points', parseInt(e.target.value))}
+                                            value={localContent.points || 1000}
+                                            onChange={(e) => updateField('points', parseInt(e.target.value, 10))}
                                         />
                                     </div>
                                 </div>
@@ -240,7 +263,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                                         <label className="text-sm text-slate-600">Chart Visualization</label>
                                         <div className="flex gap-2">
                                             <Button
-                                                variant={content.chartType === 'bar' ? 'default' : 'outline'}
+                                                variant={localContent.chartType === 'bar' ? 'default' : 'outline'}
                                                 onClick={() => updateField('chartType', 'bar')}
                                                 size="sm"
                                                 className="flex-1"
@@ -248,7 +271,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                                                 Bar Chart
                                             </Button>
                                             <Button
-                                                variant={content.chartType === 'pie' ? 'default' : 'outline'}
+                                                variant={localContent.chartType === 'pie' ? 'default' : 'outline'}
                                                 onClick={() => updateField('chartType', 'pie')}
                                                 size="sm"
                                                 className="flex-1"
@@ -269,7 +292,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                                             <input
                                                 type="checkbox"
                                                 className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                                                checked={content.allowMultipleSelection || false}
+                                                checked={localContent.allowMultipleSelection || false}
                                                 onChange={(e) => updateField('allowMultipleSelection', e.target.checked)}
                                             />
                                         </div>
@@ -280,14 +303,14 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                                             <label className="text-sm font-medium text-slate-700">Limit to One Submission</label>
                                             <p className="text-xs text-slate-500">Prevent students from changing their answer.</p>
                                         </div>
-                                        <input
-                                            type="checkbox"
-                                            className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                                            checked={content.limitSubmissions !== false}
-                                            onChange={(e) => updateField('limitSubmissions', e.target.checked)}
-                                        />
+                                            <input
+                                                type="checkbox"
+                                                className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                                                checked={localContent.limitSubmissions !== false}
+                                                onChange={(e) => updateField('limitSubmissions', e.target.checked)}
+                                            />
+                                        </div>
                                     </div>
-                                </div>
                             </div>
                         )}
                     </TabsContent>
@@ -295,7 +318,9 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
             </Tabs>
 
             <div className="p-4 border-t bg-white">
-                <Button onClick={onSave} className="w-full bg-slate-900 hover:bg-slate-800">Save Changes</Button>
+                <Button onClick={() => flushSave(localContent, true)} className="w-full bg-slate-900 hover:bg-slate-800">
+                    {hasUnsavedChanges ? 'Save Changes' : 'All Changes Saved'}
+                </Button>
             </div>
         </div>
     );

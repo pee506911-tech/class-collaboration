@@ -19,7 +19,34 @@ import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea
 import { toast } from 'sonner';
 import { Breadcrumb } from '@/components/ui/breadcrumb';
 
-function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: { slides: Slide[], setSlides: (slides: Slide[]) => void, loadSlides: () => void, session: Session | null, loadSession: () => void }) {
+function reindexSlides(slides: Slide[]): Slide[] {
+    return slides.map((slide, index) => ({ ...slide, orderIndex: index }));
+}
+
+function insertSlideAtOrder(slides: Slide[], newSlide: Slide): Slide[] {
+    const nextSlides = slides.filter(slide => slide.id !== newSlide.id);
+    const targetIndex = Math.max(0, Math.min(newSlide.orderIndex, nextSlides.length));
+    nextSlides.splice(targetIndex, 0, newSlide);
+    return reindexSlides(nextSlides);
+}
+
+function getNextPreviewSlideId(slides: Slide[], deletedSlideId: string, currentPreviewSlideId: string | null): string | null {
+    if (currentPreviewSlideId !== deletedSlideId) {
+        return currentPreviewSlideId;
+    }
+
+    const deletedIndex = slides.findIndex(slide => slide.id === deletedSlideId);
+    const remainingSlides = slides.filter(slide => slide.id !== deletedSlideId);
+
+    if (remainingSlides.length === 0) {
+        return null;
+    }
+
+    const fallbackIndex = Math.min(deletedIndex, remainingSlides.length - 1);
+    return remainingSlides[fallbackIndex]?.id ?? remainingSlides[remainingSlides.length - 1].id;
+}
+
+function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: { slides: Slide[], setSlides: React.Dispatch<React.SetStateAction<Slide[]>>, loadSlides: () => void, session: Session | null, loadSession: () => void }) {
     const { sendMessage, state, activeParticipants, updateState, initialStateLoaded } = useWebSocket();
     const params = useParams();
     const id = params?.id as string;
@@ -101,7 +128,7 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
 
         try {
             const newSlide = await createSlide(id, type, content);
-            await loadSlides();
+            setSlides(prevSlides => insertSlideAtOrder(prevSlides, newSlide));
             setPreviewSlideId(newSlide.id);
             setShowTypeSelector(false);
             toast.success('Slide created successfully');
@@ -134,23 +161,30 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
     };
 
     async function handleUpdateSlide(slideId: string, content: any) {
+        setSlides(prevSlides => prevSlides.map(slide =>
+            slide.id === slideId ? { ...slide, content } : slide
+        ));
+
         try {
             await updateSlide(id, slideId, content);
-            // Silently update - no toast spam on every keystroke
-            // Only reload slides to sync state
-            loadSlides();
         } catch (e) {
+            loadSlides();
             toast.error('Failed to update slide');
         }
     }
 
     async function handleDeleteSlide(slideId: string) {
         if (!confirm('Are you sure you want to delete this slide?')) return;
+
+        const nextPreviewSlideId = getNextPreviewSlideId(slides, slideId, previewSlideId);
+        setSlides(prevSlides => reindexSlides(prevSlides.filter(slide => slide.id !== slideId)));
+        setPreviewSlideId(nextPreviewSlideId);
+
         try {
             await deleteSlide(id, slideId);
-            loadSlides();
             toast.success('Slide deleted');
         } catch (e) {
+            loadSlides();
             toast.error('Failed to delete slide');
         }
     }
@@ -162,7 +196,7 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
             const duplicatedSlide = await createSlide(id, slide.type, slide.content, {
                 insertAfterSlideId: slideId,
             });
-            await loadSlides();
+            setSlides(prevSlides => insertSlideAtOrder(prevSlides, duplicatedSlide));
             setPreviewSlideId(duplicatedSlide.id);
             toast.success('Slide duplicated');
         } catch (e) {
@@ -172,11 +206,11 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
 
     async function handleToggleVisibility(e: React.MouseEvent, slide: Slide) {
         e.stopPropagation();
+        const nextSlides = slides.map(s => s.id === slide.id ? { ...s, isHidden: !s.isHidden } : s);
+        setSlides(nextSlides);
+
         try {
             await updateSlideVisibility(id, slide.id, !slide.isHidden);
-            // Optimistic update
-            const newSlides = slides.map(s => s.id === slide.id ? { ...s, isHidden: !s.isHidden } : s);
-            setSlides(newSlides);
             toast.success(slide.isHidden ? 'Slide is now visible' : 'Slide is now hidden');
         } catch (e) {
             toast.error('Failed to update visibility');
@@ -221,11 +255,12 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
         const newSlides = Array.from(slides);
         const [reorderedItem] = newSlides.splice(sourceIndex, 1);
         newSlides.splice(destinationIndex, 0, reorderedItem);
+        const reindexedSlides = reindexSlides(newSlides);
 
-        setSlides(newSlides); // Optimistic update
+        setSlides(reindexedSlides);
 
         try {
-            await reorderSlides(id, newSlides.map(s => s.id));
+            await reorderSlides(id, reindexedSlides.map(s => s.id));
             toast.success('Slide order updated');
         } catch (e) {
             toast.error('Failed to save slide order');

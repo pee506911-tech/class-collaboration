@@ -271,15 +271,16 @@ export async function createSlide(
     return json.data;
 }
 
-export async function updateSlide(sessionId: string, slideId: string, content: unknown): Promise<void> {
+export async function updateSlide(sessionId: string, slideId: string, content: unknown): Promise<Slide> {
     const res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides/${slideId}`, {
         method: 'PUT',
         headers: getHeaders(),
         body: JSON.stringify({ content }),
     });
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
-    const json: ApiResponse<void> = await res.json();
+    const json: ApiResponse<Slide> = await res.json();
     if (!json.success) throw new Error(json.error || 'Failed to update slide');
+    return json.data;
 }
 
 export async function deleteSlide(sessionId: string, slideId: string): Promise<void> {
