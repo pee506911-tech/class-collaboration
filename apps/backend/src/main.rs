@@ -1,4 +1,5 @@
 use axum::{
+    http::header::HeaderName,
     routing::{get, post, put},
     Extension, Router,
 };
@@ -112,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
             axum::http::header::AUTHORIZATION,
             axum::http::header::ACCEPT,
             axum::http::header::ORIGIN,
+            HeaderName::from_static("x-client-request-id"),
         ])
         .allow_credentials(true);
 
