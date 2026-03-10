@@ -452,7 +452,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                 {provided.placeholder}
                                 {hasPendingStructuralMutations && (
                                     <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-[11px] text-blue-700">
-                                        Structural changes are syncing. Reorder is temporarily disabled.
+                                        We&apos;re saving your slide changes. You can rearrange slides again in a moment.
                                     </div>
                                 )}
                                 <Button
