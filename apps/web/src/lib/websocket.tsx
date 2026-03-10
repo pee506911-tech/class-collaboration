@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import * as Ably from 'ably';
 import { StateUpdatePayload } from 'shared';
+import { shouldApplyStateUpdate } from './state-updates';
 
 // Cross-tab connection sharing using BroadcastChannel
 // Only one tab (the "leader") maintains the actual Ably connection
@@ -195,7 +196,13 @@ export function WebSocketProvider({
         if (messageName === 'STATE_UPDATE') {
             const stateData = payload?.payload || payload;
             if (stateData) {
-                setState(prev => ({ ...prev, ...stateData }));
+                setState(prev => {
+                    if (!shouldApplyStateUpdate(prev, stateData)) {
+                        return prev;
+                    }
+
+                    return { ...prev, ...stateData };
+                });
                 if (stateData.questions) setQuestions(stateData.questions);
                 if (stateData.voteCounts) setVoteResults(stateData.voteCounts);
             }

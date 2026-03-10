@@ -13,6 +13,14 @@ async function sleep(ms: number) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function createClientRequestId(): string {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return crypto.randomUUID();
+    }
+
+    return `req-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 async function fetchWithRetry(
     url: string,
     options: RequestInit = {},
@@ -254,14 +262,17 @@ export async function createSlide(
     sessionId: string,
     type: string,
     content: unknown,
-    options?: { insertAfterSlideId?: string }
+    options?: { insertAfterSlideId?: string; clientRequestId?: string }
 ): Promise<Slide> {
+    const clientRequestId = options?.clientRequestId ?? createClientRequestId();
+
     const res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides`, {
         method: 'POST',
         headers: getHeaders(),
         body: JSON.stringify({
             type,
             content,
+            clientRequestId,
             ...(options?.insertAfterSlideId ? { insertAfterSlideId: options.insertAfterSlideId } : {}),
         }),
     });

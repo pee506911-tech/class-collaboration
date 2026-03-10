@@ -56,11 +56,13 @@ pub async fn readiness(
 
 /// Legacy health check - for backward compatibility
 /// Returns 200 only when fully ready
-pub async fn health_check(State(app_state): State<crate::AppState>) -> Result<&'static str, StatusCode> {
+pub async fn health_check(
+    State(app_state): State<crate::AppState>,
+) -> Result<&'static str, StatusCode> {
     if !app_state.db_pool.is_ready() {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
-    
+
     if let Some(pool) = app_state.db_pool.get().await {
         sqlx::query("SELECT 1")
             .execute(&pool)

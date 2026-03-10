@@ -1,10 +1,13 @@
-use axum::{extract::{State, Path}, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 use serde::Deserialize;
 
 use crate::error::Result;
-use crate::models::session::Session;
-use crate::models::response::ApiResponse;
 use crate::middleware::auth::AuthUser;
+use crate::models::response::ApiResponse;
+use crate::models::session::Session;
 
 /// Request DTO for creating a session
 #[derive(Deserialize)]
@@ -37,7 +40,8 @@ pub async fn get_sessions(
     State(app_state): State<crate::AppState>,
     AuthUser { user_id, .. }: AuthUser,
 ) -> Result<Json<ApiResponse<Vec<crate::models::session::SessionWithSlideCount>>>> {
-    let sessions = app_state.session_service
+    let sessions = app_state
+        .session_service
         .get_user_sessions_with_slide_count(&user_id)
         .await?;
 
@@ -50,7 +54,8 @@ pub async fn create_session(
     AuthUser { user_id, .. }: AuthUser,
     Json(payload): Json<CreateSessionRequest>,
 ) -> Result<Json<ApiResponse<Session>>> {
-    let session = app_state.session_service
+    let session = app_state
+        .session_service
         .create_session(
             &user_id,
             &payload.title,
@@ -68,9 +73,7 @@ pub async fn get_session(
     AuthUser { user_id, .. }: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<Session>>> {
-    let session = app_state.session_service
-        .get_session(&id, &user_id)
-        .await?;
+    let session = app_state.session_service.get_session(&id, &user_id).await?;
 
     Ok(Json(ApiResponse::success(session)))
 }
@@ -82,7 +85,8 @@ pub async fn update_session(
     Path(id): Path<String>,
     Json(payload): Json<UpdateSessionRequest>,
 ) -> Result<Json<ApiResponse<Session>>> {
-    let session = app_state.session_service
+    let session = app_state
+        .session_service
         .update_session(
             &id,
             &user_id,
@@ -101,7 +105,8 @@ pub async fn duplicate_session(
     AuthUser { user_id, .. }: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<Session>>> {
-    let session = app_state.session_service
+    let session = app_state
+        .session_service
         .duplicate_session(&id, &user_id)
         .await?;
 
@@ -114,7 +119,8 @@ pub async fn archive_session(
     AuthUser { user_id, .. }: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<Session>>> {
-    let session = app_state.session_service
+    let session = app_state
+        .session_service
         .archive_session(&id, &user_id)
         .await?;
 
@@ -127,7 +133,8 @@ pub async fn restore_session(
     AuthUser { user_id, .. }: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<Session>>> {
-    let session = app_state.session_service
+    let session = app_state
+        .session_service
         .restore_session(&id, &user_id)
         .await?;
 
@@ -140,11 +147,12 @@ pub async fn delete_session(
     AuthUser { user_id, .. }: AuthUser,
     Path(id): Path<String>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>> {
-    app_state.session_service
+    app_state
+        .session_service
         .delete_session(&id, &user_id)
         .await?;
 
-    Ok(Json(ApiResponse::success(serde_json::json!({ 
-        "message": "Session deleted successfully" 
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "message": "Session deleted successfully"
     }))))
 }

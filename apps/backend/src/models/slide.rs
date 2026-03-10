@@ -26,6 +26,7 @@ pub struct CreateSlideRequest {
     pub slide_type: String,
     pub content: serde_json::Value,
     pub insert_after_slide_id: Option<String>,
+    pub client_request_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,6 +1,6 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
-use chrono::{DateTime, Utc};
 
 #[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +23,9 @@ pub struct Session {
     #[serde(rename = "isPresentationActive")]
     #[sqlx(rename = "is_presentation_active")]
     pub is_presentation_active: bool,
+    #[serde(rename = "stateVersion")]
+    #[sqlx(rename = "state_version")]
+    pub state_version: i64,
     #[serde(rename = "allowQuestions")]
     #[sqlx(rename = "allow_questions")]
     pub allow_questions: bool,
@@ -47,7 +50,7 @@ pub struct SessionWithSlideCount {
 }
 
 use crate::models::slide::Slide;
-use crate::models::student::{Question, Participant};
+use crate::models::student::{Participant, Question};
 
 /// Vote stats for a slide
 #[derive(Serialize, Deserialize, Clone)]
@@ -81,6 +84,7 @@ pub struct SessionState {
     pub current_slide_id: Option<String>,
     pub is_presentation_active: bool,
     pub is_results_visible: bool,
+    pub state_version: i64,
     pub slides: Vec<Slide>,
     pub questions: Vec<Question>,
     pub vote_counts: std::collections::HashMap<String, std::collections::HashMap<String, i32>>,

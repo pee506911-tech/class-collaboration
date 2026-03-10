@@ -57,7 +57,11 @@ pub async fn publish_to_channel<T: Serialize>(
     {
         Ok(response) => {
             if response.status().is_success() {
-                tracing::info!("Successfully published {} to channel {}", event_name, channel);
+                tracing::info!(
+                    "Successfully published {} to channel {}",
+                    event_name,
+                    channel
+                );
                 Ok(())
             } else {
                 let status = response.status();
@@ -79,20 +83,24 @@ pub async fn publish_state_update(session_id: &str, state: &impl Serialize) {
     let payload = serde_json::json!({
         "payload": state
     });
-    
+
     if let Err(e) = publish_to_channel(&channel, "STATE_UPDATE", &payload).await {
         tracing::error!("Failed to publish state update: {}", e);
     }
 }
 
 /// Publish a vote update to a session channel
-pub async fn publish_vote_update(session_id: &str, slide_id: &str, results: &std::collections::HashMap<String, i32>) {
+pub async fn publish_vote_update(
+    session_id: &str,
+    slide_id: &str,
+    results: &std::collections::HashMap<String, i32>,
+) {
     let channel = format!("session:{}", session_id);
     let payload = serde_json::json!({
         "slideId": slide_id,
         "results": results
     });
-    
+
     if let Err(e) = publish_to_channel(&channel, "VOTE_UPDATE", &payload).await {
         tracing::error!("Failed to publish vote update: {}", e);
     }
@@ -106,7 +114,7 @@ pub async fn publish_qa_update(session_id: &str, questions: &impl Serialize) {
             "questions": questions
         }
     });
-    
+
     if let Err(e) = publish_to_channel(&channel, "QA_UPDATE", &payload).await {
         tracing::error!("Failed to publish Q&A update: {}", e);
     }

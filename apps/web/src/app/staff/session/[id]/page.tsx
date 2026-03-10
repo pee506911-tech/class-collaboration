@@ -2,7 +2,7 @@
 
 export const runtime = 'edge';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Slide, Session } from 'shared';
 import { getSlides, createSlide, updateSlide, deleteSlide, reorderSlides, getSession, updateSession, updateSlideVisibility, goLiveSession, stopSession } from '@/lib/api';
@@ -57,6 +57,8 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
     const [showDashboard, setShowDashboard] = useState(false);
     const [editTitle, setEditTitle] = useState('');
     const [showShareDialog, setShowShareDialog] = useState(false);
+    const [isCreatingSlide, setIsCreatingSlide] = useState(false);
+    const isCreatingSlideRef = useRef(false);
 
     // SEPARATE PREVIEW STATE: This is for editor preview only, independent of student view
     const [previewSlideId, setPreviewSlideId] = useState<string | null>(null);
@@ -64,6 +66,22 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
     useEffect(() => {
         if (session) setEditTitle(session.title);
     }, [session]);
+
+    const withSlideCreateGuard = useCallback(async (action: () => Promise<Slide>): Promise<Slide | null> => {
+        if (isCreatingSlideRef.current) {
+            return null;
+        }
+
+        isCreatingSlideRef.current = true;
+        setIsCreatingSlide(true);
+
+        try {
+            return await action();
+        } finally {
+            isCreatingSlideRef.current = false;
+            setIsCreatingSlide(false);
+        }
+    }, []);
 
     // Sync preview to active slide when it changes (optional - keeps preview updated)
     useEffect(() => {
@@ -113,6 +131,8 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
     }, [state]); // Re-bind when state/slides change to ensure fresh closures if needed
 
     async function handleAddSlide(type: string) {
+        if (isCreatingSlideRef.current) return;
+
         let content = {};
         if (type === 'static') content = { title: 'New Slide', body: 'Content here' };
         if (type === 'poll') content = { question: 'New Poll', options: [{ id: '1', text: 'Option 1' }, { id: '2', text: 'Option 2' }] };
@@ -127,7 +147,9 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
         if (type === 'leaderboard') content = { title: 'Leaderboard' };
 
         try {
-            const newSlide = await createSlide(id, type, content);
+            const newSlide = await withSlideCreateGuard(() => createSlide(id, type, content));
+            if (!newSlide) return;
+
             setSlides(prevSlides => insertSlideAtOrder(prevSlides, newSlide));
             setPreviewSlideId(newSlide.id);
             setShowTypeSelector(false);
@@ -191,11 +213,13 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
 
     async function handleDuplicateSlide(slideId: string) {
         const slide = slides.find(s => s.id === slideId);
-        if (!slide) return;
+        if (!slide || isCreatingSlideRef.current) return;
         try {
-            const duplicatedSlide = await createSlide(id, slide.type, slide.content, {
+            const duplicatedSlide = await withSlideCreateGuard(() => createSlide(id, slide.type, slide.content, {
                 insertAfterSlideId: slideId,
-            });
+            }));
+            if (!duplicatedSlide) return;
+
             setSlides(prevSlides => insertSlideAtOrder(prevSlides, duplicatedSlide));
             setPreviewSlideId(duplicatedSlide.id);
             toast.success('Slide duplicated');
@@ -390,9 +414,10 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
                                 <Button
                                     variant="outline"
                                     onClick={() => setShowTypeSelector(true)}
+                                    disabled={isCreatingSlide}
                                     className="w-full h-12 border-dashed border-slate-300 text-slate-500 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50"
                                 >
-                                    <Plus className="w-4 h-4 mr-2" /> Add New Slide
+                                    <Plus className="w-4 h-4 mr-2" /> {isCreatingSlide ? 'Creating Slide...' : 'Add New Slide'}
                                 </Button>
                             </div>
                         )}
@@ -532,6 +557,7 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
                                     size="icon"
                                     className="h-8 w-8 text-slate-400 hover:text-blue-600"
                                     onClick={() => handleDuplicateSlide(previewSlide.id)}
+                                    disabled={isCreatingSlide}
                                     title="Duplicate Slide"
                                 >
                                     <span className="sr-only">Duplicate</span>
@@ -572,14 +598,18 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
                     <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full p-8 relative animate-in fade-in zoom-in-95 duration-200">
                         <button
-                            onClick={() => setShowTypeSelector(false)}
+                            onClick={() => {
+                                if (!isCreatingSlide) setShowTypeSelector(false);
+                            }}
                             className="absolute top-6 right-6 text-slate-400 hover:text-slate-600 transition-colors"
                         >
                             <X className="w-6 h-6" />
                         </button>
                         <h2 className="text-2xl font-bold mb-2 text-center text-slate-900">Add New Slide</h2>
-                        <p className="text-center text-slate-500 mb-8">Choose a template to get started</p>
-                        <SlideTypeSelector onSelect={handleAddSlide} />
+                        <p className="text-center text-slate-500 mb-8">
+                            {isCreatingSlide ? 'Creating slide...' : 'Choose a template to get started'}
+                        </p>
+                        <SlideTypeSelector onSelect={handleAddSlide} disabled={isCreatingSlide} />
                     </div>
                 </div>
             )}

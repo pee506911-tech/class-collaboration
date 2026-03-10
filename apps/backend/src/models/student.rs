@@ -1,10 +1,10 @@
-use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
-use chrono::{DateTime, Utc};
 use crate::db::DbPool;
 use crate::error::Result;
-use uuid::Uuid;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
 use sqlx::MySql;
+use uuid::Uuid;
 
 // ============================================
 // Participant Model
@@ -28,7 +28,7 @@ impl Participant {
             INSERT INTO participants (id, session_id, name)
             VALUES (?, ?, ?)
             ON DUPLICATE KEY UPDATE name = VALUES(name)
-            "#
+            "#,
         )
         .bind(id)
         .bind(session_id)
@@ -47,7 +47,7 @@ impl Participant {
 
     pub async fn find_by_session(pool: &DbPool, session_id: &str) -> Result<Vec<Self>> {
         let participants = sqlx::query_as::<_, Participant>(
-            "SELECT id, session_id, name, joined_at FROM participants WHERE session_id = ?"
+            "SELECT id, session_id, name, joined_at FROM participants WHERE session_id = ?",
         )
         .bind(session_id)
         .fetch_all(pool)
@@ -56,12 +56,11 @@ impl Participant {
     }
 
     pub async fn count_by_session(pool: &DbPool, session_id: &str) -> Result<i64> {
-        let count: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM participants WHERE session_id = ?"
-        )
-        .bind(session_id)
-        .fetch_one(pool)
-        .await?;
+        let count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM participants WHERE session_id = ?")
+                .bind(session_id)
+                .fetch_one(pool)
+                .await?;
         Ok(count.0)
     }
 }
@@ -100,7 +99,7 @@ impl Vote {
             INSERT INTO votes (id, session_id, slide_id, participant_id, option_id)
             VALUES (?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE option_id = VALUES(option_id)
-            "#
+            "#,
         )
         .bind(id)
         .bind(session_id)
@@ -132,7 +131,7 @@ impl Vote {
         }
 
         let mut query = sqlx::QueryBuilder::<MySql>::new(
-            "INSERT INTO votes (id, session_id, slide_id, participant_id, option_id) "
+            "INSERT INTO votes (id, session_id, slide_id, participant_id, option_id) ",
         );
 
         query.push_values(option_ids.iter(), |mut row, option_id| {
@@ -153,7 +152,7 @@ impl Vote {
     pub async fn find_by_slide(pool: &DbPool, slide_id: &str) -> Result<Vec<Self>> {
         let votes = sqlx::query_as::<_, Vote>(
             "SELECT id, session_id, slide_id, participant_id, option_id, created_at 
-             FROM votes WHERE slide_id = ?"
+             FROM votes WHERE slide_id = ?",
         )
         .bind(slide_id)
         .fetch_all(pool)
@@ -162,19 +161,18 @@ impl Vote {
     }
 
     pub async fn count_by_option(pool: &DbPool, slide_id: &str, option_id: &str) -> Result<i64> {
-        let count: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM votes WHERE slide_id = ? AND option_id = ?"
-        )
-        .bind(slide_id)
-        .bind(option_id)
-        .fetch_one(pool)
-        .await?;
+        let count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM votes WHERE slide_id = ? AND option_id = ?")
+                .bind(slide_id)
+                .bind(option_id)
+                .fetch_one(pool)
+                .await?;
         Ok(count.0)
     }
 
     pub async fn get_vote_counts(pool: &DbPool, slide_id: &str) -> Result<Vec<(String, i64)>> {
         let counts: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT option_id, COUNT(*) as count FROM votes WHERE slide_id = ? GROUP BY option_id"
+            "SELECT option_id, COUNT(*) as count FROM votes WHERE slide_id = ? GROUP BY option_id",
         )
         .bind(slide_id)
         .fetch_all(pool)
@@ -183,13 +181,12 @@ impl Vote {
     }
 
     pub async fn has_voted(pool: &DbPool, slide_id: &str, participant_id: &str) -> Result<bool> {
-        let count: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM votes WHERE slide_id = ? AND participant_id = ?"
-        )
-        .bind(slide_id)
-        .bind(participant_id)
-        .fetch_one(pool)
-        .await?;
+        let count: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM votes WHERE slide_id = ? AND participant_id = ?")
+                .bind(slide_id)
+                .bind(participant_id)
+                .fetch_one(pool)
+                .await?;
         Ok(count.0 > 0)
     }
 }
@@ -229,7 +226,7 @@ impl Question {
             r#"
             INSERT INTO questions (id, session_id, slide_id, participant_id, content)
             VALUES (?, ?, ?, ?, ?)
-            "#
+            "#,
         )
         .bind(id)
         .bind(session_id)

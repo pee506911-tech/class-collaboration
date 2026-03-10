@@ -1,12 +1,15 @@
-use axum::{extract::{State, Path}, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 use crate::error::{AppError, Result};
 use crate::models::response::ApiResponse;
-use crate::models::student::{Vote, Question, Participant};
-use crate::services::ably::{publish_vote_update, publish_qa_update};
+use crate::models::student::{Participant, Question, Vote};
+use crate::services::ably::{publish_qa_update, publish_vote_update};
 
 const MAX_QUESTION_LENGTH: usize = 1000;
 const MAX_NAME_LENGTH: usize = 100;
@@ -28,22 +31,28 @@ pub async fn submit_vote(
     Json(payload): Json<SubmitVoteRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>> {
     let pool = app_state.db_pool.pool().await?;
-    
+
     // Validate participant_id is not empty
     if payload.participant_id.trim().is_empty() {
-        tracing::warn!("Vote submission rejected: empty participant_id for session {}", session_id);
+        tracing::warn!(
+            "Vote submission rejected: empty participant_id for session {}",
+            session_id
+        );
         return Err(AppError::Input("Participant ID is required".to_string()));
     }
-    
-    tracing::info!("Vote submission for session {}: slide={}, participant={}", 
-        session_id, payload.slide_id, payload.participant_id);
-    
-    let session_exists: Option<bool> = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)"
-    )
-    .bind(&session_id)
-    .fetch_optional(&pool)
-    .await?;
+
+    tracing::info!(
+        "Vote submission for session {}: slide={}, participant={}",
+        session_id,
+        payload.slide_id,
+        payload.participant_id
+    );
+
+    let session_exists: Option<bool> =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)")
+            .bind(&session_id)
+            .fetch_optional(&pool)
+            .await?;
 
     if session_exists != Some(true) {
         return Err(AppError::NotFound("Session not found".to_string()));
@@ -82,15 +91,22 @@ pub async fn submit_vote(
         AppError::Internal(format!("Failed to save vote: {}", e))
     })?;
 
-    let vote_counts = Vote::get_vote_counts(&pool, &payload.slide_id).await.unwrap_or_default();
-    let results: HashMap<String, i32> = vote_counts.into_iter().map(|(option_id, count)| (option_id, count as i32)).collect();
+    let vote_counts = Vote::get_vote_counts(&pool, &payload.slide_id)
+        .await
+        .unwrap_or_default();
+    let results: HashMap<String, i32> = vote_counts
+        .into_iter()
+        .map(|(option_id, count)| (option_id, count as i32))
+        .collect();
     let session_id_for_publish = session_id.clone();
     let slide_id_for_publish = payload.slide_id.clone();
     tokio::spawn(async move {
         publish_vote_update(&session_id_for_publish, &slide_id_for_publish, &results).await;
     });
 
-    Ok(Json(ApiResponse::success(serde_json::json!({ "message": "Vote submitted successfully" }))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({ "message": "Vote submitted successfully" }),
+    )))
 }
 
 #[derive(Deserialize)]
@@ -117,12 +133,17 @@ pub struct QuestionResponse {
 impl From<Question> for QuestionResponse {
     fn from(q: Question) -> Self {
         QuestionResponse {
-            id: q.id, session_id: q.session_id, slide_id: q.slide_id, participant_id: q.participant_id,
-            content: q.content, upvotes: q.upvotes, is_approved: q.is_approved, created_at: q.created_at,
+            id: q.id,
+            session_id: q.session_id,
+            slide_id: q.slide_id,
+            participant_id: q.participant_id,
+            content: q.content,
+            upvotes: q.upvotes,
+            is_approved: q.is_approved,
+            created_at: q.created_at,
         }
     }
 }
-
 
 /// Submit a question
 pub async fn submit_question(
@@ -131,33 +152,55 @@ pub async fn submit_question(
     Json(payload): Json<SubmitQuestionRequest>,
 ) -> Result<Json<ApiResponse<QuestionResponse>>> {
     let pool = app_state.db_pool.pool().await?;
-    
+
     let content = payload.content.trim();
     if content.is_empty() {
         return Err(AppError::Input("Question cannot be empty".to_string()));
     }
     if content.len() > MAX_QUESTION_LENGTH {
-        return Err(AppError::Input(format!("Question too long (max {} characters)", MAX_QUESTION_LENGTH)));
+        return Err(AppError::Input(format!(
+            "Question too long (max {} characters)",
+            MAX_QUESTION_LENGTH
+        )));
     }
     let sanitized_content = content.replace('<', "&lt;").replace('>', "&gt;");
 
-    let session_exists: Option<bool> = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)")
-        .bind(&session_id).fetch_optional(&pool).await?;
+    let session_exists: Option<bool> =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)")
+            .bind(&session_id)
+            .fetch_optional(&pool)
+            .await?;
     if session_exists != Some(true) {
         return Err(AppError::NotFound("Session not found".to_string()));
     }
 
-    let allows_questions: Option<bool> = sqlx::query_scalar("SELECT allow_questions FROM sessions WHERE id = ?")
-        .bind(&session_id).fetch_optional(&pool).await.unwrap_or(Some(true));
+    let allows_questions: Option<bool> =
+        sqlx::query_scalar("SELECT allow_questions FROM sessions WHERE id = ?")
+            .bind(&session_id)
+            .fetch_optional(&pool)
+            .await
+            .unwrap_or(Some(true));
     if allows_questions == Some(false) {
-        return Err(AppError::Input("Questions are not enabled for this session".to_string()));
+        return Err(AppError::Input(
+            "Questions are not enabled for this session".to_string(),
+        ));
     }
 
     let question_id = Uuid::new_v4().to_string();
-    let question = Question::create(&pool, &question_id, &session_id, payload.slide_id.as_deref(), &payload.participant_id, &sanitized_content)
-        .await.map_err(|e| AppError::Internal(format!("Failed to save question: {}", e)))?;
+    let question = Question::create(
+        &pool,
+        &question_id,
+        &session_id,
+        payload.slide_id.as_deref(),
+        &payload.participant_id,
+        &sanitized_content,
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("Failed to save question: {}", e)))?;
 
-    let all_questions = Question::find_by_session(&pool, &session_id).await.unwrap_or_default();
+    let all_questions = Question::find_by_session(&pool, &session_id)
+        .await
+        .unwrap_or_default();
     let session_id_for_publish = session_id.clone();
     tokio::spawn(async move {
         publish_qa_update(&session_id_for_publish, &all_questions).await;
@@ -179,35 +222,42 @@ pub async fn upvote_question(
     body: Option<Json<UpvoteQuestionRequest>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>> {
     let pool = app_state.db_pool.pool().await?;
-    
+
     let question = Question::find_by_id(&pool, &question_id).await?;
     if question.is_none() {
         return Err(AppError::NotFound("Question not found".to_string()));
     }
 
-    let participant_id = body.and_then(|b| b.participant_id.clone()).unwrap_or_else(|| "anonymous".to_string());
+    let participant_id = body
+        .and_then(|b| b.participant_id.clone())
+        .unwrap_or_else(|| "anonymous".to_string());
 
     let already_upvoted: Option<bool> = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM question_upvotes WHERE question_id = ? AND participant_id = ?)"
     ).bind(&question_id).bind(&participant_id).fetch_optional(&pool).await.unwrap_or(Some(false));
 
     if already_upvoted == Some(true) {
-        return Err(AppError::Input("You have already upvoted this question".to_string()));
+        return Err(AppError::Input(
+            "You have already upvoted this question".to_string(),
+        ));
     }
 
     sqlx::query("INSERT INTO question_upvotes (question_id, participant_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE created_at = created_at")
         .bind(&question_id).bind(&participant_id).execute(&pool).await.ok();
 
     let new_upvotes = Question::upvote(&pool, &question_id).await?;
-    let all_questions = Question::find_by_session(&pool, &session_id).await.unwrap_or_default();
+    let all_questions = Question::find_by_session(&pool, &session_id)
+        .await
+        .unwrap_or_default();
     let session_id_for_publish = session_id.clone();
     tokio::spawn(async move {
         publish_qa_update(&session_id_for_publish, &all_questions).await;
     });
 
-    Ok(Json(ApiResponse::success(serde_json::json!({ "message": "Question upvoted", "upvotes": new_upvotes }))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({ "message": "Question upvoted", "upvotes": new_upvotes }),
+    )))
 }
-
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -223,45 +273,52 @@ pub async fn register_participant(
     Json(payload): Json<RegisterParticipantRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>> {
     let pool = app_state.db_pool.pool().await?;
-    
+
     let name = payload.name.trim();
-    
+
     // Check if session exists and get require_name setting
-    let session_info: Option<(bool,)> = sqlx::query_as(
-        "SELECT require_name FROM sessions WHERE id = ?"
-    )
-    .bind(&session_id)
-    .fetch_optional(&pool)
-    .await?;
-    
+    let session_info: Option<(bool,)> =
+        sqlx::query_as("SELECT require_name FROM sessions WHERE id = ?")
+            .bind(&session_id)
+            .fetch_optional(&pool)
+            .await?;
+
     let require_name = match session_info {
         Some((require_name,)) => require_name,
         None => return Err(AppError::NotFound("Session not found".to_string())),
     };
-    
+
     // If session requires name, reject empty names
     let is_anonymous = name.eq_ignore_ascii_case("anonymous");
     if require_name && (name.is_empty() || is_anonymous) {
-        tracing::warn!("Participant registration rejected: empty name for session {} which requires name", session_id);
-        return Err(AppError::Input("Name is required for this session".to_string()));
+        tracing::warn!(
+            "Participant registration rejected: empty name for session {} which requires name",
+            session_id
+        );
+        return Err(AppError::Input(
+            "Name is required for this session".to_string(),
+        ));
     }
-    
+
     // If name is empty and not required, don't register (just return success)
     if name.is_empty() {
-        return Ok(Json(ApiResponse::success(serde_json::json!({ 
+        return Ok(Json(ApiResponse::success(serde_json::json!({
             "message": "Participant joined anonymously",
             "participantId": payload.participant_id
         }))));
     }
-    
+
     if name.len() > MAX_NAME_LENGTH {
-        return Err(AppError::Input(format!("Name too long (max {} characters)", MAX_NAME_LENGTH)));
+        return Err(AppError::Input(format!(
+            "Name too long (max {} characters)",
+            MAX_NAME_LENGTH
+        )));
     }
     let sanitized_name = name.replace('<', "&lt;").replace('>', "&gt;");
 
     Participant::create(&pool, &payload.participant_id, &session_id, &sanitized_name).await?;
 
-    Ok(Json(ApiResponse::success(serde_json::json!({ 
+    Ok(Json(ApiResponse::success(serde_json::json!({
         "message": "Participant registered",
         "participantId": payload.participant_id
     }))))
@@ -287,29 +344,39 @@ pub async fn get_my_votes(
     axum::extract::Query(query): axum::extract::Query<GetMyVotesQuery>,
 ) -> Result<Json<ApiResponse<MyVotesResponse>>> {
     let pool = app_state.db_pool.pool().await?;
-    
-    tracing::info!("get_my_votes called for session {} with participantId {}", session_id, query.participant_id);
-    
+
+    tracing::info!(
+        "get_my_votes called for session {} with participantId {}",
+        session_id,
+        query.participant_id
+    );
+
     if query.participant_id.trim().is_empty() {
         return Err(AppError::Input("Participant ID is required".to_string()));
     }
-    
+
     // Fetch all votes for this participant in this session
     let votes: Vec<(String, String)> = sqlx::query_as(
-        "SELECT slide_id, option_id FROM votes WHERE session_id = ? AND participant_id = ?"
+        "SELECT slide_id, option_id FROM votes WHERE session_id = ? AND participant_id = ?",
     )
     .bind(&session_id)
     .bind(&query.participant_id)
     .fetch_all(&pool)
     .await?;
-    
-    tracing::info!("Found {} votes for participant {}", votes.len(), query.participant_id);
-    
+
+    tracing::info!(
+        "Found {} votes for participant {}",
+        votes.len(),
+        query.participant_id
+    );
+
     // Group by slide_id
     let mut votes_map: HashMap<String, Vec<String>> = HashMap::new();
     for (slide_id, option_id) in votes {
         votes_map.entry(slide_id).or_default().push(option_id);
     }
-    
-    Ok(Json(ApiResponse::success(MyVotesResponse { votes: votes_map })))
+
+    Ok(Json(ApiResponse::success(MyVotesResponse {
+        votes: votes_map,
+    })))
 }

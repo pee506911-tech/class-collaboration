@@ -37,10 +37,12 @@ export const MultipleChoiceSlideContentSchema = z.object({
 });
 
 export const StateUpdatePayloadSchema = z.object({
-    currentSlideId: z.string().optional(),
+    currentSlideId: z.string().nullable().optional(),
     isPresentationActive: z.boolean().optional(),
     isBlackout: z.boolean().optional(),
     showResults: z.boolean().optional(),
+    isResultsVisible: z.boolean().optional(),
+    stateVersion: z.number().optional(),
 });
 
 export const QASlideContentSchema = z.object({
@@ -94,6 +96,7 @@ export const SessionSchema = z.object({
     allowQuestions: z.boolean().optional(),
     requireName: z.boolean().optional(),
     isPresentationActive: z.boolean().optional(),
+    stateVersion: z.number().optional(),
     createdAt: z.string(), // ISO date
     updatedAt: z.string(),
     slideCount: z.number().optional(), // Included in list view
@@ -172,6 +175,7 @@ export interface StateUpdatePayload {
     currentSlideId?: string | null;
     isResultsVisible?: boolean;
     isPresentationActive?: boolean;
+    stateVersion?: number;
     isBlackout?: boolean;
     showResults?: boolean;
     lostCount?: number;

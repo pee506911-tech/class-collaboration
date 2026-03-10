@@ -1,9 +1,9 @@
-pub mod health;
+pub mod ably;
 pub mod auth;
-pub mod session;
-pub mod slide;
+pub mod health;
 pub mod live;
 pub mod public;
-pub mod ably;
+pub mod session;
+pub mod slide;
 pub mod stats;
 pub mod student;

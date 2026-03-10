@@ -1,18 +1,20 @@
-use axum::{extract::{State, Extension}, Json};
+use axum::{
+    extract::{Extension, State},
+    Json,
+};
+use bcrypt::{hash, verify, DEFAULT_COST};
+use chrono::{Duration, Utc};
+use jsonwebtoken::{encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::query_as;
-use bcrypt::{hash, verify, DEFAULT_COST};
-use jsonwebtoken::{encode, EncodingKey, Header};
-use uuid::Uuid;
 use std::sync::Arc;
-use chrono::{Utc, Duration};
+use uuid::Uuid;
 
-
-use crate::error::{AppError, Result};
-use crate::models::user::User;
 use crate::config::Config;
+use crate::error::{AppError, Result};
 use crate::middleware::auth::Claims;
+use crate::models::user::User;
 
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 
@@ -48,13 +50,15 @@ pub async fn register(
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<Value>> {
     let pool = app_state.db_pool.pool().await?;
-    
+
     // Input validation
     if payload.email.len() > MAX_EMAIL_LENGTH {
         return Err(AppError::Input("Email too long".to_string()));
     }
     if payload.password.len() < MIN_PASSWORD_LENGTH {
-        return Err(AppError::Input("Password must be at least 8 characters".to_string()));
+        return Err(AppError::Input(
+            "Password must be at least 8 characters".to_string(),
+        ));
     }
     if payload.password.len() > MAX_PASSWORD_LENGTH {
         return Err(AppError::Input("Password too long".to_string()));
@@ -76,28 +80,26 @@ pub async fn register(
     let id = Uuid::new_v4().to_string();
     let role = payload.role.unwrap_or_else(|| "student".to_string());
 
-    sqlx::query(
-        "INSERT INTO users (id, email, password_hash, name, role) VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(&payload.email)
-    .bind(&password_hash)
-    .bind(&payload.name)
-    .bind(&role)
-    .execute(&pool)
-    .await
-    .map_err(|e| {
-        if e.to_string().contains("Duplicate entry") {
-            AppError::Input("Email already exists".to_string())
-        } else {
-            AppError::Database(e)
-        }
-    })?;
+    sqlx::query("INSERT INTO users (id, email, password_hash, name, role) VALUES (?, ?, ?, ?, ?)")
+        .bind(&id)
+        .bind(&payload.email)
+        .bind(&password_hash)
+        .bind(&payload.name)
+        .bind(&role)
+        .execute(&pool)
+        .await
+        .map_err(|e| {
+            if e.to_string().contains("Duplicate entry") {
+                AppError::Input("Email already exists".to_string())
+            } else {
+                AppError::Database(e)
+            }
+        })?;
 
-    Ok(Json(json!({ 
+    Ok(Json(json!({
         "success": true,
-        "message": "User registered successfully", 
-        "userId": id 
+        "message": "User registered successfully",
+        "userId": id
     })))
 }
 
@@ -108,7 +110,7 @@ pub async fn login(
     Json(payload): Json<LoginRequest>,
 ) -> Result<(CookieJar, Json<AuthResponse>)> {
     let pool = app_state.db_pool.pool().await?;
-    
+
     let user: User = query_as("SELECT * FROM users WHERE email = ?")
         .bind(&payload.email)
         .fetch_optional(&pool)
@@ -154,10 +156,10 @@ pub async fn login(
 
     Ok((
         jar.add(cookie),
-        Json(AuthResponse { 
+        Json(AuthResponse {
             success: true,
-            token, 
-            user 
-        })
+            token,
+            user,
+        }),
     ))
 }

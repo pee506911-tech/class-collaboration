@@ -12,6 +12,8 @@ use crate::middleware::auth::AuthUser;
 use crate::models::response::ApiResponse;
 use crate::models::slide::{CreateSlideRequest, ReorderSlidesRequest, Slide, UpdateSlideRequest};
 
+const ORDER_STEP: i32 = 1024;
+
 /// Get all slides for a session
 pub async fn get_slides(
     State(app_state): State<crate::AppState>,
@@ -42,39 +44,32 @@ pub async fn create_slide(
     let mut tx = pool.begin().await?;
     lock_owned_session(&mut tx, &session_id, &user_id).await?;
 
+    if let Some(client_request_id) = payload.client_request_id.as_deref() {
+        if let Some(existing_slide) =
+            find_slide_by_client_request_id(&mut tx, &session_id, client_request_id).await?
+        {
+            tx.commit().await?;
+            return Ok(Json(ApiResponse::success(existing_slide)));
+        }
+    }
+
     let id = Uuid::new_v4().to_string();
     let order_index = match payload.insert_after_slide_id.as_deref() {
         Some(insert_after_slide_id) => {
-            let insert_after_order_index = query_scalar::<_, i32>(
-                "SELECT order_index FROM slides WHERE id = ? AND session_id = ? FOR UPDATE",
-            )
-            .bind(insert_after_slide_id)
-            .bind(&session_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or_else(|| AppError::Input("Insert-after slide not found".to_string()))?;
-
-            shift_slide_orders_up_from(&mut tx, &session_id, insert_after_order_index + 1).await?;
-            insert_after_order_index + 1
+            allocate_order_after(&mut tx, &session_id, insert_after_slide_id).await?
         }
-        None => {
-            let max_order_index = query_scalar::<_, i32>(
-                "SELECT order_index FROM slides WHERE session_id = ? ORDER BY order_index DESC LIMIT 1 FOR UPDATE"
-            )
-            .bind(&session_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-
-            max_order_index.unwrap_or(-1) + 1
-        }
+        None => get_append_order_index(&mut tx, &session_id).await?,
     };
 
-    query("INSERT INTO slides (id, session_id, type, content, order_index) VALUES (?, ?, ?, ?, ?)")
+    query(
+        "INSERT INTO slides (id, session_id, type, content, order_index, client_request_id) VALUES (?, ?, ?, ?, ?, ?)"
+    )
         .bind(&id)
         .bind(&session_id)
         .bind(&payload.slide_type)
         .bind(sqlx::types::Json(&payload.content))
         .bind(order_index)
+        .bind(&payload.client_request_id)
         .execute(&mut *tx)
         .await?;
 
@@ -86,6 +81,22 @@ pub async fn create_slide(
     tx.commit().await?;
 
     Ok(Json(ApiResponse::success(slide)))
+}
+
+async fn find_slide_by_client_request_id(
+    tx: &mut Transaction<'_, MySql>,
+    session_id: &str,
+    client_request_id: &str,
+) -> Result<Option<Slide>> {
+    let slide = query_as::<_, Slide>(
+        "SELECT * FROM slides WHERE session_id = ? AND client_request_id = ? LIMIT 1 FOR UPDATE",
+    )
+    .bind(session_id)
+    .bind(client_request_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    Ok(slide)
 }
 
 /// Update an existing slide
@@ -139,22 +150,16 @@ pub async fn delete_slide(
     let mut tx = pool.begin().await?;
     lock_owned_session(&mut tx, &session_id, &user_id).await?;
 
-    let deleted_order_index = query_scalar::<_, i32>(
-        "SELECT order_index FROM slides WHERE id = ? AND session_id = ? FOR UPDATE",
-    )
-    .bind(&slide_id)
-    .bind(&session_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Slide not found".to_string()))?;
-
-    query("DELETE FROM slides WHERE id = ? AND session_id = ?")
+    let delete_result = query("DELETE FROM slides WHERE id = ? AND session_id = ?")
         .bind(&slide_id)
         .bind(&session_id)
         .execute(&mut *tx)
         .await?;
 
-    close_slide_order_gap(&mut tx, &session_id, deleted_order_index).await?;
+    if delete_result.rows_affected() == 0 {
+        return Err(AppError::NotFound("Slide not found".to_string()));
+    }
+
     tx.commit().await?;
 
     Ok(Json(ApiResponse::success(
@@ -185,11 +190,11 @@ pub async fn reorder_slides(
 
     validate_reorder_payload(&session_slide_ids, &payload.slide_ids)?;
     apply_order_mapping(&mut tx, &session_id, &payload.slide_ids, |index| {
-        -((index as i32) + 1)
+        -(((index as i32) + 1) * ORDER_STEP)
     })
     .await?;
     apply_order_mapping(&mut tx, &session_id, &payload.slide_ids, |index| {
-        index as i32
+        (index as i32) * ORDER_STEP
     })
     .await?;
     tx.commit().await?;
@@ -218,45 +223,112 @@ async fn lock_owned_session(
     }
 }
 
-async fn shift_slide_orders_up_from(
-    tx: &mut Transaction<'_, MySql>,
-    session_id: &str,
-    starting_at: i32,
-) -> Result<()> {
-    query(
-        "UPDATE slides SET order_index = -order_index - 1 WHERE session_id = ? AND order_index >= ?"
+async fn get_append_order_index(tx: &mut Transaction<'_, MySql>, session_id: &str) -> Result<i32> {
+    let max_order_index = query_scalar::<_, i32>(
+        "SELECT order_index FROM slides WHERE session_id = ? ORDER BY order_index DESC LIMIT 1 FOR UPDATE"
     )
     .bind(session_id)
-    .bind(starting_at)
-    .execute(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await?;
 
-    query("UPDATE slides SET order_index = -order_index WHERE session_id = ? AND order_index <= ?")
-        .bind(session_id)
-        .bind(-(starting_at + 1))
-        .execute(&mut **tx)
-        .await?;
-
-    Ok(())
+    Ok(match max_order_index {
+        Some(value) => value.saturating_add(ORDER_STEP),
+        None => 0,
+    })
 }
 
-async fn close_slide_order_gap(
+async fn allocate_order_after(
     tx: &mut Transaction<'_, MySql>,
     session_id: &str,
-    deleted_order_index: i32,
-) -> Result<()> {
-    query("UPDATE slides SET order_index = -order_index WHERE session_id = ? AND order_index > ?")
-        .bind(session_id)
-        .bind(deleted_order_index)
-        .execute(&mut **tx)
-        .await?;
+    insert_after_slide_id: &str,
+) -> Result<i32> {
+    let mut insert_after_order_index = query_scalar::<_, i32>(
+        "SELECT order_index FROM slides WHERE id = ? AND session_id = ? FOR UPDATE",
+    )
+    .bind(insert_after_slide_id)
+    .bind(session_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::Input("Insert-after slide not found".to_string()))?;
 
-    query(
-        "UPDATE slides SET order_index = -order_index - 1 WHERE session_id = ? AND order_index <= ?"
+    let mut next_order_index =
+        get_next_order_index(tx, session_id, insert_after_order_index).await?;
+
+    if let Some(order_index) =
+        calculate_insert_order_index(insert_after_order_index, next_order_index)
+    {
+        return Ok(order_index);
+    }
+
+    rebalance_slide_orders(tx, session_id).await?;
+
+    insert_after_order_index = query_scalar::<_, i32>(
+        "SELECT order_index FROM slides WHERE id = ? AND session_id = ? FOR UPDATE",
+    )
+    .bind(insert_after_slide_id)
+    .bind(session_id)
+    .fetch_one(&mut **tx)
+    .await?;
+
+    next_order_index = get_next_order_index(tx, session_id, insert_after_order_index).await?;
+
+    calculate_insert_order_index(insert_after_order_index, next_order_index)
+        .ok_or_else(|| AppError::Input("Unable to allocate slide order".to_string()))
+}
+
+async fn get_next_order_index(
+    tx: &mut Transaction<'_, MySql>,
+    session_id: &str,
+    insert_after_order_index: i32,
+) -> Result<Option<i32>> {
+    let next_order_index = query_scalar::<_, i32>(
+        "SELECT order_index FROM slides WHERE session_id = ? AND order_index > ? ORDER BY order_index ASC LIMIT 1 FOR UPDATE"
     )
     .bind(session_id)
-    .bind(-(deleted_order_index + 1))
-    .execute(&mut **tx)
+    .bind(insert_after_order_index)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    Ok(next_order_index)
+}
+
+fn calculate_insert_order_index(
+    insert_after_order_index: i32,
+    next_order_index: Option<i32>,
+) -> Option<i32> {
+    match next_order_index {
+        Some(next_order_index) => {
+            let gap = next_order_index - insert_after_order_index;
+            if gap > 1 {
+                Some(insert_after_order_index + (gap / 2))
+            } else {
+                None
+            }
+        }
+        None => Some(insert_after_order_index.saturating_add(ORDER_STEP)),
+    }
+}
+
+async fn rebalance_slide_orders(tx: &mut Transaction<'_, MySql>, session_id: &str) -> Result<()> {
+    let slide_ids = query_scalar::<_, String>(
+        "SELECT id FROM slides WHERE session_id = ? ORDER BY order_index ASC, id ASC FOR UPDATE",
+    )
+    .bind(session_id)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    if slide_ids.is_empty() {
+        return Ok(());
+    }
+
+    apply_order_mapping(tx, session_id, &slide_ids, |index| {
+        -(((index as i32) + 1) * ORDER_STEP)
+    })
+    .await?;
+
+    apply_order_mapping(tx, session_id, &slide_ids, |index| {
+        (index as i32) * ORDER_STEP
+    })
     .await?;
 
     Ok(())
@@ -371,11 +443,28 @@ mod tests {
         let payload = serde_json::from_value::<CreateSlideRequest>(serde_json::json!({
             "type": "static",
             "content": { "title": "Copy" },
-            "insertAfterSlideId": "slide-123"
+            "insertAfterSlideId": "slide-123",
+            "clientRequestId": "req-123"
         }))
         .expect("payload should deserialize");
 
         assert_eq!(payload.slide_type, "static");
         assert_eq!(payload.insert_after_slide_id.as_deref(), Some("slide-123"));
+        assert_eq!(payload.client_request_id.as_deref(), Some("req-123"));
+    }
+
+    #[test]
+    fn calculate_insert_order_index_uses_midpoint_when_gap_exists() {
+        assert_eq!(calculate_insert_order_index(1024, Some(2048)), Some(1536));
+    }
+
+    #[test]
+    fn calculate_insert_order_index_requests_rebalance_when_gap_is_exhausted() {
+        assert_eq!(calculate_insert_order_index(1024, Some(1025)), None);
+    }
+
+    #[test]
+    fn calculate_insert_order_index_appends_with_step_when_no_next_slide_exists() {
+        assert_eq!(calculate_insert_order_index(2048, None), Some(3072));
     }
 }

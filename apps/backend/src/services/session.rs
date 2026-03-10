@@ -26,24 +26,33 @@ impl SessionService {
     }
 
     /// Get all sessions for a user with slide counts
-    pub async fn get_user_sessions_with_slide_count(&self, user_id: &str) -> Result<Vec<crate::models::session::SessionWithSlideCount>> {
-        let sessions_with_counts = self.repository.find_by_creator_with_slide_count(user_id).await?;
-        
+    pub async fn get_user_sessions_with_slide_count(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<crate::models::session::SessionWithSlideCount>> {
+        let sessions_with_counts = self
+            .repository
+            .find_by_creator_with_slide_count(user_id)
+            .await?;
+
         let result = sessions_with_counts
             .into_iter()
-            .map(|(session, slide_count)| crate::models::session::SessionWithSlideCount {
-                session,
-                slide_count,
-            })
+            .map(
+                |(session, slide_count)| crate::models::session::SessionWithSlideCount {
+                    session,
+                    slide_count,
+                },
+            )
             .collect();
-        
+
         Ok(result)
     }
 
     /// Get a specific session by ID
     /// Validates ownership
     pub async fn get_session(&self, session_id: &str, user_id: &str) -> Result<Session> {
-        let session = self.repository
+        let session = self
+            .repository
             .find_by_id(session_id)
             .await?
             .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
@@ -148,7 +157,8 @@ impl SessionService {
     pub async fn duplicate_session(&self, session_id: &str, user_id: &str) -> Result<Session> {
         self.verify_ownership(session_id, user_id).await?;
 
-        let original = self.repository
+        let original = self
+            .repository
             .find_by_id(session_id)
             .await?
             .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
@@ -200,7 +210,10 @@ impl SessionService {
     /// Helper: Verify ownership
     /// Business Rule: Only the creator can modify a session
     async fn verify_ownership(&self, session_id: &str, user_id: &str) -> Result<()> {
-        let is_owner = self.repository.verify_ownership(session_id, user_id).await?;
+        let is_owner = self
+            .repository
+            .verify_ownership(session_id, user_id)
+            .await?;
 
         if !is_owner {
             return Err(AppError::Auth("Unauthorized access to session".to_string()));
@@ -210,8 +223,14 @@ impl SessionService {
     }
 
     /// Get public session data by share token
-    pub async fn get_public_session(&self, token: &str) -> Result<crate::models::session::PublicSessionResponse> {
-        let session = self.repository.find_by_share_token(token).await?
+    pub async fn get_public_session(
+        &self,
+        token: &str,
+    ) -> Result<crate::models::session::PublicSessionResponse> {
+        let session = self
+            .repository
+            .find_by_share_token(token)
+            .await?
             .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
 
         let slides_fut = self.repository.get_slides(&session.id);
@@ -223,7 +242,10 @@ impl SessionService {
             tokio::try_join!(slides_fut, questions_fut, participants_fut, vote_counts_fut)?;
 
         // Process vote counts
-        let mut vote_map: std::collections::HashMap<String, std::collections::HashMap<String, i32>> = std::collections::HashMap::new();
+        let mut vote_map: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, i32>,
+        > = std::collections::HashMap::new();
         for (slide_id, option_id, count) in vote_counts_raw {
             vote_map
                 .entry(slide_id)
@@ -231,13 +253,16 @@ impl SessionService {
                 .insert(option_id, count as i32);
         }
 
-        let slides_with_stats = slides.into_iter().map(|slide| {
-            let votes = vote_map.remove(&slide.id);
-            crate::models::session::SlideWithStats {
-                slide,
-                stats: votes.map(|v| crate::models::session::VoteStats { votes: v }),
-            }
-        }).collect();
+        let slides_with_stats = slides
+            .into_iter()
+            .map(|slide| {
+                let votes = vote_map.remove(&slide.id);
+                crate::models::session::SlideWithStats {
+                    slide,
+                    stats: votes.map(|v| crate::models::session::VoteStats { votes: v }),
+                }
+            })
+            .collect();
 
         Ok(crate::models::session::PublicSessionResponse {
             session,
@@ -248,9 +273,15 @@ impl SessionService {
     }
 
     /// Get session state for real-time sync
-    pub async fn get_session_state(&self, session_id: &str) -> Result<crate::models::session::SessionState> {
-        let session = self.repository.find_by_id(session_id).await?
-             .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
+    pub async fn get_session_state(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::models::session::SessionState> {
+        let session = self
+            .repository
+            .find_by_id(session_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
 
         let slides_fut = self.repository.get_slides(session_id);
         let questions_fut = self.repository.get_questions(session_id);
@@ -259,7 +290,10 @@ impl SessionService {
         let (slides, questions, vote_counts_raw) =
             tokio::try_join!(slides_fut, questions_fut, vote_counts_fut)?;
 
-        let mut vote_counts: std::collections::HashMap<String, std::collections::HashMap<String, i32>> = std::collections::HashMap::new();
+        let mut vote_counts: std::collections::HashMap<
+            String,
+            std::collections::HashMap<String, i32>,
+        > = std::collections::HashMap::new();
         for (slide_id, option_id, count) in vote_counts_raw {
             vote_counts
                 .entry(slide_id)
@@ -271,6 +305,7 @@ impl SessionService {
             current_slide_id: session.current_slide_id,
             is_presentation_active: session.is_presentation_active,
             is_results_visible: session.is_results_visible,
+            state_version: session.state_version,
             slides,
             questions,
             vote_counts,

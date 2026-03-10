@@ -4,9 +4,9 @@ use sqlx::{query_as, query_scalar, MySql, Pool};
 use crate::db::LazyDbPool;
 use crate::error::{AppError, Result};
 use crate::models::session::Session;
-use crate::repositories::session::{NewSession, SessionRepository, SessionUpdates};
 use crate::models::slide::Slide;
-use crate::models::student::{Question, Participant};
+use crate::models::student::{Participant, Question};
+use crate::repositories::session::{NewSession, SessionRepository, SessionUpdates};
 
 #[derive(sqlx::FromRow)]
 struct SessionWithSlideCountRow {
@@ -18,6 +18,7 @@ struct SessionWithSlideCountRow {
     current_slide_id: Option<String>,
     is_results_visible: bool,
     is_presentation_active: bool,
+    state_version: i64,
     allow_questions: bool,
     require_name: bool,
     created_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -34,22 +35,30 @@ pub struct SqlxSessionRepository {
 
 impl SqlxSessionRepository {
     pub fn new(pool: Pool<MySql>) -> Self {
-        Self { pool: Some(pool), lazy_pool: None }
+        Self {
+            pool: Some(pool),
+            lazy_pool: None,
+        }
     }
 
     pub fn new_lazy(lazy_pool: LazyDbPool) -> Self {
-        Self { pool: None, lazy_pool: Some(lazy_pool) }
+        Self {
+            pool: None,
+            lazy_pool: Some(lazy_pool),
+        }
     }
 
     async fn get_pool(&self) -> Result<Pool<MySql>> {
         if let Some(ref pool) = self.pool {
             return Ok(pool.clone());
         }
-        
+
         if let Some(ref lazy) = self.lazy_pool {
             lazy.get_or_wait().await
         } else {
-            Err(AppError::Internal("No database pool configured".to_string()))
+            Err(AppError::Internal(
+                "No database pool configured".to_string(),
+            ))
         }
     }
 }
@@ -59,7 +68,7 @@ impl SessionRepository for SqlxSessionRepository {
     async fn find_by_creator(&self, creator_id: &str) -> Result<Vec<Session>> {
         let pool = self.get_pool().await?;
         let sessions = query_as::<_, Session>(
-            "SELECT * FROM sessions WHERE creator_id = ? ORDER BY created_at DESC"
+            "SELECT * FROM sessions WHERE creator_id = ? ORDER BY created_at DESC",
         )
         .bind(creator_id)
         .fetch_all(&pool)
@@ -68,7 +77,10 @@ impl SessionRepository for SqlxSessionRepository {
         Ok(sessions)
     }
 
-    async fn find_by_creator_with_slide_count(&self, creator_id: &str) -> Result<Vec<(Session, i64)>> {
+    async fn find_by_creator_with_slide_count(
+        &self,
+        creator_id: &str,
+    ) -> Result<Vec<(Session, i64)>> {
         let pool = self.get_pool().await?;
         let rows = query_as::<_, SessionWithSlideCountRow>(
             r#"
@@ -81,6 +93,7 @@ impl SessionRepository for SqlxSessionRepository {
                 s.current_slide_id,
                 s.is_results_visible,
                 s.is_presentation_active,
+                s.state_version,
                 s.allow_questions,
                 s.require_name,
                 s.created_at,
@@ -94,7 +107,7 @@ impl SessionRepository for SqlxSessionRepository {
             ) sc ON sc.session_id = s.id
             WHERE s.creator_id = ?
             ORDER BY s.created_at DESC
-            "#
+            "#,
         )
         .bind(creator_id)
         .fetch_all(&pool)
@@ -113,6 +126,7 @@ impl SessionRepository for SqlxSessionRepository {
                         current_slide_id: r.current_slide_id,
                         is_results_visible: r.is_results_visible,
                         is_presentation_active: r.is_presentation_active,
+                        state_version: r.state_version,
                         allow_questions: r.allow_questions,
                         require_name: r.require_name,
                         created_at: r.created_at,
@@ -217,13 +231,12 @@ impl SessionRepository for SqlxSessionRepository {
 
     async fn verify_ownership(&self, session_id: &str, user_id: &str) -> Result<bool> {
         let pool = self.get_pool().await?;
-        let exists: Option<bool> = query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ? AND creator_id = ?)"
-        )
-        .bind(session_id)
-        .bind(user_id)
-        .fetch_optional(&pool)
-        .await?;
+        let exists: Option<bool> =
+            query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ? AND creator_id = ?)")
+                .bind(session_id)
+                .bind(user_id)
+                .fetch_optional(&pool)
+                .await?;
 
         Ok(exists.unwrap_or(false))
     }
@@ -242,7 +255,7 @@ impl SessionRepository for SqlxSessionRepository {
     async fn get_questions(&self, session_id: &str) -> Result<Vec<Question>> {
         let pool = self.get_pool().await?;
         let questions = query_as::<_, Question>(
-            "SELECT * FROM questions WHERE session_id = ? ORDER BY upvotes DESC, created_at DESC"
+            "SELECT * FROM questions WHERE session_id = ? ORDER BY upvotes DESC, created_at DESC",
         )
         .bind(session_id)
         .fetch_all(&pool)

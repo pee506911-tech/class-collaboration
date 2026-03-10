@@ -1,16 +1,15 @@
+use crate::config::Config;
+use crate::error::AppError;
 use axum::{
     async_trait,
     extract::FromRequestParts,
     http::{header::AUTHORIZATION, request::Parts},
-    Extension,
-    RequestPartsExt,
+    Extension, RequestPartsExt,
 };
 use axum_extra::extract::cookie::CookieJar;
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use crate::config::Config;
-use crate::error::AppError;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {

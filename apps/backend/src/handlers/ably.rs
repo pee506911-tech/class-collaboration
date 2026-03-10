@@ -1,10 +1,10 @@
-use axum::{extract::Query, Json, Extension};
+use axum::{extract::Query, Extension, Json};
 use serde::Deserialize;
-use std::sync::Arc;
 use serde_json::json;
+use std::sync::Arc;
 
-use crate::error::Result;
 use crate::config::Config;
+use crate::error::Result;
 
 #[derive(Deserialize)]
 pub struct AblyTokenQuery {
@@ -27,7 +27,9 @@ pub async fn get_ably_token(
     // Parse key: "keyName:keySecret"
     let key_parts: Vec<&str> = ably_api_key.split(':').collect();
     if key_parts.len() != 2 {
-        return Err(crate::error::AppError::Internal("Invalid ABLY_API_KEY format".to_string()));
+        return Err(crate::error::AppError::Internal(
+            "Invalid ABLY_API_KEY format".to_string(),
+        ));
     }
     let key_name = key_parts[0];
     let key_secret = key_parts[1];
@@ -45,16 +47,25 @@ pub async fn get_ably_token(
             })
         }
         _ => {
-            return Err(crate::error::AppError::Input("Invalid role. Must be 'staff', 'student', or 'projector'".to_string()));
+            return Err(crate::error::AppError::Input(
+                "Invalid role. Must be 'staff', 'student', or 'projector'".to_string(),
+            ));
         }
     };
 
     // Set client ID for tracking - CRITICAL: each participant must have a unique ID
-    let client_id = params.participant_id.clone()
+    let client_id = params
+        .participant_id
+        .clone()
         .unwrap_or_else(|| format!("{}-{}", params.role, params.session_id));
-    
+
     // Warn if participant_id is empty (this causes all students to share the same connection)
-    if params.participant_id.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+    if params
+        .participant_id
+        .as_ref()
+        .map(|s| s.is_empty())
+        .unwrap_or(true)
+    {
         tracing::warn!(
             "Empty or missing participant_id for session {} role {}. Using fallback: {}. This may cause connection sharing issues!",
             params.session_id, params.role, client_id
@@ -62,7 +73,9 @@ pub async fn get_ably_token(
     } else {
         tracing::info!(
             "Generating Ably token for session {} role {} participant {}",
-            params.session_id, params.role, client_id
+            params.session_id,
+            params.role,
+            client_id
         );
     }
 
@@ -76,17 +89,12 @@ pub async fn get_ably_token(
 
     // Capability must be JSON string
     let capability_str = serde_json::to_string(&capability).unwrap();
-    
+
     // Ably token request signature format
     // Format: keyName\nTTL\ncapability\nclientId\ntimestamp\nnonce\n
     let sign_text = format!(
         "{}\n{}\n{}\n{}\n{}\n{}\n",
-        key_name,
-        ttl,
-        capability_str,
-        client_id,
-        timestamp,
-        nonce
+        key_name, ttl, capability_str, client_id, timestamp, nonce
     );
 
     tracing::debug!("Sign text for HMAC:\n{}", sign_text);
@@ -94,14 +102,17 @@ pub async fn get_ably_token(
     // Create HMAC-SHA256 signature
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    
+
     type HmacSha256 = Hmac<Sha256>;
-    
+
     let mut mac = HmacSha256::new_from_slice(key_secret.as_bytes())
         .map_err(|_| crate::error::AppError::Internal("Failed to create HMAC".to_string()))?;
     mac.update(sign_text.as_bytes());
     let result = mac.finalize();
-    let mac_base64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, result.into_bytes());
+    let mac_base64 = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        result.into_bytes(),
+    );
 
     tracing::debug!("Generated MAC: {}", mac_base64);
 

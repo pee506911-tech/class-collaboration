@@ -1,13 +1,16 @@
-use axum::{extract::{State, Path}, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::{query_as, FromRow};
 use std::collections::HashMap;
-use chrono::{DateTime, Utc};
 
 use crate::error::{AppError, Result};
+use crate::middleware::auth::AuthUser;
 use crate::models::session::Session;
 use crate::models::slide::Slide;
-use crate::middleware::auth::AuthUser;
 
 #[derive(Debug, Serialize)]
 pub struct Participant {
@@ -118,7 +121,7 @@ pub async fn get_session_stats(
     Path(id): Path<String>,
 ) -> Result<Json<SessionStats>> {
     let pool = app_state.db_pool.pool().await?;
-    
+
     // Verify session exists and user owns it
     let session = query_as::<_, Session>("SELECT * FROM sessions WHERE id = ?")
         .bind(&id)
@@ -131,11 +134,10 @@ pub async fn get_session_stats(
     }
 
     // Run independent reads in parallel to reduce tail latency
-    let slides_fut = query_as::<_, Slide>(
-        "SELECT * FROM slides WHERE session_id = ? ORDER BY order_index, id"
-    )
-    .bind(&id)
-    .fetch_all(&pool);
+    let slides_fut =
+        query_as::<_, Slide>("SELECT * FROM slides WHERE session_id = ? ORDER BY order_index, id")
+            .bind(&id)
+            .fetch_all(&pool);
 
     let vote_counts_fut = async {
         sqlx::query_as::<_, VoteCount>(
@@ -178,7 +180,7 @@ pub async fn get_session_stats(
              FROM questions q 
              LEFT JOIN participants p ON q.participant_id = p.id AND q.session_id = p.session_id
              WHERE q.session_id = ? 
-             ORDER BY q.upvotes DESC, q.created_at DESC"
+             ORDER BY q.upvotes DESC, q.created_at DESC",
         )
         .bind(&id)
         .fetch_all(&pool)
@@ -186,8 +188,13 @@ pub async fn get_session_stats(
         .unwrap_or_default()
     };
 
-    let (slides, vote_counts, vote_interactions, db_participants, questions) =
-        tokio::join!(slides_fut, vote_counts_fut, vote_interactions_fut, participants_fut, questions_fut);
+    let (slides, vote_counts, vote_interactions, db_participants, questions) = tokio::join!(
+        slides_fut,
+        vote_counts_fut,
+        vote_interactions_fut,
+        participants_fut,
+        questions_fut
+    );
 
     let slides = slides?;
 
@@ -215,55 +222,68 @@ pub async fn get_session_stats(
     }
 
     // Convert slides to SlideStats
-    let slide_stats: Vec<SlideStats> = slides.into_iter().map(|slide| {
-        let content = slide.content.0;
-        
-        // Extract question text from content
-        let question = content.get("question")
-            .and_then(|q| q.as_str())
-            .map(|s| s.to_string());
-        
-        // Extract options from content
-        let options = content.get("options")
-            .and_then(|opts| opts.as_array())
-            .map(|arr| {
-                arr.iter().filter_map(|opt| {
-                    let id = opt.get("id").and_then(|v| v.as_str())?;
-                    let text = opt.get("text").and_then(|v| v.as_str())?;
-                    Some(SlideOption {
-                        id: id.to_string(),
-                        text: text.to_string(),
-                    })
-                }).collect()
-            });
+    let slide_stats: Vec<SlideStats> = slides
+        .into_iter()
+        .map(|slide| {
+            let content = slide.content.0;
 
-        let votes = vote_map.get(&slide.id).cloned();
-        let interactions = interaction_map.remove(&slide.id);
+            // Extract question text from content
+            let question = content
+                .get("question")
+                .and_then(|q| q.as_str())
+                .map(|s| s.to_string());
 
-        SlideStats {
-            id: slide.id,
-            slide_type: slide.slide_type,
-            question,
-            options,
-            votes: Some(votes.unwrap_or_default()),
-            interactions: Some(interactions.unwrap_or_default()),
-        }
-    }).collect();
+            // Extract options from content
+            let options = content
+                .get("options")
+                .and_then(|opts| opts.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|opt| {
+                            let id = opt.get("id").and_then(|v| v.as_str())?;
+                            let text = opt.get("text").and_then(|v| v.as_str())?;
+                            Some(SlideOption {
+                                id: id.to_string(),
+                                text: text.to_string(),
+                            })
+                        })
+                        .collect()
+                });
 
-    let participants: Vec<Participant> = db_participants.into_iter().map(|p| Participant {
-        id: p.id,
-        name: p.name,
-        joined_at: p.joined_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
-    }).collect();
+            let votes = vote_map.get(&slide.id).cloned();
+            let interactions = interaction_map.remove(&slide.id);
 
-    let questions: Vec<Question> = questions.into_iter().map(|q| Question {
-        id: q.id,
-        content: q.content,
-        upvotes: q.upvotes,
-        author: q.author_name,
-        created_at: q.created_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
-        slide_id: q.slide_id,
-    }).collect();
+            SlideStats {
+                id: slide.id,
+                slide_type: slide.slide_type,
+                question,
+                options,
+                votes: Some(votes.unwrap_or_default()),
+                interactions: Some(interactions.unwrap_or_default()),
+            }
+        })
+        .collect();
+
+    let participants: Vec<Participant> = db_participants
+        .into_iter()
+        .map(|p| Participant {
+            id: p.id,
+            name: p.name,
+            joined_at: p.joined_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
+        })
+        .collect();
+
+    let questions: Vec<Question> = questions
+        .into_iter()
+        .map(|q| Question {
+            id: q.id,
+            content: q.content,
+            upvotes: q.upvotes,
+            author: q.author_name,
+            created_at: q.created_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
+            slide_id: q.slide_id,
+        })
+        .collect();
 
     Ok(Json(SessionStats {
         participants,
@@ -278,7 +298,7 @@ pub async fn get_public_session_stats(
     Path(id): Path<String>,
 ) -> Result<Json<SessionStats>> {
     let pool = app_state.db_pool.pool().await?;
-    
+
     // Verify session exists
     let _session = query_as::<_, Session>("SELECT * FROM sessions WHERE id = ?")
         .bind(&id)
@@ -287,7 +307,7 @@ pub async fn get_public_session_stats(
         .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
 
     let slides_fut = query_as::<_, Slide>(
-        "SELECT * FROM slides WHERE session_id = ? AND is_hidden = FALSE ORDER BY order_index, id"
+        "SELECT * FROM slides WHERE session_id = ? AND is_hidden = FALSE ORDER BY order_index, id",
     )
     .bind(&id)
     .fetch_all(&pool);
@@ -333,7 +353,7 @@ pub async fn get_public_session_stats(
              FROM questions q 
              LEFT JOIN participants p ON q.participant_id = p.id AND q.session_id = p.session_id
              WHERE q.session_id = ? 
-             ORDER BY q.upvotes DESC, q.created_at DESC"
+             ORDER BY q.upvotes DESC, q.created_at DESC",
         )
         .bind(&id)
         .fetch_all(&pool)
@@ -341,8 +361,13 @@ pub async fn get_public_session_stats(
         .unwrap_or_default()
     };
 
-    let (slides, vote_counts, vote_interactions, db_participants, questions) =
-        tokio::join!(slides_fut, vote_counts_fut, vote_interactions_fut, participants_fut, questions_fut);
+    let (slides, vote_counts, vote_interactions, db_participants, questions) = tokio::join!(
+        slides_fut,
+        vote_counts_fut,
+        vote_interactions_fut,
+        participants_fut,
+        questions_fut
+    );
 
     let slides = slides?;
 
@@ -370,53 +395,66 @@ pub async fn get_public_session_stats(
     }
 
     // Convert slides to SlideStats
-    let slide_stats: Vec<SlideStats> = slides.into_iter().map(|slide| {
-        let content = slide.content.0;
-        
-        let question = content.get("question")
-            .and_then(|q| q.as_str())
-            .map(|s| s.to_string());
-        
-        let options = content.get("options")
-            .and_then(|opts| opts.as_array())
-            .map(|arr| {
-                arr.iter().filter_map(|opt| {
-                    let id = opt.get("id").and_then(|v| v.as_str())?;
-                    let text = opt.get("text").and_then(|v| v.as_str())?;
-                    Some(SlideOption {
-                        id: id.to_string(),
-                        text: text.to_string(),
-                    })
-                }).collect()
-            });
+    let slide_stats: Vec<SlideStats> = slides
+        .into_iter()
+        .map(|slide| {
+            let content = slide.content.0;
 
-        let votes = vote_map.get(&slide.id).cloned();
-        let interactions = interaction_map.remove(&slide.id);
+            let question = content
+                .get("question")
+                .and_then(|q| q.as_str())
+                .map(|s| s.to_string());
 
-        SlideStats {
-            id: slide.id,
-            slide_type: slide.slide_type,
-            question,
-            options,
-            votes: Some(votes.unwrap_or_default()),
-            interactions: Some(interactions.unwrap_or_default()), // Now include interactions for public dashboard
-        }
-    }).collect();
+            let options = content
+                .get("options")
+                .and_then(|opts| opts.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|opt| {
+                            let id = opt.get("id").and_then(|v| v.as_str())?;
+                            let text = opt.get("text").and_then(|v| v.as_str())?;
+                            Some(SlideOption {
+                                id: id.to_string(),
+                                text: text.to_string(),
+                            })
+                        })
+                        .collect()
+                });
 
-    let participants: Vec<Participant> = db_participants.into_iter().map(|p| Participant {
-        id: p.id,
-        name: p.name,
-        joined_at: p.joined_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
-    }).collect();
+            let votes = vote_map.get(&slide.id).cloned();
+            let interactions = interaction_map.remove(&slide.id);
 
-    let questions: Vec<Question> = questions.into_iter().map(|q| Question {
-        id: q.id,
-        content: q.content,
-        upvotes: q.upvotes,
-        author: q.author_name,
-        created_at: q.created_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
-        slide_id: q.slide_id,
-    }).collect();
+            SlideStats {
+                id: slide.id,
+                slide_type: slide.slide_type,
+                question,
+                options,
+                votes: Some(votes.unwrap_or_default()),
+                interactions: Some(interactions.unwrap_or_default()), // Now include interactions for public dashboard
+            }
+        })
+        .collect();
+
+    let participants: Vec<Participant> = db_participants
+        .into_iter()
+        .map(|p| Participant {
+            id: p.id,
+            name: p.name,
+            joined_at: p.joined_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
+        })
+        .collect();
+
+    let questions: Vec<Question> = questions
+        .into_iter()
+        .map(|q| Question {
+            id: q.id,
+            content: q.content,
+            upvotes: q.upvotes,
+            author: q.author_name,
+            created_at: q.created_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
+            slide_id: q.slide_id,
+        })
+        .collect();
 
     Ok(Json(SessionStats {
         participants,

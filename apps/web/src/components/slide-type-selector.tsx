@@ -1,13 +1,13 @@
 'use client';
 
-import { Card, CardContent } from '@/components/ui/card';
-import { Layout, BarChart2, HelpCircle, Trophy, MessageSquare, FileText, CheckSquare } from 'lucide-react';
+import { Layout, BarChart2, HelpCircle, CheckSquare } from 'lucide-react';
 
 interface SlideTypeSelectorProps {
     onSelect: (type: string) => void;
+    disabled?: boolean;
 }
 
-export function SlideTypeSelector({ onSelect }: SlideTypeSelectorProps) {
+export function SlideTypeSelector({ onSelect, disabled = false }: SlideTypeSelectorProps) {
     const types = [
         { id: 'static', label: 'Static Slide', icon: Layout, description: 'Text, images, and basic content' },
         { id: 'multiple-choice', label: 'Multiple Choice', icon: CheckSquare, description: 'Collect opinions or check knowledge' },
@@ -22,8 +22,14 @@ export function SlideTypeSelector({ onSelect }: SlideTypeSelectorProps) {
             {types.map((type, index) => (
                 <div
                     key={type.id}
-                    className="group relative overflow-hidden rounded-xl border border-slate-200 bg-white p-6 hover:shadow-xl hover:shadow-blue-100 hover:border-blue-300 transition-all duration-300 cursor-pointer hover:-translate-y-1 animate-scale-in"
-                    onClick={() => onSelect(type.id)}
+                    className={`group relative overflow-hidden rounded-xl border border-slate-200 bg-white p-6 transition-all duration-300 animate-scale-in ${
+                        disabled
+                            ? 'cursor-not-allowed opacity-60'
+                            : 'cursor-pointer hover:-translate-y-1 hover:shadow-xl hover:shadow-blue-100 hover:border-blue-300'
+                    }`}
+                    onClick={() => {
+                        if (!disabled) onSelect(type.id);
+                    }}
                     style={{ animationDelay: `${index * 75}ms` }}
                 >
                     <div className="absolute inset-0 bg-gradient-to-br from-blue-50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />

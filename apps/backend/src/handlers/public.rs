@@ -1,4 +1,7 @@
-use axum::{extract::{State, Path}, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 use serde::Deserialize;
 use sqlx::query_as;
 
@@ -23,7 +26,10 @@ pub async fn get_session_state(
     State(app_state): State<crate::AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionState>> {
-    let state = app_state.session_service.get_session_state(&session_id).await?;
+    let state = app_state
+        .session_service
+        .get_session_state(&session_id)
+        .await?;
     Ok(Json(state))
 }
 
@@ -48,6 +54,7 @@ struct StateUpdatePayload {
     current_slide_id: Option<String>,
     is_presentation_active: bool,
     is_results_visible: bool,
+    state_version: i64,
 }
 
 /// Public endpoint to set current slide (for mobile clicker)
@@ -57,31 +64,24 @@ pub async fn public_set_current_slide(
     Json(payload): Json<PublicSetSlideRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>> {
     let pool = app_state.db_pool.pool().await?;
-    
-    let session: Option<Session> = query_as("SELECT * FROM sessions WHERE id = ?")
-        .bind(&session_id)
-        .fetch_optional(&pool)
-        .await?;
 
-    let session = session.ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
-
-    sqlx::query("UPDATE sessions SET current_slide_id = ? WHERE id = ?")
+    let update_result = sqlx::query(
+        "UPDATE sessions SET current_slide_id = ?, state_version = state_version + 1 WHERE id = ? AND NOT (current_slide_id <=> ?)"
+    )
         .bind(&payload.slide_id)
         .bind(&session_id)
+        .bind(&payload.slide_id)
         .execute(&pool)
         .await?;
 
-    let state_payload = StateUpdatePayload {
-        current_slide_id: payload.slide_id,
-        is_presentation_active: session.is_presentation_active,
-        is_results_visible: session.is_results_visible,
-    };
-    let session_id_for_publish = session_id.clone();
-    tokio::spawn(async move {
-        publish_state_update(&session_id_for_publish, &state_payload).await;
-    });
+    let session = fetch_session(&pool, &session_id).await?;
+    if update_result.rows_affected() > 0 {
+        publish_session_state(session_id.clone(), &session);
+    }
 
-    Ok(Json(ApiResponse::success(serde_json::json!({ "message": "Slide updated" }))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({ "message": "Slide updated" }),
+    )))
 }
 
 /// Public endpoint to set results visibility (for mobile clicker)
@@ -91,29 +91,47 @@ pub async fn public_set_results_visibility(
     Json(payload): Json<PublicSetResultsRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>> {
     let pool = app_state.db_pool.pool().await?;
-    
-    let session: Option<Session> = query_as("SELECT * FROM sessions WHERE id = ?")
-        .bind(&session_id)
-        .fetch_optional(&pool)
-        .await?;
 
-    let session = session.ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
-
-    sqlx::query("UPDATE sessions SET is_results_visible = ? WHERE id = ?")
+    let update_result = sqlx::query(
+        "UPDATE sessions SET is_results_visible = ?, state_version = state_version + 1 WHERE id = ? AND is_results_visible <> ?"
+    )
         .bind(payload.visible)
         .bind(&session_id)
+        .bind(payload.visible)
         .execute(&pool)
         .await?;
 
-    let state_payload = StateUpdatePayload {
-        current_slide_id: session.current_slide_id,
-        is_presentation_active: session.is_presentation_active,
-        is_results_visible: payload.visible,
-    };
-    let session_id_for_publish = session_id.clone();
-    tokio::spawn(async move {
-        publish_state_update(&session_id_for_publish, &state_payload).await;
-    });
+    let session = fetch_session(&pool, &session_id).await?;
+    if update_result.rows_affected() > 0 {
+        publish_session_state(session_id.clone(), &session);
+    }
 
-    Ok(Json(ApiResponse::success(serde_json::json!({ "message": "Results visibility updated" }))))
+    Ok(Json(ApiResponse::success(
+        serde_json::json!({ "message": "Results visibility updated" }),
+    )))
+}
+
+fn build_state_payload(session: &Session) -> StateUpdatePayload {
+    StateUpdatePayload {
+        current_slide_id: session.current_slide_id.clone(),
+        is_presentation_active: session.is_presentation_active,
+        is_results_visible: session.is_results_visible,
+        state_version: session.state_version,
+    }
+}
+
+fn publish_session_state(session_id: String, session: &Session) {
+    let state_payload = build_state_payload(session);
+    tokio::spawn(async move {
+        publish_state_update(&session_id, &state_payload).await;
+    });
+}
+
+async fn fetch_session(pool: &crate::db::DbPool, session_id: &str) -> Result<Session> {
+    let session = query_as::<_, Session>("SELECT * FROM sessions WHERE id = ?")
+        .bind(session_id)
+        .fetch_optional(pool)
+        .await?;
+
+    session.ok_or_else(|| AppError::NotFound("Session not found".to_string()))
 }
