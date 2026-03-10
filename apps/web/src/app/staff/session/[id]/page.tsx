@@ -2,7 +2,7 @@
 
 export const runtime = 'edge';
 
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Slide, Session } from 'shared';
 import { getSlides, createSlide, updateSlide, deleteSlide, reorderSlides, getSession, updateSession, updateSlideVisibility, goLiveSession, stopSession } from '@/lib/api';
@@ -18,16 +18,11 @@ import { SessionDashboard } from '@/components/session-dashboard';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import { toast } from 'sonner';
 import { Breadcrumb } from '@/components/ui/breadcrumb';
+import { EditorSlide, normalizeSlides } from '@/lib/optimistic-slide-queue';
+import { useOptimisticSlideQueue } from '@/lib/use-optimistic-slide-queue';
 
 function reindexSlides(slides: Slide[]): Slide[] {
     return slides.map((slide, index) => ({ ...slide, orderIndex: index }));
-}
-
-function insertSlideAtOrder(slides: Slide[], newSlide: Slide): Slide[] {
-    const nextSlides = slides.filter(slide => slide.id !== newSlide.id);
-    const targetIndex = Math.max(0, Math.min(newSlide.orderIndex, nextSlides.length));
-    nextSlides.splice(targetIndex, 0, newSlide);
-    return reindexSlides(nextSlides);
 }
 
 function getNextPreviewSlideId(slides: Slide[], deletedSlideId: string, currentPreviewSlideId: string | null): string | null {
@@ -46,7 +41,29 @@ function getNextPreviewSlideId(slides: Slide[], deletedSlideId: string, currentP
     return remainingSlides[fallbackIndex]?.id ?? remainingSlides[remainingSlides.length - 1].id;
 }
 
-function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: { slides: Slide[], setSlides: React.Dispatch<React.SetStateAction<Slide[]>>, loadSlides: () => void, session: Session | null, loadSession: () => void }) {
+function getDefaultSlideContent(type: Slide['type']) {
+    if (type === 'static') return { title: 'New Slide', body: 'Content here' };
+    if (type === 'poll') return { question: 'New Poll', options: [{ id: '1', text: 'Option 1' }, { id: '2', text: 'Option 2' }] };
+    if (type === 'multiple-choice') return { question: 'New Question', options: [{ id: '1', text: 'Option 1' }, { id: '2', text: 'Option 2' }], allowMultipleSelection: false };
+    if (type === 'qa') return { title: 'Q&A Session' };
+    if (type === 'quiz') {
+        return {
+            question: 'New Quiz Question',
+            options: [{ id: '1', text: 'Option 1', isCorrect: true }, { id: '2', text: 'Option 2', isCorrect: false }],
+            points: 1000,
+            timerDuration: 30,
+        };
+    }
+
+    return { title: 'Leaderboard' };
+}
+
+function toSlide(slide: EditorSlide): Slide {
+    const { optimistic, ...rest } = slide;
+    return rest;
+}
+
+function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSession }: { baseSlides: Slide[], setBaseSlides: React.Dispatch<React.SetStateAction<Slide[]>>, loadSlides: () => Promise<void>, session: Session | null, loadSession: () => void }) {
     const { sendMessage, state, activeParticipants, updateState, initialStateLoaded } = useWebSocket();
     const params = useParams();
     const id = params?.id as string;
@@ -57,31 +74,31 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
     const [showDashboard, setShowDashboard] = useState(false);
     const [editTitle, setEditTitle] = useState('');
     const [showShareDialog, setShowShareDialog] = useState(false);
-    const [isCreatingSlide, setIsCreatingSlide] = useState(false);
-    const isCreatingSlideRef = useRef(false);
 
     // SEPARATE PREVIEW STATE: This is for editor preview only, independent of student view
     const [previewSlideId, setPreviewSlideId] = useState<string | null>(null);
+    const {
+        slides,
+        queueState,
+        enqueueCreateSlide,
+        enqueueDuplicateSlide,
+        enqueueDeleteSlide,
+        clearInlineError,
+        clearSessionInlineError,
+        resolveOptimisticId,
+        hasPendingStructuralMutations,
+        sessionInlineError,
+    } = useOptimisticSlideQueue({
+        sessionId: id,
+        baseSlides,
+        setBaseSlides,
+        refreshBaseSlides: loadSlides,
+        onDeleteRollback: setPreviewSlideId,
+    });
 
     useEffect(() => {
         if (session) setEditTitle(session.title);
     }, [session]);
-
-    const withSlideCreateGuard = useCallback(async (action: () => Promise<Slide>): Promise<Slide | null> => {
-        if (isCreatingSlideRef.current) {
-            return null;
-        }
-
-        isCreatingSlideRef.current = true;
-        setIsCreatingSlide(true);
-
-        try {
-            return await action();
-        } finally {
-            isCreatingSlideRef.current = false;
-            setIsCreatingSlide(false);
-        }
-    }, []);
 
     // Sync preview to active slide when it changes (optional - keeps preview updated)
     useEffect(() => {
@@ -89,6 +106,22 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
             setPreviewSlideId(state.currentSlideId);
         }
     }, [state?.currentSlideId]);
+
+    useEffect(() => {
+        if (!previewSlideId && slides[0]) {
+            setPreviewSlideId(slides[0].id);
+        }
+    }, [previewSlideId, slides]);
+
+    useEffect(() => {
+        setPreviewSlideId((currentPreviewSlideId) => {
+            if (!currentPreviewSlideId) {
+                return currentPreviewSlideId;
+            }
+
+            return queueState.tempIdMap[currentPreviewSlideId] ?? currentPreviewSlideId;
+        });
+    }, [queueState.tempIdMap]);
 
     const handleSaveSettings = async () => {
         if (!session) return;
@@ -130,33 +163,14 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, [state]); // Re-bind when state/slides change to ensure fresh closures if needed
 
-    async function handleAddSlide(type: string) {
-        if (isCreatingSlideRef.current) return;
-
-        let content = {};
-        if (type === 'static') content = { title: 'New Slide', body: 'Content here' };
-        if (type === 'poll') content = { question: 'New Poll', options: [{ id: '1', text: 'Option 1' }, { id: '2', text: 'Option 2' }] };
-        if (type === 'multiple-choice') content = { question: 'New Question', options: [{ id: '1', text: 'Option 1' }, { id: '2', text: 'Option 2' }], allowMultipleSelection: false };
-        if (type === 'qa') content = { title: 'Q&A Session' };
-        if (type === 'quiz') content = {
-            question: 'New Quiz Question',
-            options: [{ id: '1', text: 'Option 1', isCorrect: true }, { id: '2', text: 'Option 2', isCorrect: false }],
-            points: 1000,
-            timerDuration: 30
-        };
-        if (type === 'leaderboard') content = { title: 'Leaderboard' };
-
-        try {
-            const newSlide = await withSlideCreateGuard(() => createSlide(id, type, content));
-            if (!newSlide) return;
-
-            setSlides(prevSlides => insertSlideAtOrder(prevSlides, newSlide));
-            setPreviewSlideId(newSlide.id);
-            setShowTypeSelector(false);
-            toast.success('Slide created successfully');
-        } catch (e) {
-            toast.error('Failed to create slide');
-        }
+    function handleAddSlide(type: string) {
+        clearSessionInlineError();
+        const tempId = enqueueCreateSlide({
+            slideType: type as Slide['type'],
+            content: getDefaultSlideContent(type as Slide['type']),
+        });
+        setPreviewSlideId(tempId);
+        setShowTypeSelector(false);
     }
 
     // NAVIGATION REMOVED: Use Mobile Clicker for slide navigation
@@ -182,63 +196,62 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
         setPreviewSlideId(slideId);
     };
 
-    async function handleUpdateSlide(slideId: string, content: any) {
-        setSlides(prevSlides => prevSlides.map(slide =>
-            slide.id === slideId ? { ...slide, content } : slide
+    async function handleUpdateSlide(slideId: string, content: Slide['content']) {
+        const resolvedSlideId = resolveOptimisticId(slideId) ?? slideId;
+        const existingSlide = baseSlides.find((slide) => slide.id === resolvedSlideId);
+        if (!existingSlide) {
+            return;
+        }
+
+        setBaseSlides((prevSlides) => prevSlides.map((slide) =>
+            slide.id === resolvedSlideId ? { ...slide, content } : slide
         ));
 
         try {
-            await updateSlide(id, slideId, content);
+            await updateSlide(id, resolvedSlideId, content);
         } catch (e) {
-            loadSlides();
+            setBaseSlides((prevSlides) => prevSlides.map((slide) =>
+                slide.id === resolvedSlideId ? { ...slide, content: existingSlide.content } : slide
+            ));
             toast.error('Failed to update slide');
         }
     }
 
     async function handleDeleteSlide(slideId: string) {
+        const slide = slides.find((entry) => entry.id === slideId);
+        if (!slide || slide.optimistic?.isPending) return;
         if (!confirm('Are you sure you want to delete this slide?')) return;
 
         const nextPreviewSlideId = getNextPreviewSlideId(slides, slideId, previewSlideId);
-        setSlides(prevSlides => reindexSlides(prevSlides.filter(slide => slide.id !== slideId)));
-        setPreviewSlideId(nextPreviewSlideId);
-
-        try {
-            await deleteSlide(id, slideId);
-            toast.success('Slide deleted');
-        } catch (e) {
-            loadSlides();
-            toast.error('Failed to delete slide');
+        const result = enqueueDeleteSlide(slideId, previewSlideId);
+        if (!result.accepted) {
+            return;
         }
+        setPreviewSlideId(nextPreviewSlideId);
     }
 
-    async function handleDuplicateSlide(slideId: string) {
-        const slide = slides.find(s => s.id === slideId);
-        if (!slide || isCreatingSlideRef.current) return;
-        try {
-            const duplicatedSlide = await withSlideCreateGuard(() => createSlide(id, slide.type, slide.content, {
-                insertAfterSlideId: slideId,
-            }));
-            if (!duplicatedSlide) return;
+    function handleDuplicateSlide(slideId: string) {
+        const slide = slides.find((entry) => entry.id === slideId);
+        if (!slide || slide.optimistic?.isPending) return;
 
-            setSlides(prevSlides => insertSlideAtOrder(prevSlides, duplicatedSlide));
-            setPreviewSlideId(duplicatedSlide.id);
-            toast.success('Slide duplicated');
-        } catch (e) {
-            toast.error('Failed to duplicate slide');
-        }
+        clearInlineError(slideId);
+        const tempId = enqueueDuplicateSlide(toSlide(slide));
+        setPreviewSlideId(tempId);
     }
 
     async function handleToggleVisibility(e: React.MouseEvent, slide: Slide) {
         e.stopPropagation();
-        const nextSlides = slides.map(s => s.id === slide.id ? { ...s, isHidden: !s.isHidden } : s);
-        setSlides(nextSlides);
+        if ((slide as EditorSlide).optimistic?.isPending) return;
+
+        const resolvedSlideId = resolveOptimisticId(slide.id) ?? slide.id;
+        setBaseSlides((prevSlides) => prevSlides.map((entry) => entry.id === resolvedSlideId ? { ...entry, isHidden: !slide.isHidden } : entry));
 
         try {
-            await updateSlideVisibility(id, slide.id, !slide.isHidden);
+            await updateSlideVisibility(id, resolvedSlideId, !slide.isHidden);
             toast.success(slide.isHidden ? 'Slide is now visible' : 'Slide is now hidden');
         } catch (e) {
             toast.error('Failed to update visibility');
-            loadSlides();
+            setBaseSlides((prevSlides) => prevSlides.map((entry) => entry.id === resolvedSlideId ? { ...entry, isHidden: slide.isHidden } : entry));
         }
     }
 
@@ -269,6 +282,10 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
     const currentSlide = slides[currentSlideIndex];
 
     async function onDragEnd(result: DropResult) {
+        if (hasPendingStructuralMutations) {
+            return;
+        }
+
         if (!result.destination) return;
 
         const sourceIndex = result.source.index;
@@ -276,19 +293,20 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
 
         if (sourceIndex === destinationIndex) return;
 
-        const newSlides = Array.from(slides);
+        const previousBaseSlides = baseSlides;
+        const newSlides = Array.from(slides).map(toSlide);
         const [reorderedItem] = newSlides.splice(sourceIndex, 1);
         newSlides.splice(destinationIndex, 0, reorderedItem);
         const reindexedSlides = reindexSlides(newSlides);
 
-        setSlides(reindexedSlides);
+        setBaseSlides(reindexedSlides);
 
         try {
             await reorderSlides(id, reindexedSlides.map(s => s.id));
             toast.success('Slide order updated');
         } catch (e) {
             toast.error('Failed to save slide order');
-            loadSlides(); // Revert on error
+            setBaseSlides(previousBaseSlides);
         }
     }
 
@@ -329,6 +347,12 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
                     </div>
                 </div>
 
+                {sessionInlineError && (
+                    <div className="border-b border-rose-200 bg-rose-50 px-4 py-2 text-[11px] text-rose-700">
+                        {sessionInlineError}
+                    </div>
+                )}
+
                 <DragDropContext onDragEnd={onDragEnd}>
                     <Droppable droppableId="slides-list">
                         {(provided) => (
@@ -338,7 +362,7 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
                                 ref={provided.innerRef}
                             >
                                 {slides.map((slide, index) => (
-                                    <Draggable key={slide.id} draggableId={slide.id} index={index}>
+                                    <Draggable key={slide.id} draggableId={slide.id} index={index} isDragDisabled={hasPendingStructuralMutations}>
                                         {(provided, snapshot) => (
                                             <div
                                                 ref={provided.innerRef}
@@ -350,10 +374,14 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
                                                     : state?.currentSlideId === slide.id
                                                         ? 'bg-green-50 border-green-600 shadow-sm ring-1 ring-green-600/20'
                                                         : 'bg-white border-slate-200 hover:border-blue-300 hover:shadow-sm'
-                                                    } ${snapshot.isDragging ? 'shadow-xl ring-2 ring-blue-600 rotate-2 z-50' : ''}`}
+                                                    } ${slide.optimistic?.isPending ? 'opacity-90' : ''} ${snapshot.isDragging ? 'shadow-xl ring-2 ring-blue-600 rotate-2 z-50' : ''}`}
                                                 style={provided.draggableProps.style}
                                                 title={
-                                                    previewSlideId === slide.id
+                                                    slide.optimistic?.isPending
+                                                        ? slide.optimistic.syncState === 'retrying'
+                                                            ? 'Sync retrying'
+                                                            : 'Syncing slide'
+                                                        : previewSlideId === slide.id
                                                         ? "Selected for Preview"
                                                         : state?.currentSlideId === slide.id
                                                             ? "Active for Students (via Mobile Clicker)"
@@ -385,12 +413,18 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
                                                                         <EyeOff className="w-3 h-3" /> HIDDEN
                                                                     </span>
                                                                 )}
+                                                                {slide.optimistic?.syncState && (
+                                                                    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${slide.optimistic.syncState === 'retrying' ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'}`}>
+                                                                        {slide.optimistic.syncState === 'retrying' ? 'RETRYING' : 'SYNCING'}
+                                                                    </span>
+                                                                )}
                                                             </div>
                                                             <div className="flex items-center gap-1">
                                                                 <Button
                                                                     variant="ghost"
                                                                     size="icon"
                                                                     className={`h-6 w-6 ${slide.isHidden ? 'text-slate-400' : 'text-slate-300 hover:text-slate-500'}`}
+                                                                    disabled={slide.optimistic?.isPending}
                                                                     onClick={(e) => handleToggleVisibility(e, slide)}
                                                                     title={slide.isHidden ? "Show Slide" : "Hide Slide"}
                                                                 >
@@ -404,6 +438,11 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
                                                         <p className={`text-xs font-medium truncate ${slide.isHidden ? 'text-slate-400 italic' : 'text-slate-700'}`}>
                                                             {slide.content.question || slide.content.title || 'Untitled Slide'}
                                                         </p>
+                                                        {slide.optimistic?.error && (
+                                                            <p className="mt-2 text-[11px] text-rose-600 truncate">
+                                                                {slide.optimistic.error}
+                                                            </p>
+                                                        )}
                                                     </div>
                                                 </div>
                                             </div>
@@ -411,13 +450,17 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
                                     </Draggable>
                                 ))}
                                 {provided.placeholder}
+                                {hasPendingStructuralMutations && (
+                                    <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-[11px] text-blue-700">
+                                        Structural changes are syncing. Reorder is temporarily disabled.
+                                    </div>
+                                )}
                                 <Button
                                     variant="outline"
                                     onClick={() => setShowTypeSelector(true)}
-                                    disabled={isCreatingSlide}
                                     className="w-full h-12 border-dashed border-slate-300 text-slate-500 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50"
                                 >
-                                    <Plus className="w-4 h-4 mr-2" /> {isCreatingSlide ? 'Creating Slide...' : 'Add New Slide'}
+                                    <Plus className="w-4 h-4 mr-2" /> Add New Slide
                                 </Button>
                             </div>
                         )}
@@ -518,6 +561,11 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
                                 <span className="px-2.5 py-1 rounded-lg bg-blue-100 text-blue-700 font-semibold text-xs border border-blue-200">
                                     Preview: Slide {previewIndex + 1}
                                 </span>
+                                {previewSlide.optimistic?.syncState && (
+                                    <span className={`px-2.5 py-1 rounded-lg font-semibold text-xs border ${previewSlide.optimistic.syncState === 'retrying' ? 'bg-amber-100 text-amber-700 border-amber-200' : 'bg-blue-50 text-blue-700 border-blue-200'}`}>
+                                        {previewSlide.optimistic.syncState === 'retrying' ? 'Retrying save' : 'Syncing'}
+                                    </span>
+                                )}
                                 {state?.currentSlideId === previewSlideId && (
                                     <span className="px-2.5 py-1 rounded-lg bg-green-100 text-green-700 font-semibold text-xs border border-green-200">
                                         ● LIVE for Students
@@ -557,7 +605,7 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
                                     size="icon"
                                     className="h-8 w-8 text-slate-400 hover:text-blue-600"
                                     onClick={() => handleDuplicateSlide(previewSlide.id)}
-                                    disabled={isCreatingSlide}
+                                    disabled={previewSlide.optimistic?.isPending}
                                     title="Duplicate Slide"
                                 >
                                     <span className="sr-only">Duplicate</span>
@@ -568,6 +616,7 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
                                     size="icon"
                                     className="h-8 w-8 text-slate-400 hover:text-red-600 hover:bg-red-50"
                                     onClick={() => handleDeleteSlide(previewSlide.id)}
+                                    disabled={previewSlide.optimistic?.isPending}
                                     title="Delete Slide"
                                 >
                                     <span className="sr-only">Delete</span>
@@ -581,6 +630,8 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
                                 slide={previewSlide}
                                 onUpdate={(content) => handleUpdateSlide(previewSlide.id, content)}
                                 onSave={() => toast.success('Changes saved')}
+                                disabled={previewSlide.optimistic?.disableEditing}
+                                disabledReason={previewSlide.optimistic?.syncState === 'retrying' ? 'This slide is retrying. Editing is disabled until it is confirmed.' : 'This slide is still syncing. Editing is disabled until it is confirmed.'}
                             />
                         </div>
                     </div>
@@ -598,18 +649,14 @@ function EditorContent({ slides, setSlides, loadSlides, session, loadSession }: 
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
                     <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full p-8 relative animate-in fade-in zoom-in-95 duration-200">
                         <button
-                            onClick={() => {
-                                if (!isCreatingSlide) setShowTypeSelector(false);
-                            }}
+                            onClick={() => setShowTypeSelector(false)}
                             className="absolute top-6 right-6 text-slate-400 hover:text-slate-600 transition-colors"
                         >
                             <X className="w-6 h-6" />
                         </button>
                         <h2 className="text-2xl font-bold mb-2 text-center text-slate-900">Add New Slide</h2>
-                        <p className="text-center text-slate-500 mb-8">
-                            {isCreatingSlide ? 'Creating slide...' : 'Choose a template to get started'}
-                        </p>
-                        <SlideTypeSelector onSelect={handleAddSlide} disabled={isCreatingSlide} />
+                        <p className="text-center text-slate-500 mb-8">Choose a template to get started</p>
+                        <SlideTypeSelector onSelect={handleAddSlide} disabled={false} />
                     </div>
                 </div>
             )}
@@ -785,7 +832,7 @@ export default function SlideEditor() {
     async function loadSlides() {
         try {
             const data = await getSlides(id);
-            setSlides(data);
+            setSlides(normalizeSlides(data));
         } catch (e) {
             console.error(e);
             toast.error('Failed to load slides');
@@ -809,7 +856,7 @@ export default function SlideEditor() {
 
     return (
         <WebSocketProvider sessionId={id} role="staff">
-            <EditorContent slides={slides} setSlides={setSlides} loadSlides={loadSlides} session={session} loadSession={loadSession} />
+            <EditorContent baseSlides={slides} setBaseSlides={setSlides} loadSlides={loadSlides} session={session} loadSession={loadSession} />
         </WebSocketProvider>
     );
 }

@@ -13,6 +13,21 @@ async function sleep(ms: number) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+export class ApiRequestError extends Error {
+    status?: number;
+    retryable: boolean;
+
+    constructor(message: string, options?: { status?: number; retryable?: boolean; cause?: unknown }) {
+        super(message);
+        this.name = 'ApiRequestError';
+        this.status = options?.status;
+        this.retryable = options?.retryable ?? isRetryableStatus(options?.status);
+        if (options?.cause !== undefined) {
+            this.cause = options.cause;
+        }
+    }
+}
+
 function createClientRequestId(): string {
     if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
         return crypto.randomUUID();
@@ -97,6 +112,58 @@ function getHeaders(): HeadersInit {
     const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
     if (token) headers['Authorization'] = `Bearer ${token}`;
     return headers;
+}
+
+export function isRetryableApiError(error: unknown): boolean {
+    return error instanceof ApiRequestError && error.retryable;
+}
+
+async function buildApiError(response: Response, fallbackMessage: string): Promise<ApiRequestError> {
+    let message = fallbackMessage;
+
+    try {
+        const json = await response.clone().json() as Partial<ApiResponse<unknown>>;
+        if (typeof json.error === 'string' && json.error.length > 0) {
+            message = json.error;
+        }
+    } catch {
+        try {
+            const text = await response.text();
+            if (text) {
+                message = text;
+            }
+        } catch {
+            message = fallbackMessage;
+        }
+    }
+
+    return new ApiRequestError(message, {
+        status: response.status,
+        retryable: isRetryableStatus(response.status),
+    });
+}
+
+function toApiRequestError(error: unknown, fallbackMessage: string): ApiRequestError {
+    if (error instanceof ApiRequestError) {
+        return error;
+    }
+
+    if (error instanceof Error) {
+        return new ApiRequestError(error.message || fallbackMessage, {
+            retryable: true,
+            cause: error,
+        });
+    }
+
+    return new ApiRequestError(fallbackMessage, { retryable: true });
+}
+
+function isRetryableStatus(status?: number): boolean {
+    if (status === undefined) {
+        return true;
+    }
+
+    return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
 }
 
 export type SharedSlide = Slide & {
@@ -265,65 +332,104 @@ export async function createSlide(
     options?: { insertAfterSlideId?: string; clientRequestId?: string }
 ): Promise<Slide> {
     const clientRequestId = options?.clientRequestId ?? createClientRequestId();
+    let res: Response;
 
-    const res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides`, {
-        method: 'POST',
-        headers: getHeaders(),
-        body: JSON.stringify({
-            type,
-            content,
-            clientRequestId,
-            ...(options?.insertAfterSlideId ? { insertAfterSlideId: options.insertAfterSlideId } : {}),
-        }),
-    });
+    try {
+        res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides`, {
+            method: 'POST',
+            headers: getHeaders(),
+            body: JSON.stringify({
+                type,
+                content,
+                clientRequestId,
+                ...(options?.insertAfterSlideId ? { insertAfterSlideId: options.insertAfterSlideId } : {}),
+            }),
+        });
+    } catch (error) {
+        throw toApiRequestError(error, 'Failed to create slide');
+    }
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
+    if (!res.ok) throw await buildApiError(res, 'Failed to create slide');
     const json: ApiResponse<Slide> = await res.json();
-    if (!json.success) throw new Error(json.error || 'Failed to create slide');
+    if (!json.success) throw new ApiRequestError(json.error || 'Failed to create slide', { status: res.status });
     return json.data;
 }
 
 export async function updateSlide(sessionId: string, slideId: string, content: unknown): Promise<Slide> {
-    const res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides/${slideId}`, {
-        method: 'PUT',
-        headers: getHeaders(),
-        body: JSON.stringify({ content }),
-    });
+    let res: Response;
+
+    try {
+        res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides/${slideId}`, {
+            method: 'PUT',
+            headers: getHeaders(),
+            body: JSON.stringify({ content }),
+        });
+    } catch (error) {
+        throw toApiRequestError(error, 'Failed to update slide');
+    }
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
+    if (!res.ok) throw await buildApiError(res, 'Failed to update slide');
     const json: ApiResponse<Slide> = await res.json();
-    if (!json.success) throw new Error(json.error || 'Failed to update slide');
+    if (!json.success) throw new ApiRequestError(json.error || 'Failed to update slide', { status: res.status });
     return json.data;
 }
 
-export async function deleteSlide(sessionId: string, slideId: string): Promise<void> {
-    const res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides/${slideId}`, {
-        method: 'DELETE',
-        headers: getHeaders(),
-    });
+export async function deleteSlide(sessionId: string, slideId: string, options?: { clientRequestId?: string }): Promise<void> {
+    const headers = { ...(getHeaders() as Record<string, string>) };
+    if (options?.clientRequestId) {
+        headers['X-Client-Request-Id'] = options.clientRequestId;
+    }
+
+    let res: Response;
+
+    try {
+        res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides/${slideId}`, {
+            method: 'DELETE',
+            headers,
+        });
+    } catch (error) {
+        throw toApiRequestError(error, 'Failed to delete slide');
+    }
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
+    if (!res.ok) throw await buildApiError(res, 'Failed to delete slide');
     const json: ApiResponse<void> = await res.json();
-    if (!json.success) throw new Error(json.error || 'Failed to delete slide');
+    if (!json.success) throw new ApiRequestError(json.error || 'Failed to delete slide', { status: res.status });
 }
 
 export async function reorderSlides(sessionId: string, slideIds: string[]): Promise<void> {
-    const res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides/reorder`, {
-        method: 'PUT',
-        headers: getHeaders(),
-        body: JSON.stringify({ slideIds }),
-    });
+    let res: Response;
+
+    try {
+        res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides/reorder`, {
+            method: 'PUT',
+            headers: getHeaders(),
+            body: JSON.stringify({ slideIds }),
+        });
+    } catch (error) {
+        throw toApiRequestError(error, 'Failed to reorder slides');
+    }
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
+    if (!res.ok) throw await buildApiError(res, 'Failed to reorder slides');
     const json: ApiResponse<void> = await res.json();
-    if (!json.success) throw new Error(json.error || 'Failed to reorder slides');
+    if (!json.success) throw new ApiRequestError(json.error || 'Failed to reorder slides', { status: res.status });
 }
 
 export async function updateSlideVisibility(sessionId: string, slideId: string, isHidden: boolean): Promise<void> {
-    const res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides/${slideId}/visibility`, {
-        method: 'PATCH',
-        headers: getHeaders(),
-        body: JSON.stringify({ isHidden }),
-    });
+    let res: Response;
+
+    try {
+        res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides/${slideId}/visibility`, {
+            method: 'PATCH',
+            headers: getHeaders(),
+            body: JSON.stringify({ isHidden }),
+        });
+    } catch (error) {
+        throw toApiRequestError(error, 'Failed to update slide visibility');
+    }
     if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
+    if (!res.ok) throw await buildApiError(res, 'Failed to update slide visibility');
     const json: ApiResponse<void> = await res.json();
-    if (!json.success) throw new Error(json.error || 'Failed to update slide visibility');
+    if (!json.success) throw new ApiRequestError(json.error || 'Failed to update slide visibility', { status: res.status });
 }
 
 export async function goLiveSession(sessionId: string): Promise<void> {

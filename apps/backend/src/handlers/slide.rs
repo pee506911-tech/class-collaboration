@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use axum::{
     extract::{Path, State},
+    http::HeaderMap,
     Json,
 };
 use sqlx::{query, query_as, query_scalar, MySql, Transaction};
@@ -13,6 +14,7 @@ use crate::models::response::ApiResponse;
 use crate::models::slide::{CreateSlideRequest, ReorderSlidesRequest, Slide, UpdateSlideRequest};
 
 const ORDER_STEP: i32 = 1024;
+const CLIENT_REQUEST_ID_HEADER: &str = "x-client-request-id";
 
 /// Get all slides for a session
 pub async fn get_slides(
@@ -144,11 +146,35 @@ pub async fn update_slide(
 pub async fn delete_slide(
     State(app_state): State<crate::AppState>,
     AuthUser { user_id, .. }: AuthUser,
+    headers: HeaderMap,
     Path((session_id, slide_id)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>> {
     let pool = app_state.db_pool.pool().await?;
     let mut tx = pool.begin().await?;
     lock_owned_session(&mut tx, &session_id, &user_id).await?;
+    let client_request_id = headers
+        .get(CLIENT_REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+
+    if let Some(client_request_id) = client_request_id.as_deref() {
+        if let Some(existing_slide_id) =
+            find_slide_delete_by_client_request_id(&mut tx, &session_id, client_request_id).await?
+        {
+            if existing_slide_id != slide_id {
+                return Err(AppError::Input(
+                    "Delete request id already used for a different slide".to_string(),
+                ));
+            }
+
+            tx.commit().await?;
+            return Ok(Json(ApiResponse::success(
+                serde_json::json!({ "message": "Slide deleted successfully" }),
+            )));
+        }
+    }
 
     let delete_result = query("DELETE FROM slides WHERE id = ? AND session_id = ?")
         .bind(&slide_id)
@@ -160,11 +186,38 @@ pub async fn delete_slide(
         return Err(AppError::NotFound("Slide not found".to_string()));
     }
 
+    if let Some(client_request_id) = client_request_id.as_deref() {
+        query(
+            "INSERT INTO slide_delete_requests (session_id, client_request_id, slide_id) VALUES (?, ?, ?)",
+        )
+        .bind(&session_id)
+        .bind(client_request_id)
+        .bind(&slide_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
     tx.commit().await?;
 
     Ok(Json(ApiResponse::success(
         serde_json::json!({ "message": "Slide deleted successfully" }),
     )))
+}
+
+async fn find_slide_delete_by_client_request_id(
+    tx: &mut Transaction<'_, MySql>,
+    session_id: &str,
+    client_request_id: &str,
+) -> Result<Option<String>> {
+    let slide_id = query_scalar::<_, String>(
+        "SELECT slide_id FROM slide_delete_requests WHERE session_id = ? AND client_request_id = ? LIMIT 1 FOR UPDATE",
+    )
+    .bind(session_id)
+    .bind(client_request_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    Ok(slide_id)
 }
 
 /// Reorder slides

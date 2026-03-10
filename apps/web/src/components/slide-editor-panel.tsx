@@ -11,9 +11,11 @@ interface SlideEditorPanelProps {
     slide: Slide;
     onUpdate: (content: any) => void;
     onSave: () => void;
+    disabled?: boolean;
+    disabledReason?: string;
 }
 
-export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelProps) {
+export function SlideEditorPanel({ slide, onUpdate, onSave, disabled = false, disabledReason }: SlideEditorPanelProps) {
     const [localContent, setLocalContent] = useState<any>(slide.content);
     const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
     const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -121,6 +123,11 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                     {slide.type === 'static' && <Type className="w-5 h-5 text-slate-500" />}
                     Edit Slide
                 </h2>
+                {disabled && (
+                    <p className="mt-2 text-xs text-amber-700">
+                        {disabledReason || 'Editing is temporarily disabled while this slide is syncing.'}
+                    </p>
+                )}
             </div>
 
             <Tabs defaultValue="content" className="flex-1 flex flex-col overflow-hidden">
@@ -139,6 +146,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                             </label>
                             <Input
                                 value={localContent.question || localContent.title || ''}
+                                disabled={disabled}
                                 onChange={(e) => updateField(localContent.question !== undefined ? 'question' : 'title', e.target.value)}
                                 onBlur={() => flushSave()}
                                 placeholder="Enter your question or title"
@@ -151,6 +159,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                                 <label className="text-sm font-medium text-slate-700">Body Content</label>
                                 <textarea
                                     value={localContent.body || ''}
+                                    disabled={disabled}
                                     onChange={(e) => updateField('body', e.target.value)}
                                     placeholder="Enter slide content (Markdown supported)"
                                     className="w-full min-h-[300px] p-4 border rounded-lg text-sm leading-relaxed focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
@@ -170,7 +179,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                                         {(provided) => (
                                             <div {...provided.droppableProps} ref={provided.innerRef} className="space-y-2">
                                                 {(localContent.options || []).map((option: any, index: number) => (
-                                                    <Draggable key={option.id} draggableId={option.id} index={index}>
+                                                    <Draggable key={option.id} draggableId={option.id} index={index} isDragDisabled={disabled}>
                                                         {(provided, snapshot) => (
                                                             <div
                                                                 ref={provided.innerRef}
@@ -185,6 +194,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                                                                 </div>
                                                                 <Input
                                                                     value={option.text}
+                                                                    disabled={disabled}
                                                                     onChange={(e) => handleOptionChange(option.id, e.target.value)}
                                                                     className="flex-1 border-0 focus-visible:ring-0 px-2 h-8"
                                                                     placeholder={`Option ${index + 1}`}
@@ -193,6 +203,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                                                                     <Button
                                                                         variant="ghost"
                                                                         size="sm"
+                                                                        disabled={disabled}
                                                                         onClick={() => {
                                                                             const newOptions = (localContent.options || []).map((o: any) => ({
                                                                                 ...o,
@@ -205,7 +216,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                                                                         {option.isCorrect ? "Correct Answer" : "Mark Correct"}
                                                                     </Button>
                                                                 )}
-                                                                <Button variant="ghost" size="icon" onClick={() => removeOption(option.id)} className="h-7 w-7 text-slate-300 hover:text-red-500 hover:bg-red-50">
+                                                                <Button variant="ghost" size="icon" disabled={disabled} onClick={() => removeOption(option.id)} className="h-7 w-7 text-slate-300 hover:text-red-500 hover:bg-red-50">
                                                                     <Trash2 className="w-4 h-4" />
                                                                 </Button>
                                                             </div>
@@ -218,7 +229,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                                     </Droppable>
                                 </DragDropContext>
 
-                                <Button variant="outline" onClick={addOption} className="w-full border-dashed text-slate-500 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50">
+                                <Button variant="outline" disabled={disabled} onClick={addOption} className="w-full border-dashed text-slate-500 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50">
                                     <Plus className="w-4 h-4 mr-2" /> Add Option
                                 </Button>
                             </div>
@@ -236,6 +247,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                                         <label className="text-xs font-medium text-slate-500">Duration (seconds)</label>
                                         <Input
                                             type="number"
+                                            disabled={disabled}
                                             value={localContent.timerDuration || 30}
                                             onChange={(e) => updateField('timerDuration', parseInt(e.target.value, 10))}
                                         />
@@ -244,6 +256,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                                         <label className="text-xs font-medium text-slate-500">Points</label>
                                         <Input
                                             type="number"
+                                            disabled={disabled}
                                             value={localContent.points || 1000}
                                             onChange={(e) => updateField('points', parseInt(e.target.value, 10))}
                                         />
@@ -264,6 +277,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                                         <div className="flex gap-2">
                                             <Button
                                                 variant={localContent.chartType === 'bar' ? 'default' : 'outline'}
+                                                disabled={disabled}
                                                 onClick={() => updateField('chartType', 'bar')}
                                                 size="sm"
                                                 className="flex-1"
@@ -272,6 +286,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                                             </Button>
                                             <Button
                                                 variant={localContent.chartType === 'pie' ? 'default' : 'outline'}
+                                                disabled={disabled}
                                                 onClick={() => updateField('chartType', 'pie')}
                                                 size="sm"
                                                 className="flex-1"
@@ -292,6 +307,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                                             <input
                                                 type="checkbox"
                                                 className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                                                disabled={disabled}
                                                 checked={localContent.allowMultipleSelection || false}
                                                 onChange={(e) => updateField('allowMultipleSelection', e.target.checked)}
                                             />
@@ -306,6 +322,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
                                             <input
                                                 type="checkbox"
                                                 className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                                                disabled={disabled}
                                                 checked={localContent.limitSubmissions !== false}
                                                 onChange={(e) => updateField('limitSubmissions', e.target.checked)}
                                             />
@@ -318,8 +335,8 @@ export function SlideEditorPanel({ slide, onUpdate, onSave }: SlideEditorPanelPr
             </Tabs>
 
             <div className="p-4 border-t bg-white">
-                <Button onClick={() => flushSave(localContent, true)} className="w-full bg-slate-900 hover:bg-slate-800">
-                    {hasUnsavedChanges ? 'Save Changes' : 'All Changes Saved'}
+                <Button disabled={disabled} onClick={() => flushSave(localContent, true)} className="w-full bg-slate-900 hover:bg-slate-800">
+                    {disabled ? 'Waiting For Confirmation' : hasUnsavedChanges ? 'Save Changes' : 'All Changes Saved'}
                 </Button>
             </div>
         </div>
