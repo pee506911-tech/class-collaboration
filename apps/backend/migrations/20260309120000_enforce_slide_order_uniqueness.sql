@@ -1,4 +1,11 @@
-CREATE TEMPORARY TABLE tmp_slide_order AS
+DROP TEMPORARY TABLE IF EXISTS tmp_slide_order;
+
+CREATE TEMPORARY TABLE tmp_slide_order (
+    id VARCHAR(36) NOT NULL PRIMARY KEY,
+    new_order_index INT NOT NULL
+);
+
+INSERT INTO tmp_slide_order (id, new_order_index)
 SELECT
     id,
     ROW_NUMBER() OVER (
