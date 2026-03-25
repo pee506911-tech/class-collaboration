@@ -15,6 +15,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { WebSocketProvider } from '@/lib/websocket';
+import { safeLocalStorageGet } from '@/lib/storage';
 
 export default function SessionSettingsPage() {
     const params = useParams();
@@ -28,7 +29,7 @@ export default function SessionSettingsPage() {
 
     useEffect(() => {
         // Check auth first
-        const token = localStorage.getItem('token');
+        const token = safeLocalStorageGet('token');
         if (!token) {
             router.push('/login');
             return;

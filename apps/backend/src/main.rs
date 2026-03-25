@@ -127,6 +127,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/auth/register", post(handlers::auth::register))
         .route("/api/auth/login", post(handlers::auth::login))
         .route("/api/auth/ably", get(handlers::ably::get_ably_token))
+        // Client-side telemetry (no auth)
+        .route(
+            "/api/client-error",
+            post(handlers::client_error::report_client_error),
+        )
         // Public endpoints (no auth required)
         .route(
             "/api/share/:token",

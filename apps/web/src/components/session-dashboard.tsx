@@ -8,6 +8,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import dynamic from 'next/dynamic';
 import { Button } from '@/components/ui/button';
 import { LoadingState, EmptyState } from '@/components/ui/loading';
+import { httpFetch } from '@/lib/http';
+import { safeLocalStorageGet } from '@/lib/storage';
 
 // Dynamic imports for Recharts - only loaded when dashboard is viewed
 const BarChart = dynamic(() => import('recharts').then(mod => mod.BarChart), { ssr: false });
@@ -69,7 +71,7 @@ export function SessionDashboard({ sessionId, isPublic = false }: { sessionId: s
 
             const headers: HeadersInit = {};
             if (!isPublic) {
-                const token = localStorage.getItem('token');
+                const token = safeLocalStorageGet('token');
                 if (!token) {
                     // No token available, skip fetch for authenticated endpoint
                     console.warn('No auth token available for stats fetch');
@@ -79,7 +81,11 @@ export function SessionDashboard({ sessionId, isPublic = false }: { sessionId: s
                 headers['Authorization'] = `Bearer ${token}`;
             }
 
-            const res = await fetch(endpoint, { headers });
+            const { response: res } = await httpFetch(endpoint, {
+                headers,
+                idempotent: true,
+                throwOnHttpError: false,
+            });
             if (res.ok) {
                 const data = await res.json();
                 setStats(data);

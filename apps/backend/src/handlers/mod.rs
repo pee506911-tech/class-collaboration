@@ -1,5 +1,6 @@
 pub mod ably;
 pub mod auth;
+pub mod client_error;
 pub mod health;
 pub mod live;
 pub mod public;

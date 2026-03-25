@@ -4,6 +4,8 @@ import React, { createContext, useContext, useEffect, useRef, useState, useCallb
 import * as Ably from 'ably';
 import { StateUpdatePayload } from 'shared';
 import { shouldApplyStateUpdate } from './state-updates';
+import { createClientRequestId, httpFetch, HttpRequestError } from '@/lib/http';
+import { safeLocalStorageGet, safeLocalStorageSet } from '@/lib/storage';
 
 // Cross-tab connection sharing using BroadcastChannel
 // Only one tab (the "leader") maintains the actual Ably connection
@@ -45,7 +47,7 @@ interface WebSocketContextType {
     connectionError: string | null;
     state: StateUpdatePayload | null;
     voteResults: Record<string, Record<string, number>>;
-    sendMessage: (type: string, payload: any) => void;
+    sendMessage: (type: string, payload: any, options?: { clientRequestId?: string }) => Promise<SendAck>;
     updateState: (updates: Partial<StateUpdatePayload>) => void;
     lostCount: number;
     serverTimeOffset: number;
@@ -58,6 +60,10 @@ interface WebSocketContextType {
     participantId: string;
     myVotes: Record<string, string[]>; // slide_id -> [option_ids]
 }
+
+export type SendAck =
+    | { ok: true; requestId: string }
+    | { ok: false; requestId: string; message: string; status?: number; kind?: string; error?: unknown };
 
 const WebSocketContext = createContext<WebSocketContextType | null>(null);
 
@@ -97,7 +103,7 @@ export function WebSocketProvider({
         // This allows the same student to see their previous answers
         if (forRole === 'student') {
             const studentKey = `studentParticipantId_${sessionId}`;
-            let studentPid = localStorage.getItem(studentKey);
+            let studentPid = safeLocalStorageGet(studentKey);
             console.log('[DEBUG] getOrCreateParticipantId - studentKey:', studentKey, 'existing:', studentPid);
             
             if (!studentPid) {
@@ -107,7 +113,7 @@ export function WebSocketProvider({
                 } else {
                     studentPid = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
                 }
-                localStorage.setItem(studentKey, studentPid);
+                safeLocalStorageSet(studentKey, studentPid);
                 console.log('[DEBUG] Created new studentPid:', studentPid);
             }
             // Ensure it fits in database (36 chars max)
@@ -117,14 +123,14 @@ export function WebSocketProvider({
         }
         
         // For staff/projector, use the original logic
-        let basePid = localStorage.getItem('participantId');
+        let basePid = safeLocalStorageGet('participantId');
         if (!basePid) {
             if (typeof crypto !== 'undefined' && crypto.randomUUID) {
                 basePid = crypto.randomUUID();
             } else {
                 basePid = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
             }
-            localStorage.setItem('participantId', basePid);
+            safeLocalStorageSet('participantId', basePid);
         }
         return basePid;
     };
@@ -161,7 +167,10 @@ export function WebSocketProvider({
         const fetchInitialStateEarly = async () => {
             try {
                 const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
-                const res = await fetch(`${apiBase}/sessions/${sessionId}/state`);
+                const { response: res } = await httpFetch(`${apiBase}/sessions/${sessionId}/state`, {
+                    idempotent: true,
+                    throwOnHttpError: false,
+                });
                 if (res.ok) {
                     const data = await res.json();
                     setState(data);
@@ -254,7 +263,10 @@ export function WebSocketProvider({
         const fetchInitialState = async () => {
             try {
                 const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
-                const res = await fetch(`${apiBase}/sessions/${sessionId}/state`);
+                const { response: res } = await httpFetch(`${apiBase}/sessions/${sessionId}/state`, {
+                    idempotent: true,
+                    throwOnHttpError: false,
+                });
                 if (res.ok && isMountedRef.current) {
                     const data = await res.json();
                     setState(data);
@@ -271,7 +283,10 @@ export function WebSocketProvider({
                 // Fetch previous votes to restore state after app reopen
                 try {
                     console.log('[DEBUG] Fetching my-votes for participantId:', participantIdRef.current);
-                    const votesRes = await fetch(`${apiBase}/sessions/${sessionId}/my-votes?participantId=${encodeURIComponent(participantIdRef.current)}`);
+                    const { response: votesRes } = await httpFetch(`${apiBase}/sessions/${sessionId}/my-votes?participantId=${encodeURIComponent(participantIdRef.current)}`, {
+                        idempotent: true,
+                        throwOnHttpError: false,
+                    });
                     console.log('[DEBUG] my-votes response status:', votesRes.status);
                     if (votesRes.ok && isMountedRef.current) {
                         const votesData = await votesRes.json();
@@ -282,11 +297,11 @@ export function WebSocketProvider({
                             // Also update localStorage to keep it in sync
                             Object.entries(votesData.data.votes as Record<string, string[]>).forEach(([slideId, optionIds]) => {
                                 if (optionIds.length > 0) {
-                                    localStorage.setItem(`voted_${voteKeyPrefix}_${slideId}`, 'true');
+                                    safeLocalStorageSet(`voted_${voteKeyPrefix}_${slideId}`, 'true');
                                     if (optionIds.length === 1) {
-                                        localStorage.setItem(`voted_option_${voteKeyPrefix}_${slideId}`, optionIds[0]);
+                                        safeLocalStorageSet(`voted_option_${voteKeyPrefix}_${slideId}`, optionIds[0]);
                                     } else {
-                                        localStorage.setItem(`voted_options_${voteKeyPrefix}_${slideId}`, JSON.stringify(optionIds));
+                                        safeLocalStorageSet(`voted_options_${voteKeyPrefix}_${slideId}`, JSON.stringify(optionIds));
                                     }
                                 }
                             });
@@ -302,13 +317,15 @@ export function WebSocketProvider({
                 // When requireName is true, students must provide a name before joining
                 // When requireName is false, we still register them but only if they provided a name
                 if (name && name.trim()) {
-                    fetch(`${apiBase}/sessions/${sessionId}/register-participant`, {
+                    void httpFetch(`${apiBase}/sessions/${sessionId}/register-participant`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             participantId: participantIdRef.current,
                             name: name.trim()
-                        })
+                        }),
+                        idempotent: true,
+                        throwOnHttpError: false,
                     }).catch(() => { });
                 }
             }
@@ -639,21 +656,24 @@ export function WebSocketProvider({
         };
     }, [sessionId, role, name, handleAblyMessage, processBufferedMessages]);
 
-    const sendMessage = async (type: string, payload: any) => {
+    const sendMessage = async (type: string, payload: any, options?: { clientRequestId?: string }): Promise<SendAck> => {
         const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
+        const requestId = options?.clientRequestId ?? createClientRequestId();
 
         try {
             switch (type) {
                 case 'SUBMIT_VOTE':
                     console.log('[DEBUG] Submitting vote with participantId:', participantIdRef.current);
-                    await fetch(`${apiBase}/sessions/${sessionId}/vote`, {
+                    await httpFetch(`${apiBase}/sessions/${sessionId}/vote`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ ...payload, participantId: participantIdRef.current })
+                        body: JSON.stringify({ ...payload, participantId: participantIdRef.current }),
+                        retry: false,
+                        clientRequestId: requestId,
                     });
-                    break;
+                    return { ok: true, requestId };
                 case 'SUBMIT_ANSWER':
-                    await fetch(`${apiBase}/sessions/${sessionId}/vote`, {
+                    await httpFetch(`${apiBase}/sessions/${sessionId}/vote`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -661,49 +681,70 @@ export function WebSocketProvider({
                             optionId: payload.answer,
                             participantId: participantIdRef.current,
                             timeRemaining: payload.timeRemaining
-                        })
+                        }),
+                        retry: false,
+                        clientRequestId: requestId,
                     });
-                    break;
+                    return { ok: true, requestId };
                 case 'SUBMIT_QUESTION':
-                    await fetch(`${apiBase}/sessions/${sessionId}/questions`, {
+                    await httpFetch(`${apiBase}/sessions/${sessionId}/questions`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ ...payload, participantId: participantIdRef.current })
+                        body: JSON.stringify({ ...payload, participantId: participantIdRef.current }),
+                        retry: false,
+                        clientRequestId: requestId,
                     });
-                    break;
+                    return { ok: true, requestId };
                 case 'UPVOTE_QUESTION':
-                    await fetch(`${apiBase}/sessions/${sessionId}/questions/${payload.questionId}/upvote`, {
-                        method: 'POST'
+                    await httpFetch(`${apiBase}/sessions/${sessionId}/questions/${payload.questionId}/upvote`, {
+                        method: 'POST',
+                        retry: false,
+                        clientRequestId: requestId,
                     });
-                    break;
+                    return { ok: true, requestId };
                 case 'SET_SLIDE':
 
-                    const token = localStorage.getItem('token');
-                    await fetch(`${apiBase}/sessions/${sessionId}/current-slide`, {
+                    const token = safeLocalStorageGet('token');
+                    await httpFetch(`${apiBase}/sessions/${sessionId}/current-slide`, {
                         method: 'PUT',
                         headers: { 
                             'Content-Type': 'application/json',
                             ...(token ? { 'Authorization': `Bearer ${token}` } : {})
                         },
                         body: JSON.stringify(payload),
+                        idempotent: true,
+                        clientRequestId: requestId,
                     });
-                    break;
+                    return { ok: true, requestId };
                 case 'STATE_UPDATE':
                     if (payload.showResults !== undefined) {
-                        const authToken = localStorage.getItem('token');
-                        await fetch(`${apiBase}/sessions/${sessionId}/results-visibility`, {
+                        const authToken = safeLocalStorageGet('token');
+                        await httpFetch(`${apiBase}/sessions/${sessionId}/results-visibility`, {
                             method: 'PUT',
                             headers: { 
                                 'Content-Type': 'application/json',
                                 ...(authToken ? { 'Authorization': `Bearer ${authToken}` } : {})
                             },
                             body: JSON.stringify({ visible: payload.showResults }),
+                            idempotent: true,
+                            clientRequestId: requestId,
                         });
                     }
-                    break;
+                    return { ok: true, requestId };
+                default:
+                    return {
+                        ok: false,
+                        requestId,
+                        message: `Unsupported message type: ${type}`,
+                        kind: 'unsupported',
+                    };
             }
         } catch (e) {
             console.error('Error sending message:', e);
+            const status = e instanceof HttpRequestError ? e.status : undefined;
+            const kind = e instanceof HttpRequestError ? e.kind : undefined;
+            const message = e instanceof Error ? e.message : 'Request failed';
+            return { ok: false, requestId, message, status, kind, error: e };
         }
     };
 

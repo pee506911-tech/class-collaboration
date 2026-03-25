@@ -1,4 +1,6 @@
 import { ApiResponse, Session, Slide } from 'shared';
+import { httpFetch, createClientRequestId } from '@/lib/http';
+import { safeLocalStorageGet, safeLocalStorageRemove, safeLocalStorageSet } from '@/lib/storage';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
 
@@ -28,88 +30,33 @@ export class ApiRequestError extends Error {
     }
 }
 
-function createClientRequestId(): string {
-    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-        return crypto.randomUUID();
-    }
-
-    return `req-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
 async function fetchWithRetry(
     url: string,
     options: RequestInit = {},
     retries = RETRY_CONFIG.maxRetries
 ): Promise<Response> {
-    let lastError: Error | null = null;
-    
-    for (let attempt = 0; attempt <= retries; attempt++) {
-        let abortListener: (() => void) | null = null;
-        let timeoutId: ReturnType<typeof setTimeout> | null = null;
-        const controller = new AbortController();
+    const method = (options.method || 'GET').toUpperCase();
+    const isIdempotent =
+        method === 'GET' ||
+        method === 'HEAD' ||
+        method === 'OPTIONS' ||
+        method === 'PUT' ||
+        method === 'DELETE';
 
-        try {
-            if (options.signal) {
-                if (options.signal.aborted) {
-                    controller.abort();
-                } else {
-                    abortListener = () => controller.abort();
-                    options.signal.addEventListener('abort', abortListener);
-                }
-            }
+    const { response } = await httpFetch(url, {
+        ...options,
+        timeoutMs: 15000,
+        idempotent: isIdempotent,
+        retry: isIdempotent ? { maxRetries: retries, baseDelayMs: RETRY_CONFIG.baseDelay, maxDelayMs: RETRY_CONFIG.maxDelay } : false,
+        throwOnHttpError: false,
+    });
 
-            timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
-            
-            const response = await fetch(url, {
-                ...options,
-                signal: controller.signal,
-            });
-            
-            // Retry on 503 (service unavailable - cold start)
-            if (response.status === 503 && attempt < retries) {
-                const delay = Math.min(
-                    RETRY_CONFIG.baseDelay * Math.pow(2, attempt),
-                    RETRY_CONFIG.maxDelay
-                );
-                console.log(`Backend warming up, retrying in ${delay}ms...`);
-                await sleep(delay);
-                continue;
-            }
-            
-            return response;
-        } catch (error: unknown) {
-            const errorName = error instanceof Error ? error.name : '';
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            lastError = error instanceof Error ? error : new Error(errorMessage);
-
-            if (options.signal?.aborted) {
-                throw lastError;
-            }
-            
-            // Retry on network errors or timeouts
-            if (attempt < retries && (errorName === 'AbortError' || errorName === 'TypeError')) {
-                const delay = Math.min(
-                    RETRY_CONFIG.baseDelay * Math.pow(2, attempt),
-                    RETRY_CONFIG.maxDelay
-                );
-                console.log(`Request failed, retrying in ${delay}ms...`, errorMessage);
-                await sleep(delay);
-                continue;
-            }
-        } finally {
-            if (timeoutId) clearTimeout(timeoutId);
-            if (abortListener && options.signal) {
-                options.signal.removeEventListener('abort', abortListener);
-            }
-        }
-    }
-    
-    throw lastError || new Error('Request failed after retries');
+    return response;
 }
 
 function getHeaders(): HeadersInit {
     const headers: HeadersInit = { 'Content-Type': 'application/json' };
-    const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+    const token = typeof window !== 'undefined' ? safeLocalStorageGet('token') : null;
     if (token) headers['Authorization'] = `Bearer ${token}`;
     return headers;
 }
@@ -214,8 +161,8 @@ export async function login(email: string, password: string) {
     });
     const json = await res.json();
     if (!json.success) throw new Error(json.error || 'Login failed');
-    localStorage.setItem('token', json.token);
-    localStorage.setItem('user', JSON.stringify(json.user));
+    safeLocalStorageSet('token', json.token);
+    safeLocalStorageSet('user', JSON.stringify(json.user));
     return json;
 }
 
@@ -231,8 +178,8 @@ export async function register(email: string, password: string, name: string, ro
 }
 
 export function logout() {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
+    safeLocalStorageRemove('token');
+    safeLocalStorageRemove('user');
     window.location.href = '/login';
 }
 

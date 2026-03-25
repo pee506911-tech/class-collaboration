@@ -14,6 +14,7 @@ import { Dialog, DialogFooter } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { toast } from 'sonner';
+import { safeLocalStorageGet, safeLocalStorageRemove } from '@/lib/storage';
 
 export default function Dashboard() {
   const router = useRouter();
@@ -35,20 +36,27 @@ export default function Dashboard() {
   const [requireName, setRequireName] = useState(false);
 
   useEffect(() => {
-    const token = localStorage.getItem('token');
-    const userStr = localStorage.getItem('user');
+    const token = safeLocalStorageGet('token');
+    const userStr = safeLocalStorageGet('user');
     if (!token || !userStr) {
       router.push('/login');
       return;
     }
-    setUser(JSON.parse(userStr));
+    try {
+      setUser(JSON.parse(userStr));
+    } catch {
+      safeLocalStorageRemove('token');
+      safeLocalStorageRemove('user');
+      router.push('/login');
+      return;
+    }
     setAuthChecking(false);
     loadSessions("active");
   }, [router]);
 
   function handleLogout() {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
+    safeLocalStorageRemove('token');
+    safeLocalStorageRemove('user');
     router.push('/login');
   }
 

@@ -14,11 +14,17 @@ import { SlideRenderer } from '@/components/slide-renderer';
 import { LoadingState } from '@/components/ui/loading';
 import { Loader2, User, ArrowRight, MessageSquare } from 'lucide-react';
 import { Dialog, DialogFooter } from '@/components/ui/dialog';
+import { httpFetch } from '@/lib/http';
+import { safeLocalStorageGet, safeLocalStorageSet, safeSessionStorageGet, safeSessionStorageSet } from '@/lib/storage';
+import { toast } from 'sonner';
 
 // Public API call for students (no auth required)
 async function getSessionByToken(token: string): Promise<any> {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
-    const res = await fetch(`${apiUrl}/session-by-token/${token}`);
+    const { response: res } = await httpFetch(`${apiUrl}/session-by-token/${token}`, {
+        idempotent: true,
+        throwOnHttpError: false,
+    });
     if (!res.ok) throw new Error('Session not found');
     const json = await res.json();
     return json.data;
@@ -64,14 +70,31 @@ function ConnectedStudentView({ session, shareToken }: { session: Session & { sl
         // Send slide ID as null for "overall" and "vibe", or the actual slide ID
         const slideIdToSend = (selectedSlideId === 'overall' || selectedSlideId === 'vibe') ? null : selectedSlideId;
 
-        sendMessage('SUBMIT_QUESTION', {
+        const payload = {
             content: globalQuestion,
             slideId: slideIdToSend,
             category: selectedSlideId === 'overall' ? 'overall' : selectedSlideId === 'vibe' ? 'vibe' : 'slide'
-        });
-        setGlobalQuestion('');
-        setSelectedSlideId(''); // Reset to empty
-        setShowQA(false);
+        };
+
+        void (async () => {
+            const result = await sendMessage('SUBMIT_QUESTION', payload);
+            if (result.ok) {
+                setGlobalQuestion('');
+                setSelectedSlideId(''); // Reset to empty
+                setShowQA(false);
+                return;
+            }
+
+            toast.error('Question not sent', {
+                description: result.message,
+                action: {
+                    label: 'Retry',
+                    onClick: () => {
+                        void sendMessage('SUBMIT_QUESTION', payload, { clientRequestId: result.requestId });
+                    },
+                },
+            });
+        })();
     };
 
     // Determine if presentation is active - only use state after initial load
@@ -268,8 +291,8 @@ export default function StudentSession() {
                 setSession(data);
                 // Prefer window-specific name; fall back to browser-persisted name so returning users auto-join
                 const sessionKey = `studentName_${id}`;
-                const windowName = sessionStorage.getItem(sessionKey);
-                const browserName = windowName ? null : localStorage.getItem(sessionKey);
+                const windowName = safeSessionStorageGet(sessionKey);
+                const browserName = windowName ? null : safeLocalStorageGet(sessionKey);
                 const storedName = windowName || browserName;
 
                 if (storedName && storedName.trim()) {
@@ -304,8 +327,8 @@ export default function StudentSession() {
             if (trimmedName) {
                 // Persist for this window and for future visits in this browser
                 const sessionKey = `studentName_${id}`;
-                sessionStorage.setItem(sessionKey, trimmedName);
-                localStorage.setItem(sessionKey, trimmedName);
+                safeSessionStorageSet(sessionKey, trimmedName);
+                safeLocalStorageSet(sessionKey, trimmedName);
             }
             setHasJoined(true);
             setJoining(false);

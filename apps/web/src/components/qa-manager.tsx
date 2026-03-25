@@ -28,7 +28,7 @@ export function QAManager({ onClose, slides = [] }: { onClose: () => void, slide
     };
 
     const handleSave = (id: string) => {
-        sendMessage('EDIT_QUESTION', { questionId: id, content: editContent });
+        void sendMessage('EDIT_QUESTION', { questionId: id, content: editContent });
         setEditingId(null);
     };
 

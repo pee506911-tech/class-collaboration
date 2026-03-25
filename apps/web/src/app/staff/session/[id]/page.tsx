@@ -20,6 +20,7 @@ import { toast } from 'sonner';
 import { Breadcrumb } from '@/components/ui/breadcrumb';
 import { EditorSlide, normalizeSlides } from '@/lib/optimistic-slide-queue';
 import { useOptimisticSlideQueue } from '@/lib/use-optimistic-slide-queue';
+import { safeLocalStorageGet } from '@/lib/storage';
 
 function reindexSlides(slides: Slide[]): Slide[] {
     return slides.map((slide, index) => ({ ...slide, orderIndex: index }));
@@ -147,13 +148,13 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                 e.preventDefault();
                 // Toggle blackout
                 if (state) {
-                    sendMessage('STATE_UPDATE', { isBlackout: !state.isBlackout });
+                    void sendMessage('STATE_UPDATE', { isBlackout: !state.isBlackout });
                     toast.info(state.isBlackout ? 'Blackout Disabled' : 'Blackout Enabled');
                 }
             } else if (e.key === ' ' || e.key.toLowerCase() === 'r') {
                 e.preventDefault();
                 if (state) {
-                    sendMessage('STATE_UPDATE', { showResults: !state.showResults });
+                    void sendMessage('STATE_UPDATE', { showResults: !state.showResults });
                     toast.info(state.showResults ? 'Results Hidden' : 'Results Visible');
                 }
             }
@@ -806,7 +807,7 @@ export default function SlideEditor() {
 
     useEffect(() => {
         // Check auth first
-        const token = localStorage.getItem('token');
+        const token = safeLocalStorageGet('token');
         if (!token) {
             router.push('/login');
             return;

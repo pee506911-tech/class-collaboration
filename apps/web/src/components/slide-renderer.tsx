@@ -6,6 +6,8 @@ import { Button } from '@/components/ui/button';
 import { useWebSocket } from '@/lib/websocket';
 import { useEffect, useState, lazy, Suspense } from 'react';
 import dynamic from 'next/dynamic';
+import { toast } from 'sonner';
+import { safeLocalStorageGet, safeLocalStorageSet } from '@/lib/storage';
 
 // Dynamic imports for heavy libraries - only loaded when needed
 const BarChart = dynamic(() => import('recharts').then(mod => mod.BarChart), { ssr: false });
@@ -80,14 +82,15 @@ function PollSlide({ slide, role, isPreview }: SlideProps) {
     const content = slide.content as PollSlideContent;
     const [hasSubmitted, setHasSubmitted] = useState(false);
     const [selectedOption, setSelectedOption] = useState<string | null>(null);
+    const [isSubmitting, setIsSubmitting] = useState(false);
     const storageSessionKey = (slide as any)?.sessionId || 'default';
     const voteKeyPrefix = `${storageSessionKey}_${participantId || 'anon'}`;
 
     useEffect(() => {
         if (role === 'student' && content.limitSubmissions !== false && !isPreview) {
             // First check localStorage
-            const voted = localStorage.getItem(`voted_${voteKeyPrefix}_${slide.id}`);
-            const votedOption = localStorage.getItem(`voted_option_${voteKeyPrefix}_${slide.id}`);
+            const voted = safeLocalStorageGet(`voted_${voteKeyPrefix}_${slide.id}`);
+            const votedOption = safeLocalStorageGet(`voted_option_${voteKeyPrefix}_${slide.id}`);
             if (voted) {
                 setHasSubmitted(true);
                 if (votedOption) {
@@ -114,18 +117,51 @@ function PollSlide({ slide, role, isPreview }: SlideProps) {
     }, [slide.id, role, content.limitSubmissions, isPreview, voteKeyPrefix, myVotes]);
 
     const handleSelect = (optionId: string) => {
-        if (hasSubmitted) return;
+        if (hasSubmitted || isSubmitting) return;
         setSelectedOption(optionId);
     };
 
-    const handleSubmit = () => {
-        if (!selectedOption || hasSubmitted) return;
-        sendMessage('SUBMIT_VOTE', { slideId: slide.id, optionId: selectedOption });
-        if (content.limitSubmissions !== false) {
-            localStorage.setItem(`voted_${voteKeyPrefix}_${slide.id}`, 'true');
-            localStorage.setItem(`voted_option_${voteKeyPrefix}_${slide.id}`, selectedOption);
-            setHasSubmitted(true);
+    const handleSubmit = async () => {
+        if (!selectedOption || hasSubmitted || isSubmitting) return;
+
+        setIsSubmitting(true);
+        const payload = { slideId: slide.id, optionId: selectedOption };
+        const result = await sendMessage('SUBMIT_VOTE', payload);
+        setIsSubmitting(false);
+
+        if (result.ok) {
+            if (content.limitSubmissions !== false) {
+                safeLocalStorageSet(`voted_${voteKeyPrefix}_${slide.id}`, 'true');
+                safeLocalStorageSet(`voted_option_${voteKeyPrefix}_${slide.id}`, payload.optionId);
+                setSelectedOption(payload.optionId);
+                setHasSubmitted(true);
+            }
+            return;
         }
+
+        toast.error('Vote not sent', {
+            description: result.message,
+            action: {
+                label: 'Retry',
+                onClick: () => {
+                    void (async () => {
+                        setIsSubmitting(true);
+                        const retryResult = await sendMessage('SUBMIT_VOTE', payload, { clientRequestId: result.requestId });
+                        setIsSubmitting(false);
+                        if (retryResult.ok) {
+                            if (content.limitSubmissions !== false) {
+                                safeLocalStorageSet(`voted_${voteKeyPrefix}_${slide.id}`, 'true');
+                                safeLocalStorageSet(`voted_option_${voteKeyPrefix}_${slide.id}`, payload.optionId);
+                                setSelectedOption(payload.optionId);
+                                setHasSubmitted(true);
+                            }
+                        } else {
+                            toast.error('Still failed to send vote', { description: retryResult.message });
+                        }
+                    })();
+                }
+            }
+        });
     };
 
     // Student View: Voting Buttons
@@ -215,6 +251,7 @@ function QuizSlide({ slide, role, isPreview }: SlideProps) {
     const { sendMessage, state, voteResults, slideStartTime, serverTimeOffset, myVotes, participantId } = useWebSocket();
     const content = slide.content as QuizSlideContent;
     const [selectedOption, setSelectedOption] = useState<string | null>(null);
+    const [pendingOption, setPendingOption] = useState<string | null>(null);
     const [timeLeft, setTimeLeft] = useState(content.timerDuration);
     const storageSessionKey = (slide as any)?.sessionId || 'default';
     const voteKeyPrefix = `${storageSessionKey}_${participantId || 'anon'}`;
@@ -233,7 +270,7 @@ function QuizSlide({ slide, role, isPreview }: SlideProps) {
 
     useEffect(() => {
         if (role === 'student' && !isPreview) {
-            const votedOption = localStorage.getItem(`voted_option_${voteKeyPrefix}_${slide.id}`);
+            const votedOption = safeLocalStorageGet(`voted_option_${voteKeyPrefix}_${slide.id}`);
             if (votedOption) {
                 setSelectedOption(votedOption);
                 console.log('[DEBUG] QuizSlide restore from localStorage', {
@@ -256,15 +293,47 @@ function QuizSlide({ slide, role, isPreview }: SlideProps) {
     }, [slide.id, role, isPreview, voteKeyPrefix, myVotes]);
 
     const handleVote = async (optionId: string) => {
-        if (selectedOption) return;
-        setSelectedOption(optionId);
-        sendMessage('SUBMIT_ANSWER', { slideId: slide.id, answer: optionId, timeRemaining: timeLeft });
-        localStorage.setItem(`voted_option_${voteKeyPrefix}_${slide.id}`, optionId);
+        if (selectedOption || pendingOption) return;
 
-        const option = (content.options || []).find(o => o.id === optionId);
-        if (option?.isCorrect) {
-            triggerConfetti(); // Lazy loaded
+        const payload = { slideId: slide.id, answer: optionId, timeRemaining: timeLeft };
+        setPendingOption(optionId);
+        const result = await sendMessage('SUBMIT_ANSWER', payload);
+        setPendingOption(null);
+
+        if (result.ok) {
+            setSelectedOption(optionId);
+            safeLocalStorageSet(`voted_option_${voteKeyPrefix}_${slide.id}`, optionId);
+
+            const option = (content.options || []).find(o => o.id === optionId);
+            if (option?.isCorrect) {
+                triggerConfetti(); // Lazy loaded
+            }
+            return;
         }
+
+        toast.error('Answer not sent', {
+            description: result.message,
+            action: {
+                label: 'Retry',
+                onClick: () => {
+                    void (async () => {
+                        setPendingOption(optionId);
+                        const retryResult = await sendMessage('SUBMIT_ANSWER', payload, { clientRequestId: result.requestId });
+                        setPendingOption(null);
+                        if (retryResult.ok) {
+                            setSelectedOption(optionId);
+                            safeLocalStorageSet(`voted_option_${voteKeyPrefix}_${slide.id}`, optionId);
+                            const option = (content.options || []).find(o => o.id === optionId);
+                            if (option?.isCorrect) {
+                                triggerConfetti();
+                            }
+                        } else {
+                            toast.error('Still failed to send answer', { description: retryResult.message });
+                        }
+                    })();
+                }
+            }
+        });
     };
 
     return (
@@ -284,7 +353,7 @@ function QuizSlide({ slide, role, isPreview }: SlideProps) {
                         }`}
                         variant="outline"
                         onClick={() => handleVote(option.id)}
-                        disabled={!!selectedOption || timeLeft <= 0 || role === 'projector'}
+                        disabled={!!selectedOption || !!pendingOption || timeLeft <= 0 || role === 'projector'}
                     >
                         {option.text}
                         {state?.isResultsVisible && (
@@ -305,12 +374,27 @@ function QASlide({ slide, role }: SlideProps) {
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
         if (!newQuestion.trim()) return;
-        sendMessage('SUBMIT_QUESTION', { content: newQuestion, slideId: slide.id });
-        setNewQuestion('');
+        const payload = { content: newQuestion, slideId: slide.id };
+        void (async () => {
+            const result = await sendMessage('SUBMIT_QUESTION', payload);
+            if (result.ok) {
+                setNewQuestion('');
+                return;
+            }
+            toast.error('Question not sent', {
+                description: result.message,
+                action: {
+                    label: 'Retry',
+                    onClick: () => {
+                        void sendMessage('SUBMIT_QUESTION', payload, { clientRequestId: result.requestId });
+                    }
+                }
+            });
+        })();
     };
 
     const handleUpvote = (id: string) => {
-        sendMessage('UPVOTE_QUESTION', { questionId: id });
+        void sendMessage('UPVOTE_QUESTION', { questionId: id });
     };
 
     const sortedQuestions = [...(questions || [])]
@@ -376,13 +460,14 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
     const content = slide.content as MultipleChoiceSlideContent;
     const [selectedOptions, setSelectedOptions] = useState<string[]>([]);
     const [submitted, setSubmitted] = useState(false);
+    const [isSubmitting, setIsSubmitting] = useState(false);
     const storageSessionKey = (slide as any)?.sessionId || 'default';
     const voteKeyPrefix = `${storageSessionKey}_${participantId || 'anon'}`;
 
     useEffect(() => {
         if (role === 'student' && content.limitSubmissions !== false && !isPreview) {
-            const voted = localStorage.getItem(`voted_${voteKeyPrefix}_${slide.id}`);
-            const votedOptions = localStorage.getItem(`voted_options_${voteKeyPrefix}_${slide.id}`);
+            const voted = safeLocalStorageGet(`voted_${voteKeyPrefix}_${slide.id}`);
+            const votedOptions = safeLocalStorageGet(`voted_options_${voteKeyPrefix}_${slide.id}`);
             if (voted) {
                 setSubmitted(true);
                 if (votedOptions) {
@@ -409,7 +494,7 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
     }, [slide.id, role, content.limitSubmissions, isPreview, voteKeyPrefix, myVotes]);
 
     const handleSelect = (optionId: string) => {
-        if (role !== 'student' || submitted) return;
+        if (role !== 'student' || submitted || isSubmitting) return;
         let newSelection;
         if (content.allowMultipleSelection) {
             newSelection = selectedOptions.includes(optionId)
@@ -421,14 +506,48 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
         setSelectedOptions(newSelection);
     };
 
-    const handleSubmit = () => {
-        if (selectedOptions.length === 0) return;
-        sendMessage('SUBMIT_VOTE', { slideId: slide.id, optionIds: selectedOptions });
-        if (content.limitSubmissions !== false) {
-            localStorage.setItem(`voted_${voteKeyPrefix}_${slide.id}`, 'true');
-            localStorage.setItem(`voted_options_${voteKeyPrefix}_${slide.id}`, JSON.stringify(selectedOptions));
+    const handleSubmit = async () => {
+        if (selectedOptions.length === 0 || submitted || isSubmitting) return;
+
+        setIsSubmitting(true);
+        const optionIds = [...selectedOptions];
+        const payload = { slideId: slide.id, optionIds };
+        const result = await sendMessage('SUBMIT_VOTE', payload);
+        setIsSubmitting(false);
+
+        if (result.ok) {
+            if (content.limitSubmissions !== false) {
+                safeLocalStorageSet(`voted_${voteKeyPrefix}_${slide.id}`, 'true');
+                safeLocalStorageSet(`voted_options_${voteKeyPrefix}_${slide.id}`, JSON.stringify(optionIds));
+            }
+            setSelectedOptions(optionIds);
+            setSubmitted(true);
+            return;
         }
-        setSubmitted(true);
+
+        toast.error('Vote not sent', {
+            description: result.message,
+            action: {
+                label: 'Retry',
+                onClick: () => {
+                    void (async () => {
+                        setIsSubmitting(true);
+                        const retryResult = await sendMessage('SUBMIT_VOTE', payload, { clientRequestId: result.requestId });
+                        setIsSubmitting(false);
+                        if (retryResult.ok) {
+                            if (content.limitSubmissions !== false) {
+                                safeLocalStorageSet(`voted_${voteKeyPrefix}_${slide.id}`, 'true');
+                                safeLocalStorageSet(`voted_options_${voteKeyPrefix}_${slide.id}`, JSON.stringify(optionIds));
+                            }
+                            setSelectedOptions(optionIds);
+                            setSubmitted(true);
+                        } else {
+                            toast.error('Still failed to send vote', { description: retryResult.message });
+                        }
+                    })();
+                }
+            }
+        });
     };
 
     // Student View
@@ -475,8 +594,8 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
                 </CardContent>
                 <div className="mt-6 pt-4 border-t flex justify-end">
                     {!submitted ? (
-                        <Button size="lg" onClick={handleSubmit} disabled={selectedOptions.length === 0} className="w-full md:w-auto">
-                            Submit Answer
+                        <Button size="lg" onClick={handleSubmit} disabled={selectedOptions.length === 0 || isSubmitting} className="w-full md:w-auto">
+                            {isSubmitting ? 'Submitting...' : 'Submit Answer'}
                         </Button>
                     ) : (
                         <div className="text-center w-full text-slate-500 text-sm italic">

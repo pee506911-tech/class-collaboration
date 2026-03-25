@@ -8,6 +8,7 @@ import { SessionDashboard } from '@/components/session-dashboard';
 import { Card, CardContent } from '@/components/ui/card';
 import { BarChart2, Lock, AlertCircle } from 'lucide-react';
 import { WebSocketProvider } from '@/lib/websocket';
+import { httpFetch } from '@/lib/http';
 
 export default function PublicDashboardPage() {
     const params = useParams();
@@ -21,7 +22,10 @@ export default function PublicDashboardPage() {
         async function fetchSessionInfo() {
             try {
                 const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
-                const res = await fetch(`${apiUrl}/session-by-token/${shareToken}`);
+                const { response: res } = await httpFetch(`${apiUrl}/session-by-token/${shareToken}`, {
+                    idempotent: true,
+                    throwOnHttpError: false,
+                });
 
                 if (!res.ok) {
                     throw new Error('Session not found or invalid share link');
