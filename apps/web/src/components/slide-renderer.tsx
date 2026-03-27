@@ -8,6 +8,8 @@ import { useEffect, useState, lazy, Suspense } from 'react';
 import dynamic from 'next/dynamic';
 import { toast } from 'sonner';
 import { safeLocalStorageGet, safeLocalStorageSet } from '@/lib/storage';
+import { formatRequestId, mapHttpErrorToUiMessage } from '@/lib/http-error-ui';
+import type { HttpErrorKind } from '@/lib/http';
 
 // Dynamic imports for heavy libraries - only loaded when needed
 const BarChart = dynamic(() => import('recharts').then(mod => mod.BarChart), { ssr: false });
@@ -22,6 +24,16 @@ const triggerConfetti = async () => {
     const confetti = (await import('canvas-confetti')).default;
     confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
 };
+
+function toRequestFailureDescription(result: { kind?: unknown; status?: number; message?: string; requestId?: string }) {
+    const ui = mapHttpErrorToUiMessage({
+        kind: result.kind as HttpErrorKind | undefined,
+        status: result.status,
+        message: result.message,
+    });
+    const requestId = formatRequestId(result.requestId);
+    return `${ui.description}${requestId ? ` (Request ID: ${requestId})` : ''}`;
+}
 
 interface SlideProps {
     slide: Slide;
@@ -140,7 +152,7 @@ function PollSlide({ slide, role, isPreview }: SlideProps) {
         }
 
         toast.error('Vote not sent', {
-            description: result.message,
+            description: toRequestFailureDescription(result),
             action: {
                 label: 'Retry',
                 onClick: () => {
@@ -156,7 +168,7 @@ function PollSlide({ slide, role, isPreview }: SlideProps) {
                                 setHasSubmitted(true);
                             }
                         } else {
-                            toast.error('Still failed to send vote', { description: retryResult.message });
+                            toast.error('Still failed to send vote', { description: toRequestFailureDescription(retryResult) });
                         }
                     })();
                 }
@@ -312,7 +324,7 @@ function QuizSlide({ slide, role, isPreview }: SlideProps) {
         }
 
         toast.error('Answer not sent', {
-            description: result.message,
+            description: toRequestFailureDescription(result),
             action: {
                 label: 'Retry',
                 onClick: () => {
@@ -328,7 +340,7 @@ function QuizSlide({ slide, role, isPreview }: SlideProps) {
                                 triggerConfetti();
                             }
                         } else {
-                            toast.error('Still failed to send answer', { description: retryResult.message });
+                            toast.error('Still failed to send answer', { description: toRequestFailureDescription(retryResult) });
                         }
                     })();
                 }
@@ -369,24 +381,38 @@ function QuizSlide({ slide, role, isPreview }: SlideProps) {
 function QASlide({ slide, role }: SlideProps) {
     const { sendMessage, questions } = useWebSocket();
     const [newQuestion, setNewQuestion] = useState('');
+    const [isSubmitting, setIsSubmitting] = useState(false);
     const content = slide.content as QASlideContent;
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
+        if (isSubmitting) return;
         if (!newQuestion.trim()) return;
         const payload = { content: newQuestion, slideId: slide.id };
         void (async () => {
+            setIsSubmitting(true);
             const result = await sendMessage('SUBMIT_QUESTION', payload);
+            setIsSubmitting(false);
             if (result.ok) {
                 setNewQuestion('');
                 return;
             }
             toast.error('Question not sent', {
-                description: result.message,
+                description: toRequestFailureDescription(result),
                 action: {
                     label: 'Retry',
                     onClick: () => {
-                        void sendMessage('SUBMIT_QUESTION', payload, { clientRequestId: result.requestId });
+                        if (isSubmitting) return;
+                        void (async () => {
+                            setIsSubmitting(true);
+                            const retryResult = await sendMessage('SUBMIT_QUESTION', payload, { clientRequestId: result.requestId });
+                            setIsSubmitting(false);
+                            if (retryResult.ok) {
+                                setNewQuestion('');
+                                return;
+                            }
+                            toast.error('Still failed to send question', { description: toRequestFailureDescription(retryResult) });
+                        })();
                     }
                 }
             });
@@ -437,8 +463,9 @@ function QASlide({ slide, role }: SlideProps) {
                             onChange={(e) => setNewQuestion(e.target.value)}
                             placeholder="Type your question..."
                             className="flex-1 px-4 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            disabled={isSubmitting}
                         />
-                        <Button type="submit">Ask</Button>
+                        <Button type="submit" disabled={isSubmitting || !newQuestion.trim()}>Ask</Button>
                     </form>
                 )}
             </CardContent>
@@ -526,7 +553,7 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
         }
 
         toast.error('Vote not sent', {
-            description: result.message,
+            description: toRequestFailureDescription(result),
             action: {
                 label: 'Retry',
                 onClick: () => {
@@ -542,7 +569,7 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
                             setSelectedOptions(optionIds);
                             setSubmitted(true);
                         } else {
-                            toast.error('Still failed to send vote', { description: retryResult.message });
+                            toast.error('Still failed to send vote', { description: toRequestFailureDescription(retryResult) });
                         }
                     })();
                 }

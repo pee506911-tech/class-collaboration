@@ -8,15 +8,32 @@ import { useState, useEffect } from 'react';
 import { Slide } from 'shared';
 import { getSlides } from '@/lib/api';
 import { SlideRenderer } from '@/components/slide-renderer';
+import { Button } from '@/components/ui/button';
 
 function ProjectorContent() {
-    const { state, initialStateLoaded } = useWebSocket();
+    const { state, initialStateLoaded, initialStateError, refreshState } = useWebSocket();
 
     // Show loading while initial state is being fetched
     if (!initialStateLoaded) {
         return (
             <div className="min-h-screen bg-black text-white flex items-center justify-center text-2xl font-medium p-8 text-center">
                 <div className="animate-pulse">Connecting to session...</div>
+            </div>
+        );
+    }
+
+    if (initialStateError && !state) {
+        return (
+            <div className="min-h-screen bg-black text-white flex flex-col items-center justify-center text-center p-8 gap-4">
+                <div className="text-3xl font-bold">Can’t connect</div>
+                <div className="text-sm opacity-80 max-w-md">{initialStateError}</div>
+                <Button
+                    variant="outline"
+                    className="border-white/30 text-white hover:bg-white/10"
+                    onClick={() => void refreshState()}
+                >
+                    Retry
+                </Button>
             </div>
         );
     }

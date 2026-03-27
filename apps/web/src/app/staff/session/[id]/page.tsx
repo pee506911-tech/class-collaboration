@@ -11,7 +11,7 @@ import { Plus, Layout, BarChart2, HelpCircle, Play, X, CheckSquare, Smartphone, 
 import Link from 'next/link';
 import { WebSocketProvider, useWebSocket } from '@/lib/websocket';
 import { SlideRenderer } from '@/components/slide-renderer';
-import { SlideEditorPanel } from '@/components/slide-editor-panel';
+import { SlideEditorPanel, SlideEditorSyncStatus } from '@/components/slide-editor-panel';
 import { QAManager } from '@/components/qa-manager';
 import { SlideTypeSelector } from '@/components/slide-type-selector';
 import { SessionDashboard } from '@/components/session-dashboard';
@@ -21,6 +21,7 @@ import { Breadcrumb } from '@/components/ui/breadcrumb';
 import { EditorSlide, normalizeSlides } from '@/lib/optimistic-slide-queue';
 import { useOptimisticSlideQueue } from '@/lib/use-optimistic-slide-queue';
 import { safeLocalStorageGet } from '@/lib/storage';
+import { formatRequestId, mapHttpErrorToUiMessage } from '@/lib/http-error-ui';
 
 function reindexSlides(slides: Slide[]): Slide[] {
     return slides.map((slide, index) => ({ ...slide, orderIndex: index }));
@@ -65,7 +66,7 @@ function toSlide(slide: EditorSlide): Slide {
 }
 
 function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSession }: { baseSlides: Slide[], setBaseSlides: React.Dispatch<React.SetStateAction<Slide[]>>, loadSlides: () => Promise<void>, session: Session | null, loadSession: () => void }) {
-    const { sendMessage, state, activeParticipants, updateState, initialStateLoaded } = useWebSocket();
+    const { sendMessage, state, activeParticipants, updateState, initialStateLoaded, isConnected, connectionError, lastStateSyncAt, lastRealtimeMessageAt, refreshState } = useWebSocket();
     const params = useParams();
     const id = params?.id as string;
     const [showTypeSelector, setShowTypeSelector] = useState(false);
@@ -75,6 +76,12 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
     const [showDashboard, setShowDashboard] = useState(false);
     const [editTitle, setEditTitle] = useState('');
     const [showShareDialog, setShowShareDialog] = useState(false);
+    const [editorSync, setEditorSync] = useState<SlideEditorSyncStatus>({ dirty: false, saving: false, lastError: null });
+    const [isReordering, setIsReordering] = useState(false);
+    const [isTogglingVisibility, setIsTogglingVisibility] = useState(false);
+    const [isSavingSettings, setIsSavingSettings] = useState(false);
+    const [now, setNow] = useState(() => Date.now());
+    const [isRefreshingState, setIsRefreshingState] = useState(false);
 
     // SEPARATE PREVIEW STATE: This is for editor preview only, independent of student view
     const [previewSlideId, setPreviewSlideId] = useState<string | null>(null);
@@ -101,6 +108,11 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
         if (session) setEditTitle(session.title);
     }, [session]);
 
+    useEffect(() => {
+        const intervalId = setInterval(() => setNow(Date.now()), 1000);
+        return () => clearInterval(intervalId);
+    }, []);
+
     // Sync preview to active slide when it changes (optional - keeps preview updated)
     useEffect(() => {
         if (state?.currentSlideId && !previewSlideId) {
@@ -126,6 +138,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
 
     const handleSaveSettings = async () => {
         if (!session) return;
+        setIsSavingSettings(true);
         try {
             await updateSession(session.id, editTitle, session.allowQuestions, session.requireName);
             loadSession();
@@ -133,6 +146,8 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
             toast.success('Settings saved');
         } catch (e) {
             toast.error('Failed to save settings');
+        } finally {
+            setIsSavingSettings(false);
         }
     };
 
@@ -215,6 +230,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                 slide.id === resolvedSlideId ? { ...slide, content: existingSlide.content } : slide
             ));
             toast.error('Failed to update slide');
+            throw new Error('Failed to update slide');
         }
     }
 
@@ -247,12 +263,15 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
         const resolvedSlideId = resolveOptimisticId(slide.id) ?? slide.id;
         setBaseSlides((prevSlides) => prevSlides.map((entry) => entry.id === resolvedSlideId ? { ...entry, isHidden: !slide.isHidden } : entry));
 
+        setIsTogglingVisibility(true);
         try {
             await updateSlideVisibility(id, resolvedSlideId, !slide.isHidden);
             toast.success(slide.isHidden ? 'Slide is now visible' : 'Slide is now hidden');
         } catch (e) {
             toast.error('Failed to update visibility');
             setBaseSlides((prevSlides) => prevSlides.map((entry) => entry.id === resolvedSlideId ? { ...entry, isHidden: slide.isHidden } : entry));
+        } finally {
+            setIsTogglingVisibility(false);
         }
     }
 
@@ -302,14 +321,27 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
 
         setBaseSlides(reindexedSlides);
 
+        setIsReordering(true);
         try {
             await reorderSlides(id, reindexedSlides.map(s => s.id));
             toast.success('Slide order updated');
         } catch (e) {
             toast.error('Failed to save slide order');
             setBaseSlides(previousBaseSlides);
+        } finally {
+            setIsReordering(false);
         }
     }
+
+    const isShareEnabled = !(editorSync.dirty || editorSync.saving || hasPendingStructuralMutations || isReordering || isTogglingVisibility || isSavingSettings);
+    const statusLabel = connectionError ? 'Failed' : isConnected ? 'Connected' : 'Reconnecting';
+    const statusDotClass = connectionError
+        ? 'bg-rose-500'
+        : isConnected
+            ? 'bg-green-500'
+            : 'bg-amber-500';
+    const lastUpdateAt = lastRealtimeMessageAt ?? lastStateSyncAt;
+    const isStale = isConnected && typeof lastUpdateAt === 'number' && now - lastUpdateAt > 15_000;
 
     return (
         <div className="h-screen bg-slate-50 flex overflow-hidden font-sans text-slate-900">
@@ -346,6 +378,52 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                             Use <span className="font-semibold">Mobile Clicker</span> to control what's live for students
                         </div>
                     </div>
+                </div>
+
+                {/* Live updates status */}
+                <div className="bg-white border-b border-slate-200 px-4 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 text-[11px] text-slate-700">
+                            <span className={`w-2 h-2 rounded-full ${statusDotClass}`} />
+                            <span className="font-semibold">Live updates:</span>
+                            <span>{statusLabel}</span>
+                        </div>
+                        <div className="text-[10px] text-slate-500 font-mono">
+                            Last: {typeof lastUpdateAt === 'number' ? new Date(lastUpdateAt).toLocaleTimeString() : '—'}
+                        </div>
+                    </div>
+                    {isStale ? (
+                        <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+                            <div className="text-[11px] text-amber-900">
+                                Updates may be stale.
+                            </div>
+                            <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 border-amber-300 text-amber-900 hover:bg-amber-100"
+                                disabled={isRefreshingState}
+                                onClick={() => {
+                                    if (isRefreshingState) return;
+                                    void (async () => {
+                                        setIsRefreshingState(true);
+                                        const result = await refreshState();
+                                        setIsRefreshingState(false);
+                                        if (result.ok) {
+                                            toast.success('State refreshed');
+                                            return;
+                                        }
+                                        const ui = mapHttpErrorToUiMessage(result);
+                                        const requestId = formatRequestId(result.requestId);
+                                        toast.error('Failed to refresh state', {
+                                            description: `${ui.description}${requestId ? ` (Request ID: ${requestId})` : ''}`,
+                                        });
+                                    })();
+                                }}
+                            >
+                                Refresh now
+                            </Button>
+                        </div>
+                    ) : null}
                 </div>
 
                 {sessionInlineError && (
@@ -517,7 +595,13 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                         {/* Secondary Actions (Icon Only) */}
                         <div className="flex items-center gap-1">
                             {session?.shareToken && (
-                                <Button variant="ghost" size="icon" onClick={() => setShowShareDialog(true)} title="Share Session">
+                                <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    onClick={() => setShowShareDialog(true)}
+                                    disabled={!isShareEnabled}
+                                    title={isShareEnabled ? 'Share Session' : 'Syncing changes…'}
+                                >
                                     <Share2 className="w-4 h-4 text-slate-500" />
                                 </Button>
                             )}
@@ -631,6 +715,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                 slide={previewSlide}
                                 onUpdate={(content) => handleUpdateSlide(previewSlide.id, content)}
                                 onSave={() => toast.success('Changes saved')}
+                                onSyncStatusChange={setEditorSync}
                                 disabled={previewSlide.optimistic?.disableEditing}
                                 disabledReason={previewSlide.optimistic?.syncState === 'retrying' ? 'This slide is retrying. Editing is disabled until it is confirmed.' : 'This slide is still syncing. Editing is disabled until it is confirmed.'}
                             />
@@ -692,6 +777,16 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                         </div>
 
                         <div className="p-6 space-y-6">
+                            {!isShareEnabled && (
+                                <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900">
+                                    <p className="text-sm font-semibold">Syncing changes… sharing is disabled until saved.</p>
+                                    {editorSync.lastError && (
+                                        <p className="mt-1 text-xs text-amber-800">
+                                            Last save failed: {editorSync.lastError}
+                                        </p>
+                                    )}
+                                </div>
+                            )}
                             {/* Join Code Card */}
                             <div className="bg-gradient-to-br from-green-50 to-emerald-50 border-2 border-green-200 rounded-xl p-4">
                                 <div className="flex items-center gap-2 mb-3">
@@ -715,6 +810,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                     <Button
                                         variant="outline"
                                         className="flex-1 border-green-300 text-green-700 hover:bg-green-100 hover:border-green-400"
+                                        disabled={!isShareEnabled}
                                         onClick={() => {
                                             navigator.clipboard.writeText(session.shareToken!);
                                             toast.success('Join code copied!');
@@ -726,6 +822,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                     <Button
                                         variant="outline"
                                         className="flex-1 border-green-300 text-green-700 hover:bg-green-100 hover:border-green-400"
+                                        disabled={!isShareEnabled}
                                         onClick={() => {
                                             navigator.clipboard.writeText(`${window.location.origin}/student/session/${session.shareToken}`);
                                             toast.success('Direct link copied!');
@@ -756,6 +853,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                             variant="outline"
                                             size="icon"
                                             className="shrink-0 border-blue-300 text-blue-700 hover:bg-blue-100"
+                                            disabled={!isShareEnabled}
                                             onClick={() => {
                                                 navigator.clipboard.writeText(`${window.location.origin}/dashboard/${session.shareToken}`);
                                                 toast.success('Dashboard link copied!');
@@ -777,6 +875,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                             <Button
                                 variant="outline"
                                 className="flex-1"
+                                disabled={!isShareEnabled}
                                 onClick={() => window.open(`/dashboard/${session.shareToken}`, '_blank')}
                             >
                                 <ExternalLink className="w-4 h-4 mr-2" />

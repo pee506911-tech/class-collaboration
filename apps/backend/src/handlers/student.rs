@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, State},
+    http::HeaderMap,
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -149,6 +150,7 @@ impl From<Question> for QuestionResponse {
 pub async fn submit_question(
     State(app_state): State<crate::AppState>,
     Path(session_id): Path<String>,
+    headers: HeaderMap,
     Json(payload): Json<SubmitQuestionRequest>,
 ) -> Result<Json<ApiResponse<QuestionResponse>>> {
     let pool = app_state.db_pool.pool().await?;
@@ -184,6 +186,93 @@ pub async fn submit_question(
         return Err(AppError::Input(
             "Questions are not enabled for this session".to_string(),
         ));
+    }
+
+    let client_request_id = headers
+        .get("x-client-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+
+    if let Some(client_request_id) = client_request_id.as_deref() {
+        if client_request_id.len() > 64 {
+            return Err(AppError::Input("Invalid X-Client-Request-Id".to_string()));
+        }
+
+        let existing = sqlx::query_as::<_, Question>(
+            "SELECT id, session_id, slide_id, participant_id, content, upvotes, is_approved, created_at \
+             FROM questions WHERE session_id = ? AND participant_id = ? AND client_request_id = ? LIMIT 1",
+        )
+        .bind(&session_id)
+        .bind(&payload.participant_id)
+        .bind(client_request_id)
+        .fetch_optional(&pool)
+        .await?;
+
+        if let Some(question) = existing {
+            return Ok(Json(ApiResponse::success(question.into())));
+        }
+
+        let question_id = Uuid::new_v4().to_string();
+        let insert_result = sqlx::query(
+            "INSERT INTO questions (id, session_id, slide_id, participant_id, content, client_request_id) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&question_id)
+        .bind(&session_id)
+        .bind(payload.slide_id.as_deref())
+        .bind(&payload.participant_id)
+        .bind(&sanitized_content)
+        .bind(client_request_id)
+        .execute(&pool)
+        .await;
+
+        match insert_result {
+            Ok(_) => {
+                let question = sqlx::query_as::<_, Question>(
+                    "SELECT id, session_id, slide_id, participant_id, content, upvotes, is_approved, created_at \
+                     FROM questions WHERE id = ? LIMIT 1",
+                )
+                .bind(&question_id)
+                .fetch_one(&pool)
+                .await?;
+
+                let all_questions = Question::find_by_session(&pool, &session_id)
+                    .await
+                    .unwrap_or_default();
+                let session_id_for_publish = session_id.clone();
+                tokio::spawn(async move {
+                    publish_qa_update(&session_id_for_publish, &all_questions).await;
+                });
+
+                return Ok(Json(ApiResponse::success(question.into())));
+            }
+            Err(e) => {
+                let is_duplicate_key = matches!(
+                    &e,
+                    sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some("1062")
+                );
+
+                if is_duplicate_key {
+                    let existing = sqlx::query_as::<_, Question>(
+                        "SELECT id, session_id, slide_id, participant_id, content, upvotes, is_approved, created_at \
+                         FROM questions WHERE session_id = ? AND participant_id = ? AND client_request_id = ? LIMIT 1",
+                    )
+                    .bind(&session_id)
+                    .bind(&payload.participant_id)
+                    .bind(client_request_id)
+                    .fetch_optional(&pool)
+                    .await?;
+
+                    if let Some(question) = existing {
+                        return Ok(Json(ApiResponse::success(question.into())));
+                    }
+                }
+
+                return Err(AppError::Internal(format!("Failed to save question: {}", e)));
+            }
+        }
     }
 
     let question_id = Uuid::new_v4().to_string();
@@ -224,38 +313,69 @@ pub async fn upvote_question(
     let pool = app_state.db_pool.pool().await?;
 
     let question = Question::find_by_id(&pool, &question_id).await?;
-    if question.is_none() {
+    let Some(question) = question else {
+        return Err(AppError::NotFound("Question not found".to_string()));
+    };
+    if question.session_id != session_id {
         return Err(AppError::NotFound("Question not found".to_string()));
     }
 
     let participant_id = body
         .and_then(|b| b.participant_id.clone())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "anonymous".to_string());
 
-    let already_upvoted: Option<bool> = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM question_upvotes WHERE question_id = ? AND participant_id = ?)"
-    ).bind(&question_id).bind(&participant_id).fetch_optional(&pool).await.unwrap_or(Some(false));
+    let mut tx = pool.begin().await?;
+    let mut already_upvoted = false;
 
-    if already_upvoted == Some(true) {
-        return Err(AppError::Input(
-            "You have already upvoted this question".to_string(),
-        ));
+    let insert_result = sqlx::query(
+        "INSERT INTO question_upvotes (question_id, participant_id) VALUES (?, ?)",
+    )
+    .bind(&question_id)
+    .bind(&participant_id)
+    .execute(&mut *tx)
+    .await;
+
+    match insert_result {
+        Ok(_) => {
+            sqlx::query("UPDATE questions SET upvotes = upvotes + 1 WHERE id = ?")
+                .bind(&question_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        Err(e) => {
+            let is_duplicate_key = matches!(
+                &e,
+                sqlx::Error::Database(db_err) if db_err.code().as_deref() == Some("1062")
+            );
+            if is_duplicate_key {
+                already_upvoted = true;
+            } else {
+                return Err(AppError::Internal(format!("Failed to upvote question: {}", e)));
+            }
+        }
     }
 
-    sqlx::query("INSERT INTO question_upvotes (question_id, participant_id) VALUES (?, ?) ON DUPLICATE KEY UPDATE created_at = created_at")
-        .bind(&question_id).bind(&participant_id).execute(&pool).await.ok();
+    let new_upvotes: i32 = sqlx::query_scalar("SELECT upvotes FROM questions WHERE id = ?")
+        .bind(&question_id)
+        .fetch_one(&mut *tx)
+        .await?;
 
-    let new_upvotes = Question::upvote(&pool, &question_id).await?;
-    let all_questions = Question::find_by_session(&pool, &session_id)
-        .await
-        .unwrap_or_default();
-    let session_id_for_publish = session_id.clone();
-    tokio::spawn(async move {
-        publish_qa_update(&session_id_for_publish, &all_questions).await;
-    });
+    tx.commit().await?;
+
+    if !already_upvoted {
+        let all_questions = Question::find_by_session(&pool, &session_id)
+            .await
+            .unwrap_or_default();
+        let session_id_for_publish = session_id.clone();
+        tokio::spawn(async move {
+            publish_qa_update(&session_id_for_publish, &all_questions).await;
+        });
+    }
 
     Ok(Json(ApiResponse::success(
-        serde_json::json!({ "message": "Question upvoted", "upvotes": new_upvotes }),
+        serde_json::json!({ "message": "Question upvoted", "upvotes": new_upvotes, "alreadyUpvoted": already_upvoted }),
     )))
 }
 

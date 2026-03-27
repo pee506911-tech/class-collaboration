@@ -7,28 +7,16 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { WebSocketProvider, useWebSocket } from '@/lib/websocket';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Slide, Session } from 'shared';
-import { getSlides } from '@/lib/api';
 import { SlideRenderer } from '@/components/slide-renderer';
 import { LoadingState } from '@/components/ui/loading';
 import { Loader2, User, ArrowRight, MessageSquare } from 'lucide-react';
 import { Dialog, DialogFooter } from '@/components/ui/dialog';
-import { httpFetch } from '@/lib/http';
 import { safeLocalStorageGet, safeLocalStorageSet, safeSessionStorageGet, safeSessionStorageSet } from '@/lib/storage';
 import { toast } from 'sonner';
-
-// Public API call for students (no auth required)
-async function getSessionByToken(token: string): Promise<any> {
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
-    const { response: res } = await httpFetch(`${apiUrl}/session-by-token/${token}`, {
-        idempotent: true,
-        throwOnHttpError: false,
-    });
-    if (!res.ok) throw new Error('Session not found');
-    const json = await res.json();
-    return json.data;
-}
+import { formatRequestId, mapHttpErrorToUiMessage } from '@/lib/http-error-ui';
+import { getPublicSessionByToken, isValidJoinCode, normalizeJoinCode, readPreloadedPublicSession, writePreloadedPublicSession } from '@/lib/public-session';
 
 function StudentSlideView({ slideId, slides, sessionId }: { slideId: string; slides: Slide[]; sessionId: string }) {
     const [slide, setSlide] = useState<Slide | null>(null);
@@ -44,27 +32,37 @@ function StudentSlideView({ slideId, slides, sessionId }: { slideId: string; sli
 }
 
 function ConnectedStudentView({ session, shareToken }: { session: Session & { slides: Slide[]; isPresentationActive?: boolean; allowQuestions?: boolean }; shareToken: string }) {
-    const { state, isConnected, sendMessage, lastSlideUpdate, initialStateLoaded } = useWebSocket();
+    const { state, isConnected, sendMessage, lastSlideUpdate, initialStateLoaded, initialStateError, refreshState } = useWebSocket();
     const [slides, setSlides] = useState<Slide[]>(session.slides || []);
     const [showQA, setShowQA] = useState(false);
     const [globalQuestion, setGlobalQuestion] = useState('');
     const [selectedSlideId, setSelectedSlideId] = useState<string>(''); // No default selection
+    const [isSubmittingQuestion, setIsSubmittingQuestion] = useState(false);
+    const [isRefreshingState, setIsRefreshingState] = useState(false);
+    const [refreshFailure, setRefreshFailure] = useState<{ description: string; requestId?: string } | null>(null);
 
 
 
     // Refetch slides when notified of updates
     useEffect(() => {
         if (lastSlideUpdate > 0) {
-            getSessionByToken(shareToken).then(data => {
-                if (data && data.slides) {
-                    setSlides(data.slides);
-                }
-            }).catch(err => console.error('Failed to update slides:', err));
+            getPublicSessionByToken(shareToken, { timeoutMs: 10_000 })
+                .then((result) => {
+                    if (!result.ok) {
+                        console.error('Failed to update slides:', result);
+                        return;
+                    }
+                    if (result.data?.slides) {
+                        setSlides(result.data.slides);
+                    }
+                })
+                .catch((err) => console.error('Failed to update slides:', err));
         }
     }, [lastSlideUpdate, shareToken]);
 
-    const handleGlobalSubmit = (e: React.FormEvent) => {
+    const handleGlobalSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
+        if (isSubmittingQuestion) return;
         if (!globalQuestion.trim() || !selectedSlideId) return;
 
         // Send slide ID as null for "overall" and "vibe", or the actual slide ID
@@ -76,7 +74,8 @@ function ConnectedStudentView({ session, shareToken }: { session: Session & { sl
             category: selectedSlideId === 'overall' ? 'overall' : selectedSlideId === 'vibe' ? 'vibe' : 'slide'
         };
 
-        void (async () => {
+        setIsSubmittingQuestion(true);
+        try {
             const result = await sendMessage('SUBMIT_QUESTION', payload);
             if (result.ok) {
                 setGlobalQuestion('');
@@ -85,16 +84,38 @@ function ConnectedStudentView({ session, shareToken }: { session: Session & { sl
                 return;
             }
 
+            const ui = mapHttpErrorToUiMessage(result);
+            const requestId = formatRequestId(result.requestId);
+            const description = `${ui.description}${requestId ? ` (Request ID: ${requestId})` : ''}`;
+
             toast.error('Question not sent', {
-                description: result.message,
+                description,
                 action: {
                     label: 'Retry',
                     onClick: () => {
-                        void sendMessage('SUBMIT_QUESTION', payload, { clientRequestId: result.requestId });
+                        if (isSubmittingQuestion) return;
+                        void (async () => {
+                            setIsSubmittingQuestion(true);
+                            const retryResult = await sendMessage('SUBMIT_QUESTION', payload, { clientRequestId: result.requestId });
+                            setIsSubmittingQuestion(false);
+                            if (retryResult.ok) {
+                                setGlobalQuestion('');
+                                setSelectedSlideId('');
+                                setShowQA(false);
+                                return;
+                            }
+                            const retryUi = mapHttpErrorToUiMessage(retryResult);
+                            const retryRequestId = formatRequestId(retryResult.requestId);
+                            toast.error('Still failed to send question', {
+                                description: `${retryUi.description}${retryRequestId ? ` (Request ID: ${retryRequestId})` : ''}`,
+                            });
+                        })();
                     },
                 },
             });
-        })();
+        } finally {
+            setIsSubmittingQuestion(false);
+        }
     };
 
     // Determine if presentation is active - only use state after initial load
@@ -107,6 +128,50 @@ function ConnectedStudentView({ session, shareToken }: { session: Session & { sl
         return (
             <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
                 <LoadingState message="Connecting to session..." />
+            </div>
+        );
+    }
+
+    if (initialStateError && !state) {
+        return (
+            <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
+                <Card className="w-full max-w-md text-center shadow-xl border-slate-200">
+                    <CardHeader>
+                        <div className="mx-auto w-16 h-16 bg-amber-50 rounded-full flex items-center justify-center mb-4">
+                            <span className="text-2xl">⚠️</span>
+                        </div>
+                        <CardTitle className="text-xl font-bold text-slate-900">Can’t connect right now</CardTitle>
+                        <CardDescription>We couldn’t load the live session state.</CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                        <p className="text-xs text-slate-500 font-mono break-words">{refreshFailure?.description || initialStateError}</p>
+                        {formatRequestId(refreshFailure?.requestId) ? (
+                            <p className="text-[10px] text-slate-500 font-mono">
+                                Request ID: {formatRequestId(refreshFailure?.requestId)}
+                            </p>
+                        ) : null}
+                        <Button
+                            className="w-full"
+                            disabled={isRefreshingState}
+                            onClick={() => {
+                                if (isRefreshingState) return;
+                                void (async () => {
+                                    setIsRefreshingState(true);
+                                    const result = await refreshState();
+                                    setIsRefreshingState(false);
+                                    if (result.ok) {
+                                        setRefreshFailure(null);
+                                        return;
+                                    }
+                                    const ui = mapHttpErrorToUiMessage(result);
+                                    setRefreshFailure({ description: ui.description, requestId: result.requestId });
+                                })();
+                            }}
+                        >
+                            {isRefreshingState ? 'Retrying…' : 'Retry'}
+                        </Button>
+                    </CardContent>
+                </Card>
             </div>
         );
     }
@@ -214,6 +279,7 @@ function ConnectedStudentView({ session, shareToken }: { session: Session & { sl
                             onChange={(e) => setSelectedSlideId(e.target.value)}
                             className={`w-full p-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none text-base text-slate-900 bg-white transition-all ${!selectedSlideId ? 'border-amber-300 ring-4 ring-amber-50' : 'border-slate-200'}`}
                             required
+                            disabled={isSubmittingQuestion}
                         >
                             <option value="" disabled>-- Select a topic to start --</option>
                             <option value="overall">📚 Overall Session</option>
@@ -248,7 +314,7 @@ function ConnectedStudentView({ session, shareToken }: { session: Session & { sl
                                 value={globalQuestion}
                                 onChange={(e) => setGlobalQuestion(e.target.value)}
                                 required
-                                disabled={!selectedSlideId}
+                                disabled={!selectedSlideId || isSubmittingQuestion}
                             />
                             {!selectedSlideId && (
                                 <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
@@ -261,13 +327,13 @@ function ConnectedStudentView({ session, shareToken }: { session: Session & { sl
                     </div>
 
                     <DialogFooter>
-                        <Button type="button" variant="ghost" onClick={() => setShowQA(false)}>Cancel</Button>
+                        <Button type="button" variant="ghost" onClick={() => setShowQA(false)} disabled={isSubmittingQuestion}>Cancel</Button>
                         <Button
                             type="submit"
-                            disabled={!globalQuestion.trim() || !selectedSlideId}
+                            disabled={isSubmittingQuestion || !globalQuestion.trim() || !selectedSlideId}
                             className={!selectedSlideId ? "opacity-50 cursor-not-allowed" : ""}
                         >
-                            Submit Question
+                            {isSubmittingQuestion ? 'Submitting...' : 'Submit Question'}
                         </Button>
                     </DialogFooter>
                 </form>
@@ -279,39 +345,96 @@ function ConnectedStudentView({ session, shareToken }: { session: Session & { sl
 export default function StudentSession() {
     const params = useParams();
     const id = params?.id as string;
+    const shareToken = normalizeJoinCode(id || '');
+    const isValidToken = id ? isValidJoinCode(shareToken) : false;
     const [session, setSession] = useState<any | null>(null);
+    const [loadError, setLoadError] = useState<{ title: string; description: string; requestId?: string; retryable: boolean } | null>(null);
     const [studentName, setStudentName] = useState('');
     const [hasJoined, setHasJoined] = useState(false);
     const [loading, setLoading] = useState(true);
     const [joining, setJoining] = useState(false);
 
-    useEffect(() => {
-        if (id) {
-            getSessionByToken(id).then(data => {
-                setSession(data);
-                // Prefer window-specific name; fall back to browser-persisted name so returning users auto-join
-                const sessionKey = `studentName_${id}`;
-                const windowName = safeSessionStorageGet(sessionKey);
-                const browserName = windowName ? null : safeLocalStorageGet(sessionKey);
-                const storedName = windowName || browserName;
+    const applySessionData = useCallback((data: any) => {
+        setSession(data);
+        // Prefer window-specific name; fall back to browser-persisted name so returning users auto-join
+        const sessionKey = `studentName_${shareToken}`;
+        const legacySessionKey = `studentName_${id}`;
+        const windowName = safeSessionStorageGet(sessionKey) ?? safeSessionStorageGet(legacySessionKey);
+        const browserName = windowName ? null : (safeLocalStorageGet(sessionKey) ?? safeLocalStorageGet(legacySessionKey));
+        const storedName = windowName || browserName;
 
-                if (storedName && storedName.trim()) {
-                    const normalizedName = storedName.trim();
-                    const isAnonymous = normalizedName.toLowerCase() === 'anonymous';
-                    if (!data.requireName || !isAnonymous) {
-                        setStudentName(normalizedName);
-                        setHasJoined(true);
-                    }
-                } else if (data.requireName === false) {
-                    setHasJoined(true);
-                }
-            }).catch(err => {
-                console.error('Failed to load session:', err);
-            }).finally(() => {
-                setLoading(false);
-            });
+        if (storedName && storedName.trim()) {
+            const normalizedName = storedName.trim();
+            const isAnonymous = normalizedName.toLowerCase() === 'anonymous';
+            if (!data.requireName || !isAnonymous) {
+                setStudentName(normalizedName);
+                setHasJoined(true);
+                return;
+            }
         }
-    }, [id]);
+
+        if (data.requireName === false) {
+            setHasJoined(true);
+        }
+    }, [id, shareToken]);
+
+    const loadSession = useCallback(async () => {
+        if (!isValidToken) {
+            setSession(null);
+            setLoadError({
+                title: 'Session Not Found',
+                description: 'The session code is invalid. Please check with your instructor.',
+                retryable: false,
+            });
+            setLoading(false);
+            return;
+        }
+
+        const preloaded = readPreloadedPublicSession(shareToken);
+        if (preloaded) {
+            setLoadError(null);
+            setLoading(false);
+            applySessionData(preloaded.data);
+            return;
+        }
+
+        setLoading(true);
+        setLoadError(null);
+        const result = await getPublicSessionByToken(shareToken, { timeoutMs: 10_000 });
+        setLoading(false);
+
+        if (result.ok) {
+            writePreloadedPublicSession(shareToken, result.data, result.requestId);
+            setLoadError(null);
+            applySessionData(result.data);
+            return;
+        }
+
+        setSession(null);
+
+        if (result.status === 404) {
+            setLoadError({
+                title: 'Session Not Found',
+                description: 'The session code you entered is invalid or the session has ended.',
+                requestId: result.requestId,
+                retryable: false,
+            });
+            return;
+        }
+
+        const ui = mapHttpErrorToUiMessage(result);
+        setLoadError({
+            title: ui.retryable ? 'Can’t connect right now' : ui.title,
+            description: ui.description,
+            requestId: result.requestId,
+            retryable: ui.retryable,
+        });
+    }, [applySessionData, isValidToken, shareToken]);
+
+    useEffect(() => {
+        if (!id) return;
+        void loadSession();
+    }, [id, loadSession]);
 
     const trimmedName = studentName.trim();
     const isAnonymousName = trimmedName.toLowerCase() === 'anonymous';
@@ -326,7 +449,7 @@ export default function StudentSession() {
         setTimeout(() => {
             if (trimmedName) {
                 // Persist for this window and for future visits in this browser
-                const sessionKey = `studentName_${id}`;
+                const sessionKey = `studentName_${shareToken}`;
                 safeSessionStorageSet(sessionKey, trimmedName);
                 safeLocalStorageSet(sessionKey, trimmedName);
             }
@@ -352,11 +475,23 @@ export default function StudentSession() {
                     <div className="mx-auto w-16 h-16 bg-red-50 rounded-full flex items-center justify-center mb-4">
                         <span className="text-2xl">❌</span>
                     </div>
-                    <h2 className="text-xl font-bold text-slate-900 mb-2">Session Not Found</h2>
-                    <p className="text-slate-500">The session code you entered is invalid or the session has ended.</p>
-                    <Button className="mt-6 w-full" onClick={() => window.location.href = '/student/join'}>
-                        Go Back
-                    </Button>
+                    <h2 className="text-xl font-bold text-slate-900 mb-2">{loadError?.title || 'Session Not Found'}</h2>
+                    <p className="text-slate-500">{loadError?.description || 'The session could not be loaded.'}</p>
+                    {formatRequestId(loadError?.requestId) ? (
+                        <p className="text-[10px] text-slate-500 mt-3 font-mono">
+                            Request ID: {formatRequestId(loadError?.requestId)}
+                        </p>
+                    ) : null}
+                    <div className="mt-6 space-y-2">
+                        {loadError?.retryable ? (
+                            <Button className="w-full" onClick={() => void loadSession()}>
+                                Retry
+                            </Button>
+                        ) : null}
+                        <Button variant={loadError?.retryable ? 'outline' : 'default'} className="w-full" onClick={() => window.location.href = '/student/join'}>
+                            Go Back
+                        </Button>
+                    </div>
                 </Card>
             </div>
         );
@@ -413,7 +548,7 @@ export default function StudentSession() {
 
     return (
         <WebSocketProvider sessionId={session.id} role="student" name={studentName}>
-            <ConnectedStudentView session={session} shareToken={id} />
+            <ConnectedStudentView session={session} shareToken={shareToken} />
         </WebSocketProvider>
     );
 }

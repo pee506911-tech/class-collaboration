@@ -7,75 +7,169 @@ import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useState, useEffect, useRef, useCallback } from 'react';
 
+export type SlideEditorSyncStatus = { dirty: boolean; saving: boolean; lastError?: string | null };
+
 interface SlideEditorPanelProps {
     slide: Slide;
-    onUpdate: (content: any) => void;
+    onUpdate: (content: any) => Promise<void>;
     onSave: () => void;
+    onSyncStatusChange?: (status: SlideEditorSyncStatus) => void;
     disabled?: boolean;
     disabledReason?: string;
 }
 
-export function SlideEditorPanel({ slide, onUpdate, onSave, disabled = false, disabledReason }: SlideEditorPanelProps) {
+export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, disabled = false, disabledReason }: SlideEditorPanelProps) {
     const [localContent, setLocalContent] = useState<any>(slide.content);
-    const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+    const [dirty, setDirty] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [lastError, setLastError] = useState<string | null>(null);
+
+    const isMountedRef = useRef(true);
     const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-    // Sync local state when slide changes
-    useEffect(() => {
-        setLocalContent(slide.content);
-        setHasUnsavedChanges(false);
-        if (debounceTimerRef.current) {
-            clearTimeout(debounceTimerRef.current);
-        }
-    }, [slide]);
+    const latestContentRef = useRef<any>(slide.content);
+    const pendingFlushRef = useRef(false);
+    const inFlightRef = useRef(false);
 
-    const persistContent = useCallback((nextContent: any) => {
-        onUpdate(nextContent);
-        setHasUnsavedChanges(false);
+    const editSeqRef = useRef(0);
+    const ackedSeqRef = useRef(0);
+
+    const dirtyRef = useRef(false);
+    const savingRef = useRef(false);
+    const lastErrorRef = useRef<string | null>(null);
+
+    const onUpdateRef = useRef(onUpdate);
+    useEffect(() => {
+        onUpdateRef.current = onUpdate;
     }, [onUpdate]);
 
-    // Debounced save function
-    const debouncedSave = useCallback((newContent: any) => {
-        if (debounceTimerRef.current) {
-            clearTimeout(debounceTimerRef.current);
-        }
-        setHasUnsavedChanges(true);
-        debounceTimerRef.current = setTimeout(() => {
-            persistContent(newContent);
-        }, 500);
-    }, [persistContent]);
+    useEffect(() => {
+        isMountedRef.current = true;
+        return () => {
+            isMountedRef.current = false;
+        };
+    }, []);
 
-    const flushSave = useCallback((contentToSave = localContent, showToast = false) => {
+    const setDirtyState = useCallback((next: boolean) => {
+        dirtyRef.current = next;
+        if (isMountedRef.current) setDirty(next);
+    }, []);
+
+    const setSavingState = useCallback((next: boolean) => {
+        savingRef.current = next;
+        if (isMountedRef.current) setSaving(next);
+    }, []);
+
+    const setLastErrorState = useCallback((next: string | null) => {
+        lastErrorRef.current = next;
+        if (isMountedRef.current) setLastError(next);
+    }, []);
+
+    const recomputeDirty = useCallback(() => {
+        setDirtyState(editSeqRef.current !== ackedSeqRef.current);
+    }, [setDirtyState]);
+
+    const pump = useCallback(async () => {
+        if (inFlightRef.current) return;
+        inFlightRef.current = true;
+        setSavingState(true);
+
+        try {
+            while (pendingFlushRef.current) {
+                pendingFlushRef.current = false;
+
+                const seqToSave = editSeqRef.current;
+                const contentToSave = latestContentRef.current;
+
+                try {
+                    await onUpdateRef.current(contentToSave);
+                } catch (err: unknown) {
+                    const message = err instanceof Error ? err.message : 'Failed to save';
+                    setLastErrorState(message || 'Failed to save');
+                    recomputeDirty();
+                    return;
+                }
+
+                ackedSeqRef.current = Math.max(ackedSeqRef.current, seqToSave);
+                recomputeDirty();
+            }
+        } finally {
+            setSavingState(false);
+            inFlightRef.current = false;
+        }
+    }, [recomputeDirty, setLastErrorState, setSavingState]);
+
+    const flushSave = useCallback(async (contentToSave = latestContentRef.current, showToast = false) => {
         if (debounceTimerRef.current) {
             clearTimeout(debounceTimerRef.current);
             debounceTimerRef.current = null;
         }
-        persistContent(contentToSave);
-        if (showToast) {
+        latestContentRef.current = contentToSave;
+        pendingFlushRef.current = true;
+        await pump();
+
+        if (showToast && !dirtyRef.current && !lastErrorRef.current) {
             onSave();
         }
-    }, [localContent, onSave, persistContent]);
+    }, [onSave, pump]);
+
+    const scheduleDebouncedSave = useCallback(() => {
+        if (debounceTimerRef.current) {
+            clearTimeout(debounceTimerRef.current);
+        }
+
+        debounceTimerRef.current = setTimeout(() => {
+            pendingFlushRef.current = true;
+            void pump();
+        }, 500);
+    }, [pump]);
 
     const updateContent = useCallback((updater: (currentContent: any) => any, immediate = false) => {
-        const nextContent = updater(localContent);
+        const nextContent = updater(latestContentRef.current);
         setLocalContent(nextContent);
+        latestContentRef.current = nextContent;
 
         if (immediate) {
-            flushSave(nextContent);
+            editSeqRef.current += 1;
+            setLastErrorState(null);
+            recomputeDirty();
+            void flushSave(nextContent);
             return;
         }
 
-        debouncedSave(nextContent);
-    }, [debouncedSave, flushSave, localContent]);
+        editSeqRef.current += 1;
+        setLastErrorState(null);
+        recomputeDirty();
+        scheduleDebouncedSave();
+    }, [flushSave, recomputeDirty, scheduleDebouncedSave, setLastErrorState]);
 
-    // Cleanup timer on unmount
+    // Sync local state when slide changes + flush best-effort in cleanup
     useEffect(() => {
+        setLocalContent(slide.content);
+        latestContentRef.current = slide.content;
+
+        if (debounceTimerRef.current) {
+            clearTimeout(debounceTimerRef.current);
+            debounceTimerRef.current = null;
+        }
+
         return () => {
             if (debounceTimerRef.current) {
                 clearTimeout(debounceTimerRef.current);
+                debounceTimerRef.current = null;
+            }
+
+            if (editSeqRef.current !== ackedSeqRef.current) {
+                // Best-effort flush; do not await in cleanup
+                void flushSave(latestContentRef.current, false);
             }
         };
-    }, []);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [slide.id]);
+
+    useEffect(() => {
+        onSyncStatusChange?.({ dirty, saving, lastError });
+    }, [dirty, saving, lastError, onSyncStatusChange]);
 
     const updateField = (field: string, value: any, immediate = false) => {
         updateContent((currentContent) => ({ ...currentContent, [field]: value }), immediate);
@@ -148,7 +242,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, disabled = false, di
                                 value={localContent.question || localContent.title || ''}
                                 disabled={disabled}
                                 onChange={(e) => updateField(localContent.question !== undefined ? 'question' : 'title', e.target.value)}
-                                onBlur={() => flushSave()}
+                                onBlur={() => { void flushSave(); }}
                                 placeholder="Enter your question or title"
                                 className="text-lg font-medium px-4 py-3 h-auto"
                             />
@@ -335,8 +429,13 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, disabled = false, di
             </Tabs>
 
             <div className="p-4 border-t bg-white">
-                <Button disabled={disabled} onClick={() => flushSave(localContent, true)} className="w-full bg-slate-900 hover:bg-slate-800">
-                    {disabled ? 'Waiting For Confirmation' : hasUnsavedChanges ? 'Save Changes' : 'All Changes Saved'}
+                {lastError && (
+                    <p className="mb-2 text-xs text-rose-600">
+                        Last save failed: {lastError}
+                    </p>
+                )}
+                <Button disabled={disabled} onClick={() => { void flushSave(latestContentRef.current, true); }} className="w-full bg-slate-900 hover:bg-slate-800">
+                    {disabled ? 'Waiting For Confirmation' : saving ? 'Saving…' : dirty ? 'Save Changes' : 'All Changes Saved'}
                 </Button>
             </div>
         </div>

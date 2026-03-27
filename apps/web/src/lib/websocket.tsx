@@ -46,8 +46,10 @@ interface WebSocketContextType {
     isConnecting: boolean;
     connectionError: string | null;
     state: StateUpdatePayload | null;
+    initialStateError: string | null;
     voteResults: Record<string, Record<string, number>>;
     sendMessage: (type: string, payload: any, options?: { clientRequestId?: string }) => Promise<SendAck>;
+    refreshState: () => Promise<SendAck>;
     updateState: (updates: Partial<StateUpdatePayload>) => void;
     lostCount: number;
     serverTimeOffset: number;
@@ -55,6 +57,8 @@ interface WebSocketContextType {
     questions: any[];
     activeParticipants: number;
     lastSlideUpdate: number;
+    lastStateSyncAt: number | null;
+    lastRealtimeMessageAt: number | null;
     socket: any | null;
     initialStateLoaded: boolean;
     participantId: string;
@@ -83,6 +87,9 @@ export function WebSocketProvider({
     const [connectionError, setConnectionError] = useState<string | null>(null);
     const [state, setState] = useState<StateUpdatePayload | null>(null);
     const [initialStateLoaded, setInitialStateLoaded] = useState(false);
+    const [initialStateError, setInitialStateError] = useState<string | null>(null);
+    const [lastStateSyncAt, setLastStateSyncAt] = useState<number | null>(null);
+    const [lastRealtimeMessageAt, setLastRealtimeMessageAt] = useState<number | null>(null);
     const [voteResults, setVoteResults] = useState<Record<string, Record<string, number>>>({});
     const [lostCount] = useState(0);
     const [serverTimeOffset] = useState(0);
@@ -153,6 +160,7 @@ export function WebSocketProvider({
     const stateRef = useRef<StateUpdatePayload | null>(null);
     const voteResultsRef = useRef<Record<string, Record<string, number>>>({});
     const questionsRef = useRef<any[]>([]);
+    const lastRealtimeMessageAtRef = useRef<number | null>(null);
 
     // Keep refs in sync with state
     useEffect(() => { stateRef.current = state; }, [state]);
@@ -167,8 +175,10 @@ export function WebSocketProvider({
         const fetchInitialStateEarly = async () => {
             try {
                 const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
+                setInitialStateError(null);
                 const { response: res } = await httpFetch(`${apiBase}/sessions/${sessionId}/state`, {
                     idempotent: true,
+                    timeoutMs: 10_000,
                     throwOnHttpError: false,
                 });
                 if (res.ok) {
@@ -176,9 +186,13 @@ export function WebSocketProvider({
                     setState(data);
                     if (data.questions) setQuestions(data.questions);
                     if (data.voteCounts) setVoteResults(data.voteCounts);
+                    setLastStateSyncAt(Date.now());
+                } else {
+                    setInitialStateError(`HTTP ${res.status}`);
                 }
             } catch (e) {
                 console.error('Failed to fetch initial state early:', e);
+                setInitialStateError(e instanceof Error ? e.message : 'Failed to fetch initial state');
             } finally {
                 setInitialStateLoaded(true);
             }
@@ -193,6 +207,12 @@ export function WebSocketProvider({
     // Handle incoming Ably messages (for both leader and follower)
     const handleAblyMessage = useCallback((messageName: string, data: any) => {
         if (!isMountedRef.current) return;
+
+        const now = Date.now();
+        if (!lastRealtimeMessageAtRef.current || now - lastRealtimeMessageAtRef.current > 1000) {
+            lastRealtimeMessageAtRef.current = now;
+            setLastRealtimeMessageAt(now);
+        }
 
         // If in failover, buffer the message
         if (isInFailoverRef.current) {
@@ -263,6 +283,7 @@ export function WebSocketProvider({
         const fetchInitialState = async () => {
             try {
                 const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
+                setInitialStateError(null);
                 const { response: res } = await httpFetch(`${apiBase}/sessions/${sessionId}/state`, {
                     idempotent: true,
                     throwOnHttpError: false,
@@ -272,9 +293,15 @@ export function WebSocketProvider({
                     setState(data);
                     if (data.questions) setQuestions(data.questions);
                     if (data.voteCounts) setVoteResults(data.voteCounts);
+                    setLastStateSyncAt(Date.now());
+                } else if (!res.ok && isMountedRef.current) {
+                    setInitialStateError(`HTTP ${res.status}`);
                 }
             } catch (e) {
                 console.error('Failed to fetch initial state:', e);
+                if (isMountedRef.current) {
+                    setInitialStateError(e instanceof Error ? e.message : 'Failed to fetch initial state');
+                }
             }
 
             if (role === 'student') {
@@ -554,6 +581,8 @@ export function WebSocketProvider({
                         if (msg.currentState.state) setState(msg.currentState.state);
                         if (msg.currentState.voteResults) setVoteResults(msg.currentState.voteResults);
                         if (msg.currentState.questions) setQuestions(msg.currentState.questions);
+                        setInitialStateError(null);
+                        setLastStateSyncAt(Date.now());
                     } else {
                         fetchInitialState();
                     }
@@ -609,6 +638,8 @@ export function WebSocketProvider({
                     if (msg.currentState.state) setState(msg.currentState.state);
                     if (msg.currentState.voteResults) setVoteResults(msg.currentState.voteResults);
                     if (msg.currentState.questions) setQuestions(msg.currentState.questions);
+                    setInitialStateError(null);
+                    setLastStateSyncAt(Date.now());
                 }
             };
 
@@ -656,6 +687,61 @@ export function WebSocketProvider({
         };
     }, [sessionId, role, name, handleAblyMessage, processBufferedMessages]);
 
+    const refreshState = useCallback(async (): Promise<SendAck> => {
+        const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
+        const requestId = createClientRequestId();
+
+        try {
+            const { response, requestId: rid } = await httpFetch(`${apiBase}/sessions/${sessionId}/state`, {
+                timeoutMs: 10_000,
+                idempotent: true,
+                clientRequestId: requestId,
+                throwOnHttpError: true,
+            });
+
+            const data = await response.json();
+            if (isMountedRef.current) {
+                setState(data);
+                if (data.questions) setQuestions(data.questions);
+                if (data.voteCounts) setVoteResults(data.voteCounts);
+                setInitialStateError(null);
+                setLastStateSyncAt(Date.now());
+            }
+
+            if (role === 'student') {
+                try {
+                    const { response: votesRes } = await httpFetch(
+                        `${apiBase}/sessions/${sessionId}/my-votes?participantId=${encodeURIComponent(participantIdRef.current)}`,
+                        {
+                            timeoutMs: 10_000,
+                            idempotent: true,
+                            throwOnHttpError: false,
+                        }
+                    );
+                    if (votesRes.ok && isMountedRef.current) {
+                        const votesData = await votesRes.json();
+                        if (votesData.data?.votes) {
+                            setMyVotes(votesData.data.votes);
+                        }
+                    }
+                } catch (e) {
+                    // Best-effort; ignore
+                }
+            }
+
+            return { ok: true, requestId: rid };
+        } catch (e) {
+            const status = e instanceof HttpRequestError ? e.status : undefined;
+            const kind = e instanceof HttpRequestError ? e.kind : undefined;
+            const message = e instanceof Error ? e.message : 'Request failed';
+            const rid = e instanceof HttpRequestError ? e.requestId : requestId;
+            if (isMountedRef.current) {
+                setInitialStateError(message);
+            }
+            return { ok: false, requestId: rid, message, status, kind, error: e };
+        }
+    }, [role, sessionId]);
+
     const sendMessage = async (type: string, payload: any, options?: { clientRequestId?: string }): Promise<SendAck> => {
         const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
         const requestId = options?.clientRequestId ?? createClientRequestId();
@@ -698,6 +784,8 @@ export function WebSocketProvider({
                 case 'UPVOTE_QUESTION':
                     await httpFetch(`${apiBase}/sessions/${sessionId}/questions/${payload.questionId}/upvote`, {
                         method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ participantId: participantIdRef.current }),
                         retry: false,
                         clientRequestId: requestId,
                     });
@@ -758,8 +846,10 @@ export function WebSocketProvider({
             isConnecting,
             connectionError,
             state,
+            initialStateError,
             voteResults,
             sendMessage,
+            refreshState,
             updateState,
             lostCount,
             serverTimeOffset,
@@ -767,6 +857,8 @@ export function WebSocketProvider({
             questions,
             activeParticipants,
             lastSlideUpdate,
+            lastStateSyncAt,
+            lastRealtimeMessageAt,
             socket: ablyClient,
             initialStateLoaded,
             participantId: participantIdRef.current,
