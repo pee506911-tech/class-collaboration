@@ -4,7 +4,7 @@ import React, { createContext, useContext, useEffect, useRef, useState, useCallb
 import * as Ably from 'ably';
 import { StateUpdatePayload } from 'shared';
 import { shouldApplyStateUpdate } from './state-updates';
-import { createClientRequestId, httpFetch, HttpRequestError } from '@/lib/http';
+import { createClientRequestId, httpFetch, HttpRequestError, type HttpErrorKind } from '@/lib/http';
 import { safeLocalStorageGet, safeLocalStorageSet } from '@/lib/storage';
 
 // Cross-tab connection sharing using BroadcastChannel
@@ -67,7 +67,7 @@ interface WebSocketContextType {
 
 export type SendAck =
     | { ok: true; requestId: string }
-    | { ok: false; requestId: string; message: string; status?: number; kind?: string; error?: unknown };
+    | { ok: false; requestId: string; message: string; status?: number; kind?: HttpErrorKind; error?: unknown };
 
 const WebSocketContext = createContext<WebSocketContextType | null>(null);
 
@@ -824,7 +824,6 @@ export function WebSocketProvider({
                         ok: false,
                         requestId,
                         message: `Unsupported message type: ${type}`,
-                        kind: 'unsupported',
                     };
             }
         } catch (e) {
