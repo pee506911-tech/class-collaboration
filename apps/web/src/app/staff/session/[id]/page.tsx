@@ -66,7 +66,7 @@ function toSlide(slide: EditorSlide): Slide {
 }
 
 function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSession }: { baseSlides: Slide[], setBaseSlides: React.Dispatch<React.SetStateAction<Slide[]>>, loadSlides: () => Promise<void>, session: Session | null, loadSession: () => void }) {
-    const { sendMessage, state, activeParticipants, updateState, initialStateLoaded, isConnected, connectionError, lastStateSyncAt, lastRealtimeMessageAt, refreshState } = useWebSocket();
+    const { sendMessage, state, activeParticipants, updateState, initialStateLoaded } = useWebSocket();
     const params = useParams();
     const id = params?.id as string;
     const [showTypeSelector, setShowTypeSelector] = useState(false);
@@ -80,8 +80,6 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
     const [isReordering, setIsReordering] = useState(false);
     const [isTogglingVisibility, setIsTogglingVisibility] = useState(false);
     const [isSavingSettings, setIsSavingSettings] = useState(false);
-    const [now, setNow] = useState(() => Date.now());
-    const [isRefreshingState, setIsRefreshingState] = useState(false);
 
     // SEPARATE PREVIEW STATE: This is for editor preview only, independent of student view
     const [previewSlideId, setPreviewSlideId] = useState<string | null>(null);
@@ -107,11 +105,6 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
     useEffect(() => {
         if (session) setEditTitle(session.title);
     }, [session]);
-
-    useEffect(() => {
-        const intervalId = setInterval(() => setNow(Date.now()), 1000);
-        return () => clearInterval(intervalId);
-    }, []);
 
     // Sync preview to active slide when it changes (optional - keeps preview updated)
     useEffect(() => {
@@ -334,14 +327,6 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
     }
 
     const isShareEnabled = !(editorSync.dirty || editorSync.saving || hasPendingStructuralMutations || isReordering || isTogglingVisibility || isSavingSettings);
-    const statusLabel = connectionError ? 'Failed' : isConnected ? 'Connected' : 'Reconnecting';
-    const statusDotClass = connectionError
-        ? 'bg-rose-500'
-        : isConnected
-            ? 'bg-green-500'
-            : 'bg-amber-500';
-    const lastUpdateAt = lastRealtimeMessageAt ?? lastStateSyncAt;
-    const isStale = isConnected && typeof lastUpdateAt === 'number' && now - lastUpdateAt > 15_000;
 
     return (
         <div className="h-screen bg-slate-50 flex overflow-hidden font-sans text-slate-900">
@@ -378,52 +363,6 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                             Use <span className="font-semibold">Mobile Clicker</span> to control what's live for students
                         </div>
                     </div>
-                </div>
-
-                {/* Live updates status */}
-                <div className="bg-white border-b border-slate-200 px-4 py-2">
-                    <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2 text-[11px] text-slate-700">
-                            <span className={`w-2 h-2 rounded-full ${statusDotClass}`} />
-                            <span className="font-semibold">Live updates:</span>
-                            <span>{statusLabel}</span>
-                        </div>
-                        <div className="text-[10px] text-slate-500 font-mono">
-                            Last: {typeof lastUpdateAt === 'number' ? new Date(lastUpdateAt).toLocaleTimeString() : '—'}
-                        </div>
-                    </div>
-                    {isStale ? (
-                        <div className="mt-2 flex items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
-                            <div className="text-[11px] text-amber-900">
-                                Updates may be stale.
-                            </div>
-                            <Button
-                                size="sm"
-                                variant="outline"
-                                className="h-7 border-amber-300 text-amber-900 hover:bg-amber-100"
-                                disabled={isRefreshingState}
-                                onClick={() => {
-                                    if (isRefreshingState) return;
-                                    void (async () => {
-                                        setIsRefreshingState(true);
-                                        const result = await refreshState();
-                                        setIsRefreshingState(false);
-                                        if (result.ok) {
-                                            toast.success('State refreshed');
-                                            return;
-                                        }
-                                        const ui = mapHttpErrorToUiMessage(result);
-                                        const requestId = formatRequestId(result.requestId);
-                                        toast.error('Failed to refresh state', {
-                                            description: `${ui.description}${requestId ? ` (Request ID: ${requestId})` : ''}`,
-                                        });
-                                    })();
-                                }}
-                            >
-                                Refresh now
-                            </Button>
-                        </div>
-                    ) : null}
                 </div>
 
                 {sessionInlineError && (

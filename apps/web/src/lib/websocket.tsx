@@ -151,6 +151,7 @@ export function WebSocketProvider({
     const leaderPongTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const bcRef = useRef<BroadcastChannel | null>(null);
     const isMountedRef = useRef<boolean>(true);
+    const isRefreshingRef = useRef<boolean>(false); // Track if auto-refresh is in progress
 
     // Message buffer for failover gap
     const messageBufferRef = useRef<Array<{ name: string; data: any; timestamp: number }>>([]);
@@ -741,6 +742,30 @@ export function WebSocketProvider({
             return { ok: false, requestId: rid, message, status, kind, error: e };
         }
     }, [role, sessionId]);
+
+    // Auto-refresh state when connection is stale (no updates for 15 seconds)
+    useEffect(() => {
+        if (!isConnected || !sessionId) return;
+
+        const checkStaleness = () => {
+            const lastUpdateAt = lastRealtimeMessageAt ?? lastStateSyncAt;
+            const isStale = isConnected && typeof lastUpdateAt === 'number' && Date.now() - lastUpdateAt > 15_000;
+
+            if (isStale && !isRefreshingRef.current) {
+                isRefreshingRef.current = true;
+                refreshState().finally(() => {
+                    isRefreshingRef.current = false;
+                });
+            }
+        };
+
+        // Check every 5 seconds
+        const intervalId = setInterval(checkStaleness, 5_000);
+
+        return () => {
+            clearInterval(intervalId);
+        };
+    }, [isConnected, sessionId, lastRealtimeMessageAt, lastStateSyncAt, refreshState]);
 
     const sendMessage = async (type: string, payload: any, options?: { clientRequestId?: string }): Promise<SendAck> => {
         const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
