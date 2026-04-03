@@ -73,8 +73,17 @@ SET @tbl_vote_submissions_exists = (
     WHERE table_schema = DATABASE()
       AND table_name = 'vote_submissions'
 );
+-- TiDB only supports SHARD_ROW_ID_BITS when the table uses an implicit row id
+-- (i.e., when it does NOT have a PRIMARY KEY as the row handle).
+SET @vote_submissions_has_pk = (
+    SELECT COUNT(*)
+    FROM information_schema.table_constraints
+    WHERE table_schema = DATABASE()
+      AND table_name = 'vote_submissions'
+      AND constraint_type = 'PRIMARY KEY'
+);
 SET @sql_shard_vs = IF(
-    @is_tidb AND @tbl_vote_submissions_exists > 0,
+    @is_tidb AND @tbl_vote_submissions_exists > 0 AND @vote_submissions_has_pk = 0,
     'ALTER TABLE vote_submissions SHARD_ROW_ID_BITS = 4 PRE_SPLIT_REGIONS = 2',
     'SELECT \"Skipping vote_submissions sharding (not TiDB or missing)\"'
 );
@@ -91,8 +100,15 @@ SET @tbl_question_upvotes_exists = (
     WHERE table_schema = DATABASE()
       AND table_name = 'question_upvotes'
 );
+SET @question_upvotes_has_pk = (
+    SELECT COUNT(*)
+    FROM information_schema.table_constraints
+    WHERE table_schema = DATABASE()
+      AND table_name = 'question_upvotes'
+      AND constraint_type = 'PRIMARY KEY'
+);
 SET @sql_shard_qu = IF(
-    @is_tidb AND @tbl_question_upvotes_exists > 0,
+    @is_tidb AND @tbl_question_upvotes_exists > 0 AND @question_upvotes_has_pk = 0,
     'ALTER TABLE question_upvotes SHARD_ROW_ID_BITS = 4 PRE_SPLIT_REGIONS = 2',
     'SELECT \"Skipping question_upvotes sharding (not TiDB or missing)\"'
 );
@@ -109,8 +125,15 @@ SET @tbl_slide_delete_requests_exists = (
     WHERE table_schema = DATABASE()
       AND table_name = 'slide_delete_requests'
 );
+SET @slide_delete_requests_has_pk = (
+    SELECT COUNT(*)
+    FROM information_schema.table_constraints
+    WHERE table_schema = DATABASE()
+      AND table_name = 'slide_delete_requests'
+      AND constraint_type = 'PRIMARY KEY'
+);
 SET @sql_shard_sdr = IF(
-    @is_tidb AND @tbl_slide_delete_requests_exists > 0,
+    @is_tidb AND @tbl_slide_delete_requests_exists > 0 AND @slide_delete_requests_has_pk = 0,
     'ALTER TABLE slide_delete_requests SHARD_ROW_ID_BITS = 4 PRE_SPLIT_REGIONS = 2',
     'SELECT \"Skipping slide_delete_requests sharding (not TiDB or missing)\"'
 );
