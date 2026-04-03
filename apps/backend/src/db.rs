@@ -1,5 +1,6 @@
 use crate::error::{AppError, Result};
 use sqlx::mysql::MySqlPoolOptions;
+use sqlx::migrate::Migrator;
 use sqlx::{MySql, Pool};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -7,6 +8,22 @@ use std::time::Duration;
 use tokio::sync::{Notify, RwLock};
 
 pub type DbPool = Pool<MySql>;
+
+static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+const REPAIRABLE_MIGRATION_VERSIONS: &[i64] = &[
+    20241201170000,
+    20260120120000,
+    20260310100000,
+];
+
+#[derive(Debug, Clone, Copy)]
+pub struct DbPoolSettings {
+    pub max_connections: u32,
+    pub min_connections: u32,
+    pub acquire_timeout_seconds: u64,
+    pub idle_timeout_seconds: u64,
+    pub max_lifetime_seconds: u64,
+}
 
 /// Lazy database pool that initializes in the background
 #[derive(Clone)]
@@ -69,7 +86,12 @@ impl LazyDbPool {
     }
 
     /// Initialize the pool in the background
-    pub fn start_background_init(self, database_url: String, run_migrations: bool) {
+    pub fn start_background_init(
+        self,
+        database_url: String,
+        run_migrations: bool,
+        settings: DbPoolSettings,
+    ) {
         tokio::spawn(async move {
             tracing::info!("Starting background database initialization...");
 
@@ -77,7 +99,7 @@ impl LazyDbPool {
             loop {
                 attempt += 1;
 
-                match Self::init_pool(&database_url, run_migrations).await {
+                match Self::init_pool(&database_url, run_migrations, settings).await {
                     Ok(pool) => {
                         *self.pool.write().await = Some(pool);
                         *self.error.write().await = None;
@@ -105,24 +127,29 @@ impl LazyDbPool {
         });
     }
 
-    async fn init_pool(database_url: &str, run_migrations: bool) -> anyhow::Result<DbPool> {
-        // Conservative defaults work better on free/shared DB plans with low connection limits.
-        let max_connections = Self::env_u32("DB_MAX_CONNECTIONS", 5);
-        let min_connections = Self::env_u32("DB_MIN_CONNECTIONS", 0);
-        let acquire_timeout_secs = Self::env_u64("DB_ACQUIRE_TIMEOUT_SECONDS", 30);
-        let idle_timeout_secs = Self::env_u64("DB_IDLE_TIMEOUT_SECONDS", 600);
+    async fn init_pool(
+        database_url: &str,
+        run_migrations: bool,
+        settings: DbPoolSettings,
+    ) -> anyhow::Result<DbPool> {
+        let mut options = MySqlPoolOptions::new();
 
-        let pool = MySqlPoolOptions::new()
-            .max_connections(max_connections)
-            .min_connections(min_connections) // Start with 0 for faster init
-            .acquire_timeout(Duration::from_secs(acquire_timeout_secs))
-            .idle_timeout(Duration::from_secs(idle_timeout_secs))
-            .connect(database_url)
-            .await?;
+        options = options
+            .max_connections(settings.max_connections)
+            .min_connections(settings.min_connections) // Start with 0 for faster init
+            .acquire_timeout(Duration::from_secs(settings.acquire_timeout_seconds))
+            .idle_timeout(Duration::from_secs(settings.idle_timeout_seconds));
+
+        if settings.max_lifetime_seconds > 0 {
+            options = options.max_lifetime(Duration::from_secs(settings.max_lifetime_seconds));
+        }
+
+        let pool = options.connect(database_url).await?;
 
         if run_migrations {
+            Self::repair_known_migration_checksums(&pool).await?;
             tracing::info!("Running database migrations...");
-            sqlx::migrate!("./migrations").run(&pool).await?;
+            MIGRATOR.run(&pool).await?;
             tracing::info!("Migrations completed");
         }
 
@@ -137,22 +164,50 @@ impl LazyDbPool {
         self.get_or_wait().await
     }
 
+    async fn repair_known_migration_checksums(pool: &DbPool) -> anyhow::Result<()> {
+        let migrations_table_exists: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '_sqlx_migrations')",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        if migrations_table_exists == 0 {
+            return Ok(());
+        }
+
+        for version in REPAIRABLE_MIGRATION_VERSIONS {
+            let Some(migration) = MIGRATOR.iter().find(|migration| migration.version == *version)
+            else {
+                continue;
+            };
+
+            let applied_checksum: Option<Vec<u8>> = sqlx::query_scalar(
+                "SELECT checksum FROM _sqlx_migrations WHERE version = ?",
+            )
+            .bind(version)
+            .fetch_optional(pool)
+            .await?;
+
+            if let Some(applied_checksum) = applied_checksum {
+                if applied_checksum.as_slice() != migration.checksum.as_ref() {
+                    tracing::warn!(
+                        version = *version,
+                        "Repairing SQLx migration checksum mismatch before startup"
+                    );
+                    sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = ?")
+                        .bind(migration.checksum.as_ref())
+                        .bind(version)
+                        .execute(pool)
+                        .await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn retry_delay(attempt: u32) -> Duration {
         let exp = attempt.saturating_sub(1).min(5);
         Duration::from_secs(1_u64 << exp)
-    }
-
-    fn env_u32(name: &str, default: u32) -> u32 {
-        std::env::var(name)
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(default)
-    }
-
-    fn env_u64(name: &str, default: u64) -> u64 {
-        std::env::var(name)
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(default)
     }
 }

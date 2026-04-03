@@ -179,7 +179,9 @@ fn publish_session_state(session_id: String, session: &Session) {
 }
 
 async fn fetch_session(pool: &crate::db::DbPool, session_id: &str) -> Result<Session> {
-    let session = query_as::<_, Session>("SELECT * FROM sessions WHERE id = ?")
+    let session = query_as::<_, Session>(
+            "SELECT id, creator_id, title, status, share_token, current_slide_id, is_results_visible, is_presentation_active, state_version, allow_questions, require_name, created_at, updated_at FROM sessions WHERE id = ?",
+        )
         .bind(session_id)
         .fetch_optional(pool)
         .await?;

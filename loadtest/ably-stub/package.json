@@ -1,0 +1,14 @@
+{
+  "name": "ably-stub",
+  "version": "1.0.0",
+  "description": "Ably REST API stub for testing with fault injection",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "uuid": "^9.0.0"
+  }
+}

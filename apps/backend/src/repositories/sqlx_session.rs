@@ -6,7 +6,9 @@ use crate::error::{AppError, Result};
 use crate::models::session::Session;
 use crate::models::slide::Slide;
 use crate::models::student::{Participant, Question};
-use crate::repositories::session::{NewSession, SessionRepository, SessionUpdates};
+use crate::repositories::session::{
+    NewSession, SessionRepository, SessionSequences, SessionStateHeader, SessionUpdates,
+};
 
 #[derive(sqlx::FromRow)]
 struct SessionWithSlideCountRow {
@@ -31,6 +33,16 @@ struct SessionWithSlideCountRow {
 pub struct SqlxSessionRepository {
     pool: Option<Pool<MySql>>,
     lazy_pool: Option<LazyDbPool>,
+}
+
+#[derive(sqlx::FromRow)]
+struct SessionStateHeaderRow {
+    current_slide_id: Option<String>,
+    is_presentation_active: bool,
+    is_results_visible: bool,
+    state_version: i64,
+    vote_sequence: u64,
+    qa_sequence: u64,
 }
 
 impl SqlxSessionRepository {
@@ -68,7 +80,7 @@ impl SessionRepository for SqlxSessionRepository {
     async fn find_by_creator(&self, creator_id: &str) -> Result<Vec<Session>> {
         let pool = self.get_pool().await?;
         let sessions = query_as::<_, Session>(
-            "SELECT * FROM sessions WHERE creator_id = ? ORDER BY created_at DESC",
+            "SELECT id, creator_id, title, status, share_token, current_slide_id, is_results_visible, is_presentation_active, state_version, allow_questions, require_name, created_at, updated_at FROM sessions WHERE creator_id = ? ORDER BY created_at DESC",
         )
         .bind(creator_id)
         .fetch_all(&pool)
@@ -98,13 +110,12 @@ impl SessionRepository for SqlxSessionRepository {
                 s.require_name,
                 s.created_at,
                 s.updated_at,
-                COALESCE(sc.slide_count, 0) as slide_count
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM slides sl
+                    WHERE sl.session_id = s.id
+                ), 0) as slide_count
             FROM sessions s
-            LEFT JOIN (
-                SELECT session_id, COUNT(*) as slide_count
-                FROM slides
-                GROUP BY session_id
-            ) sc ON sc.session_id = s.id
             WHERE s.creator_id = ?
             ORDER BY s.created_at DESC
             "#,
@@ -140,7 +151,9 @@ impl SessionRepository for SqlxSessionRepository {
 
     async fn find_by_id(&self, id: &str) -> Result<Option<Session>> {
         let pool = self.get_pool().await?;
-        let session = query_as::<_, Session>("SELECT * FROM sessions WHERE id = ?")
+        let session = query_as::<_, Session>(
+            "SELECT id, creator_id, title, status, share_token, current_slide_id, is_results_visible, is_presentation_active, state_version, allow_questions, require_name, created_at, updated_at FROM sessions WHERE id = ?",
+        )
             .bind(id)
             .fetch_optional(&pool)
             .await?;
@@ -150,7 +163,9 @@ impl SessionRepository for SqlxSessionRepository {
 
     async fn find_by_share_token(&self, token: &str) -> Result<Option<Session>> {
         let pool = self.get_pool().await?;
-        let session = query_as::<_, Session>("SELECT * FROM sessions WHERE share_token = ?")
+        let session = query_as::<_, Session>(
+            "SELECT id, creator_id, title, status, share_token, current_slide_id, is_results_visible, is_presentation_active, state_version, allow_questions, require_name, created_at, updated_at FROM sessions WHERE share_token = ?",
+        )
             .bind(token)
             .fetch_optional(&pool)
             .await?;
@@ -173,7 +188,9 @@ impl SessionRepository for SqlxSessionRepository {
         .execute(&pool)
         .await?;
 
-        let session = query_as::<_, Session>("SELECT * FROM sessions WHERE id = ?")
+        let session = query_as::<_, Session>(
+            "SELECT id, creator_id, title, status, share_token, current_slide_id, is_results_visible, is_presentation_active, state_version, allow_questions, require_name, created_at, updated_at FROM sessions WHERE id = ?",
+        )
             .bind(&new_session.id)
             .fetch_one(&pool)
             .await?;
@@ -211,7 +228,9 @@ impl SessionRepository for SqlxSessionRepository {
 
         query.build().execute(&pool).await?;
 
-        let session = query_as::<_, Session>("SELECT * FROM sessions WHERE id = ?")
+        let session = query_as::<_, Session>(
+            "SELECT id, creator_id, title, status, share_token, current_slide_id, is_results_visible, is_presentation_active, state_version, allow_questions, require_name, created_at, updated_at FROM sessions WHERE id = ?",
+        )
             .bind(id)
             .fetch_one(&pool)
             .await?;
@@ -241,25 +260,76 @@ impl SessionRepository for SqlxSessionRepository {
         Ok(exists.unwrap_or(false))
     }
 
+    async fn get_state_header(&self, session_id: &str) -> Result<Option<SessionStateHeader>> {
+        let pool = self.get_pool().await?;
+        let row = if crate::tidb_ru::should_sample() {
+            let mut conn = pool.acquire().await?;
+            let row = query_as::<_, SessionStateHeaderRow>(
+                "SELECT current_slide_id, is_presentation_active, is_results_visible, state_version, vote_sequence, qa_sequence FROM sessions WHERE id = ?",
+            )
+            .bind(session_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+            crate::tidb_ru::log_last_query_info("sessions.state_header", &mut *conn).await;
+            row
+        } else {
+            query_as::<_, SessionStateHeaderRow>(
+                "SELECT current_slide_id, is_presentation_active, is_results_visible, state_version, vote_sequence, qa_sequence FROM sessions WHERE id = ?",
+            )
+            .bind(session_id)
+            .fetch_optional(&pool)
+            .await?
+        };
+
+        Ok(row.map(|r| SessionStateHeader {
+            current_slide_id: r.current_slide_id,
+            is_presentation_active: r.is_presentation_active,
+            is_results_visible: r.is_results_visible,
+            state_version: r.state_version,
+            vote_sequence: r.vote_sequence,
+            qa_sequence: r.qa_sequence,
+        }))
+    }
+
     async fn get_slides(&self, session_id: &str) -> Result<Vec<Slide>> {
         let pool = self.get_pool().await?;
-        let slides = query_as::<_, Slide>(
-            "SELECT * FROM slides WHERE session_id = ? AND is_hidden = FALSE ORDER BY order_index, id"
-        )
-        .bind(session_id)
-        .fetch_all(&pool)
-        .await?;
+        let slides = if crate::tidb_ru::should_sample() {
+            let mut conn = pool.acquire().await?;
+            let slides = query_as::<_, Slide>("SELECT id, session_id, type, content, order_index, is_hidden FROM slides WHERE session_id = ? AND is_hidden = FALSE ORDER BY order_index, id")
+                .bind(session_id)
+                .fetch_all(&mut *conn)
+                .await?;
+            crate::tidb_ru::log_last_query_info("slides.by_session_visible", &mut *conn).await;
+            slides
+        } else {
+            query_as::<_, Slide>("SELECT id, session_id, type, content, order_index, is_hidden FROM slides WHERE session_id = ? AND is_hidden = FALSE ORDER BY order_index, id")
+                .bind(session_id)
+                .fetch_all(&pool)
+                .await?
+        };
         Ok(slides)
     }
 
     async fn get_questions(&self, session_id: &str) -> Result<Vec<Question>> {
         let pool = self.get_pool().await?;
-        let questions = query_as::<_, Question>(
-            "SELECT * FROM questions WHERE session_id = ? ORDER BY upvotes DESC, created_at DESC",
-        )
-        .bind(session_id)
-        .fetch_all(&pool)
-        .await?;
+        let questions = if crate::tidb_ru::should_sample() {
+            let mut conn = pool.acquire().await?;
+            let questions = query_as::<_, Question>(
+                "SELECT id, session_id, slide_id, participant_id, content, upvotes, is_approved, created_at FROM questions WHERE session_id = ? ORDER BY upvotes DESC, created_at DESC",
+            )
+            .bind(session_id)
+            .fetch_all(&mut *conn)
+            .await?;
+            crate::tidb_ru::log_last_query_info("questions.by_session_sorted", &mut *conn).await;
+            questions
+        } else {
+            query_as::<_, Question>(
+                "SELECT id, session_id, slide_id, participant_id, content, upvotes, is_approved, created_at FROM questions WHERE session_id = ? ORDER BY upvotes DESC, created_at DESC",
+            )
+            .bind(session_id)
+            .fetch_all(&pool)
+            .await?
+        };
         Ok(questions)
     }
 
@@ -276,12 +346,40 @@ impl SessionRepository for SqlxSessionRepository {
 
     async fn get_vote_counts(&self, session_id: &str) -> Result<Vec<(String, String, i64)>> {
         let pool = self.get_pool().await?;
-        let counts = sqlx::query_as(
-            "SELECT slide_id, option_id, COUNT(*) as count FROM votes WHERE session_id = ? GROUP BY slide_id, option_id"
-        )
-        .bind(session_id)
-        .fetch_all(&pool)
-        .await?;
+        let counts = if crate::tidb_ru::should_sample() {
+            let mut conn = pool.acquire().await?;
+            let counts = sqlx::query_as(
+                "SELECT slide_id, option_id, COUNT(*) as count FROM votes WHERE session_id = ? GROUP BY slide_id, option_id",
+            )
+            .bind(session_id)
+            .fetch_all(&mut *conn)
+            .await?;
+            crate::tidb_ru::log_last_query_info("votes.counts_by_session", &mut *conn).await;
+            counts
+        } else {
+            sqlx::query_as(
+                "SELECT slide_id, option_id, COUNT(*) as count FROM votes WHERE session_id = ? GROUP BY slide_id, option_id",
+            )
+            .bind(session_id)
+            .fetch_all(&pool)
+            .await?
+        };
         Ok(counts)
+    }
+
+    async fn get_sequences(&self, session_id: &str) -> Result<SessionSequences> {
+        let pool = self.get_pool().await?;
+        let sequences: Option<(u64, u64)> =
+            sqlx::query_as("SELECT vote_sequence, qa_sequence FROM sessions WHERE id = ?")
+                .bind(session_id)
+                .fetch_optional(&pool)
+                .await?;
+
+        Ok(sequences
+            .map(|(v, q)| SessionSequences {
+                vote_sequence: v,
+                qa_sequence: q,
+            })
+            .unwrap_or_default())
     }
 }

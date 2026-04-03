@@ -1,16 +1,33 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json,
 };
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{query_as, FromRow};
 use std::collections::HashMap;
 
 use crate::error::{AppError, Result};
 use crate::middleware::auth::AuthUser;
-use crate::models::session::Session;
 use crate::models::slide::Slide;
+
+/// Optional query parameters for stats endpoints to limit result sets
+#[derive(Debug, Deserialize)]
+pub struct StatsQueryParams {
+    /// Maximum number of vote interactions to return (default: 2000)
+    #[serde(rename = "voteLimit")]
+    vote_limit: Option<usize>,
+    /// Maximum number of questions to return (default: 1000)
+    #[serde(rename = "questionLimit")]
+    question_limit: Option<usize>,
+    /// Maximum number of participants to return (default: 500)
+    #[serde(rename = "participantLimit")]
+    participant_limit: Option<usize>,
+}
+
+const DEFAULT_VOTE_LIMIT: usize = 2000;
+const DEFAULT_QUESTION_LIMIT: usize = 1000;
+const DEFAULT_PARTICIPANT_LIMIT: usize = 500;
 
 #[derive(Debug, Serialize)]
 pub struct Participant {
@@ -119,25 +136,33 @@ pub async fn get_session_stats(
     State(app_state): State<crate::AppState>,
     AuthUser { user_id, .. }: AuthUser,
     Path(id): Path<String>,
+    Query(params): Query<StatsQueryParams>,
 ) -> Result<Json<SessionStats>> {
     let pool = app_state.db_pool.pool().await?;
 
     // Verify session exists and user owns it
-    let session = query_as::<_, Session>("SELECT * FROM sessions WHERE id = ?")
+    let creator_id: String = sqlx::query_scalar("SELECT creator_id FROM sessions WHERE id = ?")
         .bind(&id)
         .fetch_optional(&pool)
         .await?
         .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
 
-    if session.creator_id != user_id {
+    if creator_id != user_id {
         return Err(AppError::Auth("Unauthorized access to session".to_string()));
     }
 
+    let vote_limit = params.vote_limit.unwrap_or(DEFAULT_VOTE_LIMIT);
+    let question_limit = params.question_limit.unwrap_or(DEFAULT_QUESTION_LIMIT);
+    let participant_limit = params
+        .participant_limit
+        .unwrap_or(DEFAULT_PARTICIPANT_LIMIT);
+
     // Run independent reads in parallel to reduce tail latency
-    let slides_fut =
-        query_as::<_, Slide>("SELECT * FROM slides WHERE session_id = ? ORDER BY order_index, id")
-            .bind(&id)
-            .fetch_all(&pool);
+    let slides_fut = query_as::<_, Slide>(
+        "SELECT id, session_id, type, content, order_index, is_hidden FROM slides WHERE session_id = ? ORDER BY order_index, id",
+    )
+    .bind(&id)
+    .fetch_all(&pool);
 
     let vote_counts_fut = async {
         sqlx::query_as::<_, VoteCount>(
@@ -151,13 +176,15 @@ pub async fn get_session_stats(
 
     let vote_interactions_fut = async {
         sqlx::query_as::<_, VoteInteraction>(
-            "SELECT v.slide_id, v.option_id, COALESCE(p.name, 'Anonymous') as participant_name, v.created_at 
-             FROM votes v 
+            "SELECT v.slide_id, v.option_id, COALESCE(p.name, 'Anonymous') as participant_name, v.created_at
+             FROM votes v
              LEFT JOIN participants p ON v.participant_id = p.id AND v.session_id = p.session_id
              WHERE v.session_id = ?
-             ORDER BY v.created_at DESC"
+             ORDER BY v.created_at DESC
+             LIMIT ?"
         )
         .bind(&id)
+        .bind(vote_limit as i64)
         .fetch_all(&pool)
         .await
         .unwrap_or_default()
@@ -165,9 +192,10 @@ pub async fn get_session_stats(
 
     let participants_fut = async {
         sqlx::query_as::<_, DbParticipant>(
-            "SELECT id, name, joined_at FROM participants WHERE session_id = ? ORDER BY joined_at DESC"
+            "SELECT id, name, joined_at FROM participants WHERE session_id = ? ORDER BY joined_at DESC LIMIT ?"
         )
         .bind(&id)
+        .bind(participant_limit as i64)
         .fetch_all(&pool)
         .await
         .unwrap_or_default()
@@ -177,12 +205,14 @@ pub async fn get_session_stats(
         sqlx::query_as::<_, DbQuestionWithAuthor>(
             "SELECT q.id, q.content, q.upvotes, q.participant_id, q.created_at, q.slide_id,
                     COALESCE(p.name, 'Anonymous') as author_name
-             FROM questions q 
+             FROM questions q
              LEFT JOIN participants p ON q.participant_id = p.id AND q.session_id = p.session_id
-             WHERE q.session_id = ? 
-             ORDER BY q.upvotes DESC, q.created_at DESC",
+             WHERE q.session_id = ?
+             ORDER BY q.upvotes DESC, q.created_at DESC
+             LIMIT ?",
         )
         .bind(&id)
+        .bind(question_limit as i64)
         .fetch_all(&pool)
         .await
         .unwrap_or_default()
@@ -296,18 +326,28 @@ pub async fn get_session_stats(
 pub async fn get_public_session_stats(
     State(app_state): State<crate::AppState>,
     Path(id): Path<String>,
+    Query(params): Query<StatsQueryParams>,
 ) -> Result<Json<SessionStats>> {
     let pool = app_state.db_pool.pool().await?;
 
     // Verify session exists
-    let _session = query_as::<_, Session>("SELECT * FROM sessions WHERE id = ?")
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)")
         .bind(&id)
-        .fetch_optional(&pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
+        .fetch_one(&pool)
+        .await?;
+
+    if !exists {
+        return Err(AppError::NotFound("Session not found".to_string()));
+    }
+
+    let vote_limit = params.vote_limit.unwrap_or(DEFAULT_VOTE_LIMIT);
+    let question_limit = params.question_limit.unwrap_or(DEFAULT_QUESTION_LIMIT);
+    let participant_limit = params
+        .participant_limit
+        .unwrap_or(DEFAULT_PARTICIPANT_LIMIT);
 
     let slides_fut = query_as::<_, Slide>(
-        "SELECT * FROM slides WHERE session_id = ? AND is_hidden = FALSE ORDER BY order_index, id",
+        "SELECT id, session_id, type, content, order_index, is_hidden FROM slides WHERE session_id = ? AND is_hidden = FALSE ORDER BY order_index, id",
     )
     .bind(&id)
     .fetch_all(&pool);
@@ -324,13 +364,15 @@ pub async fn get_public_session_stats(
 
     let vote_interactions_fut = async {
         sqlx::query_as::<_, VoteInteraction>(
-            "SELECT v.slide_id, v.option_id, COALESCE(p.name, 'Anonymous') as participant_name, v.created_at 
-             FROM votes v 
+            "SELECT v.slide_id, v.option_id, COALESCE(p.name, 'Anonymous') as participant_name, v.created_at
+             FROM votes v
              LEFT JOIN participants p ON v.participant_id = p.id AND v.session_id = p.session_id
              WHERE v.session_id = ?
-             ORDER BY v.created_at DESC"
+             ORDER BY v.created_at DESC
+             LIMIT ?"
         )
         .bind(&id)
+        .bind(vote_limit as i64)
         .fetch_all(&pool)
         .await
         .unwrap_or_default()
@@ -338,9 +380,10 @@ pub async fn get_public_session_stats(
 
     let participants_fut = async {
         sqlx::query_as::<_, DbParticipant>(
-            "SELECT id, name, joined_at FROM participants WHERE session_id = ? ORDER BY joined_at DESC"
+            "SELECT id, name, joined_at FROM participants WHERE session_id = ? ORDER BY joined_at DESC LIMIT ?"
         )
         .bind(&id)
+        .bind(participant_limit as i64)
         .fetch_all(&pool)
         .await
         .unwrap_or_default()
@@ -350,12 +393,14 @@ pub async fn get_public_session_stats(
         sqlx::query_as::<_, DbQuestionWithAuthor>(
             "SELECT q.id, q.content, q.upvotes, q.participant_id, q.created_at, q.slide_id,
                     COALESCE(p.name, 'Anonymous') as author_name
-             FROM questions q 
+             FROM questions q
              LEFT JOIN participants p ON q.participant_id = p.id AND q.session_id = p.session_id
-             WHERE q.session_id = ? 
-             ORDER BY q.upvotes DESC, q.created_at DESC",
+             WHERE q.session_id = ?
+             ORDER BY q.upvotes DESC, q.created_at DESC
+             LIMIT ?",
         )
         .bind(&id)
+        .bind(question_limit as i64)
         .fetch_all(&pool)
         .await
         .unwrap_or_default()

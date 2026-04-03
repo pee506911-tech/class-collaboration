@@ -111,11 +111,13 @@ pub async fn login(
 ) -> Result<(CookieJar, Json<AuthResponse>)> {
     let pool = app_state.db_pool.pool().await?;
 
-    let user: User = query_as("SELECT * FROM users WHERE email = ?")
-        .bind(&payload.email)
-        .fetch_optional(&pool)
-        .await?
-        .ok_or_else(|| AppError::Auth("Invalid email or password".to_string()))?;
+    let user: User = query_as(
+        "SELECT id, email, password_hash, name, role, created_at FROM users WHERE email = ?",
+    )
+    .bind(&payload.email)
+    .fetch_optional(&pool)
+    .await?
+    .ok_or_else(|| AppError::Auth("Invalid email or password".to_string()))?;
 
     let password = payload.password;
     let password_hash = user.password_hash.clone();

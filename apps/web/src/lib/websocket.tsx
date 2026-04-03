@@ -4,6 +4,7 @@ import React, { createContext, useContext, useEffect, useRef, useState, useCallb
 import * as Ably from 'ably';
 import { StateUpdatePayload } from 'shared';
 import { shouldApplyStateUpdate } from './state-updates';
+import { getOrCreateParticipantId } from './participant-id';
 import { createClientRequestId, httpFetch, HttpRequestError, type HttpErrorKind } from '@/lib/http';
 import { safeLocalStorageGet, safeLocalStorageSet } from '@/lib/storage';
 
@@ -23,7 +24,23 @@ interface TabMessage {
         state: any;
         voteResults: Record<string, Record<string, number>>;
         questions: any[];
+        voteSequence?: number;
+        qaSequence?: number;
     };
+}
+
+function syncSequenceRefs(
+    voteSequenceRef: React.MutableRefObject<number>,
+    qaSequenceRef: React.MutableRefObject<number>,
+    snapshot?: { voteSequence?: number; qaSequence?: number } | null,
+) {
+    if (typeof snapshot?.voteSequence === 'number') {
+        voteSequenceRef.current = Math.max(voteSequenceRef.current, snapshot.voteSequence);
+    }
+
+    if (typeof snapshot?.qaSequence === 'number') {
+        qaSequenceRef.current = Math.max(qaSequenceRef.current, snapshot.qaSequence);
+    }
 }
 
 // Generate unique tab ID with creation timestamp for priority
@@ -100,49 +117,14 @@ export function WebSocketProvider({
     const [ablyClient, setAblyClient] = useState<Ably.Realtime | null>(null);
     const [myVotes, setMyVotes] = useState<Record<string, string[]>>({});
 
-    // Initialize participantId synchronously to avoid race condition with Ably connection
-    // For students, use a stable ID that persists across browser sessions
-    // This ensures answers are preserved when closing and reopening the app
-    const getOrCreateParticipantId = (forRole: string): string => {
-        if (typeof window === 'undefined') return '';
-        
-        // For students, use a session-specific stable ID
-        // This allows the same student to see their previous answers
-        if (forRole === 'student') {
-            const studentKey = `studentParticipantId_${sessionId}`;
-            let studentPid = safeLocalStorageGet(studentKey);
-            console.log('[DEBUG] getOrCreateParticipantId - studentKey:', studentKey, 'existing:', studentPid);
-            
-            if (!studentPid) {
-                // Create a new stable ID for this student
-                if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-                    studentPid = crypto.randomUUID();
-                } else {
-                    studentPid = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-                }
-                safeLocalStorageSet(studentKey, studentPid);
-                console.log('[DEBUG] Created new studentPid:', studentPid);
-            }
-            // Ensure it fits in database (36 chars max)
-            const finalPid = studentPid.substring(0, 36);
-            console.log('[DEBUG] Using participantId:', finalPid);
-            return finalPid;
-        }
-        
-        // For staff/projector, use the original logic
-        let basePid = safeLocalStorageGet('participantId');
-        if (!basePid) {
-            if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-                basePid = crypto.randomUUID();
-            } else {
-                basePid = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-            }
-            safeLocalStorageSet('participantId', basePid);
-        }
-        return basePid;
-    };
-    
-    const participantIdRef = useRef<string>(getOrCreateParticipantId(role));
+    // Initialize participantId synchronously to avoid race condition with Ably connection.
+    // Students get a session-scoped ID so separate browsers never collapse into one clientId.
+    const participantIdRef = useRef<string>(getOrCreateParticipantId(role, sessionId, {
+        get: safeLocalStorageGet,
+        set: (key, value) => {
+            safeLocalStorageSet(key, value);
+        },
+    }));
     const ablyClientRef = useRef<Ably.Realtime | null>(null);
     const isLeaderRef = useRef<boolean>(false);
     const leaderSinceRef = useRef<number>(0); // When we became leader
@@ -161,6 +143,8 @@ export function WebSocketProvider({
     const stateRef = useRef<StateUpdatePayload | null>(null);
     const voteResultsRef = useRef<Record<string, Record<string, number>>>({});
     const questionsRef = useRef<any[]>([]);
+    const voteSequenceRef = useRef<number>(0);
+    const qaSequenceRef = useRef<number>(0);
     const lastRealtimeMessageAtRef = useRef<number | null>(null);
 
     // Keep refs in sync with state
@@ -187,6 +171,7 @@ export function WebSocketProvider({
                     setState(data);
                     if (data.questions) setQuestions(data.questions);
                     if (data.voteCounts) setVoteResults(data.voteCounts);
+                    syncSequenceRefs(voteSequenceRef, qaSequenceRef, data);
                     setLastStateSyncAt(Date.now());
                 } else {
                     setInitialStateError(`HTTP ${res.status}`);
@@ -226,24 +211,39 @@ export function WebSocketProvider({
         if (messageName === 'STATE_UPDATE') {
             const stateData = payload?.payload || payload;
             if (stateData) {
-                setState(prev => {
-                    if (!shouldApplyStateUpdate(prev, stateData)) {
-                        return prev;
-                    }
+                if (!shouldApplyStateUpdate(stateRef.current, stateData)) {
+                    return;
+                }
 
-                    return { ...prev, ...stateData };
-                });
+                syncSequenceRefs(voteSequenceRef, qaSequenceRef, stateData);
+                setState(prev => ({ ...prev, ...stateData }));
                 if (stateData.questions) setQuestions(stateData.questions);
                 if (stateData.voteCounts) setVoteResults(stateData.voteCounts);
             }
         } else if (messageName === 'VOTE_UPDATE') {
+            const incomingSequence = typeof payload?.sequence === 'number' ? payload.sequence : undefined;
+            if (incomingSequence !== undefined) {
+                if (incomingSequence <= voteSequenceRef.current) {
+                    return;
+                }
+                voteSequenceRef.current = incomingSequence;
+            }
             setVoteResults(prev => ({
                 ...prev,
                 [payload.slideId]: payload.results
             }));
         } else if (messageName === 'QA_UPDATE') {
-            if (payload.payload?.questions) {
-                setQuestions(payload.payload.questions);
+            const incomingSequence = typeof payload?.sequence === 'number' ? payload.sequence : undefined;
+            if (incomingSequence !== undefined) {
+                if (incomingSequence <= qaSequenceRef.current) {
+                    return;
+                }
+                qaSequenceRef.current = incomingSequence;
+            }
+
+            const questionsPayload = payload.payload?.questions ?? payload.questions;
+            if (questionsPayload) {
+                setQuestions(questionsPayload);
             }
         } else if (messageName === 'PARTICIPANT_COUNT_UPDATE') {
             setActiveParticipants(payload.count || 0);
@@ -269,7 +269,9 @@ export function WebSocketProvider({
         // IMPORTANT: Disable BroadcastChannel for students so each window gets its own Ably connection
         // This ensures each student has a unique connection even in the same browser
         // BroadcastChannel is only useful for staff who might have multiple tabs open
-        const hasBroadcastChannel = typeof BroadcastChannel !== 'undefined' && role !== 'student';
+        const hasBroadcastChannel = typeof window !== 'undefined'
+            && typeof (window as any).BroadcastChannel !== 'undefined'
+            && role !== 'student';
 
         isMountedRef.current = true;
         let client: Ably.Realtime | null = null;
@@ -294,6 +296,7 @@ export function WebSocketProvider({
                     setState(data);
                     if (data.questions) setQuestions(data.questions);
                     if (data.voteCounts) setVoteResults(data.voteCounts);
+                    syncSequenceRefs(voteSequenceRef, qaSequenceRef, data);
                     setLastStateSyncAt(Date.now());
                 } else if (!res.ok && isMountedRef.current) {
                     setInitialStateError(`HTTP ${res.status}`);
@@ -359,82 +362,88 @@ export function WebSocketProvider({
             }
         };
 
-        const createAblyConnection = () => {
-            if (client) return;
+    const createAblyConnection = () => {
+        if (client) return;
 
-            const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
-            
-            // Ensure participantId is set before creating connection
-            const participantId = participantIdRef.current;
-            if (!participantId) {
-                console.error('participantId is empty, this will cause connection issues');
+        if (process.env.NEXT_PUBLIC_DISABLE_ABLY === '1') {
+            setIsConnecting(false);
+            setConnectionError(null);
+            return;
+        }
+
+        const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
+        // Ensure participantId is set before creating connection
+        const participantId = participantIdRef.current;
+        if (!participantId) {
+            console.error('participantId is empty, this will cause connection issues');
+        }
+
+        console.log(`Creating Ably connection for ${role} with participantId: ${participantId}`);
+
+        client = new Ably.Realtime({
+            authUrl: `${apiBase}/auth/ably?sessionId=${sessionId}&role=${role}&participantId=${participantId}`,
+            authMethod: 'GET',
+            disconnectedRetryTimeout: 5000,
+            suspendedRetryTimeout: 10000,
+        });
+
+        ablyClientRef.current = client;
+        setAblyClient(client);
+
+        client.connection.on('connected', () => {
+            setIsConnected(true);
+            setIsConnecting(false);
+            setConnectionError(null);
+
+            // End failover mode and process buffered messages
+            if (isInFailoverRef.current) {
+                setTimeout(processBufferedMessages, 100);
             }
 
-            console.log(`Creating Ably connection for ${role} with participantId: ${participantId}`);
+            if (bc) {
+                bc.postMessage({
+                    type: 'LEADER_ANNOUNCE',
+                    sessionId,
+                    tabId: TAB_ID,
+                    timestamp: Date.now(),
+                    leaderSince: leaderSinceRef.current,
+                    currentState: {
+                        state: stateRef.current,
+                        voteResults: voteResultsRef.current,
+                        questions: questionsRef.current,
+                        voteSequence: voteSequenceRef.current,
+                        qaSequence: qaSequenceRef.current,
+                    }
+                });
+            }
+        });
 
-            client = new Ably.Realtime({
-                authUrl: `${apiBase}/auth/ably?sessionId=${sessionId}&role=${role}&participantId=${participantId}`,
-                authMethod: 'GET',
-                disconnectedRetryTimeout: 5000,
-                suspendedRetryTimeout: 10000,
-            });
+        client.connection.on('disconnected', () => {
+            setIsConnected(false);
+        });
 
-            ablyClientRef.current = client;
-            setAblyClient(client);
+        client.connection.on('failed', () => {
+            setIsConnected(false);
+            setIsConnecting(false);
+            setConnectionError('Connection failed.');
+        });
 
-            client.connection.on('connected', () => {
+        const channel = client.channels.get(`session:${sessionId}`);
+        channel.subscribe((message) => {
+            handleAblyMessage(message.name || '', message.data);
 
-                setIsConnected(true);
-                setIsConnecting(false);
-                setConnectionError(null);
+            if (bc && isLeaderRef.current) {
+                bc.postMessage({
+                    type: 'ABLY_MESSAGE',
+                    sessionId,
+                    message: { name: message.name, data: message.data },
+                    timestamp: Date.now()
+                });
+            }
+        });
 
-                // End failover mode and process buffered messages
-                if (isInFailoverRef.current) {
-                    setTimeout(processBufferedMessages, 100);
-                }
-
-                if (bc) {
-                    bc.postMessage({
-                        type: 'LEADER_ANNOUNCE',
-                        sessionId,
-                        tabId: TAB_ID,
-                        timestamp: Date.now(),
-                        leaderSince: leaderSinceRef.current,
-                        currentState: {
-                            state: stateRef.current,
-                            voteResults: voteResultsRef.current,
-                            questions: questionsRef.current
-                        }
-                    });
-                }
-            });
-
-            client.connection.on('disconnected', () => {
-                setIsConnected(false);
-            });
-
-            client.connection.on('failed', () => {
-                setIsConnected(false);
-                setIsConnecting(false);
-                setConnectionError('Connection failed.');
-            });
-
-            const channel = client.channels.get(`session:${sessionId}`);
-            channel.subscribe((message) => {
-                handleAblyMessage(message.name || '', message.data);
-
-                if (bc && isLeaderRef.current) {
-                    bc.postMessage({
-                        type: 'ABLY_MESSAGE',
-                        sessionId,
-                        message: { name: message.name, data: message.data },
-                        timestamp: Date.now()
-                    });
-                }
-            });
-
-            fetchInitialState();
-        };
+        fetchInitialState();
+    };
 
         const becomeLeader = () => {
             if (isLeaderRef.current) return;
@@ -521,12 +530,17 @@ export function WebSocketProvider({
             }, LEADER_PING_INTERVAL);
         };
 
-        if (hasBroadcastChannel) {
-            bc = new BroadcastChannel(channelName);
-            bcRef.current = bc;
-            broadcastChannels.set(sessionId, bc);
+        const BroadcastChannelCtor = typeof window !== 'undefined'
+            ? (window as any).BroadcastChannel
+            : undefined;
 
-            bc.onmessage = (event: MessageEvent<TabMessage>) => {
+        if (hasBroadcastChannel && typeof BroadcastChannelCtor === 'function') {
+            const broadcastChannel = new BroadcastChannelCtor(channelName) as BroadcastChannel;
+            bc = broadcastChannel;
+            bcRef.current = broadcastChannel;
+            broadcastChannels.set(sessionId, broadcastChannel);
+
+            broadcastChannel.onmessage = (event: MessageEvent<TabMessage>) => {
                 const msg = event.data;
 
                 if (msg.sessionId !== sessionId) return;
@@ -548,12 +562,19 @@ export function WebSocketProvider({
                         } else {
                             // We are older, re-announce
 
-                            bc?.postMessage({
+                            broadcastChannel.postMessage({
                                 type: 'LEADER_ANNOUNCE',
                                 sessionId,
                                 tabId: TAB_ID,
                                 timestamp: Date.now(),
-                                leaderSince: leaderSinceRef.current
+                                leaderSince: leaderSinceRef.current,
+                                currentState: {
+                                    state: stateRef.current,
+                                    voteResults: voteResultsRef.current,
+                                    questions: questionsRef.current,
+                                    voteSequence: voteSequenceRef.current,
+                                    qaSequence: qaSequenceRef.current,
+                                }
                             });
                             return;
                         }
@@ -582,6 +603,8 @@ export function WebSocketProvider({
                         if (msg.currentState.state) setState(msg.currentState.state);
                         if (msg.currentState.voteResults) setVoteResults(msg.currentState.voteResults);
                         if (msg.currentState.questions) setQuestions(msg.currentState.questions);
+                        syncSequenceRefs(voteSequenceRef, qaSequenceRef, msg.currentState.state);
+                        syncSequenceRefs(voteSequenceRef, qaSequenceRef, msg.currentState);
                         setInitialStateError(null);
                         setLastStateSyncAt(Date.now());
                     } else {
@@ -592,7 +615,7 @@ export function WebSocketProvider({
 
                 } else if (msg.type === 'REQUEST_LEADER') {
                     if (isLeaderRef.current) {
-                        bc?.postMessage({
+                        broadcastChannel.postMessage({
                             type: 'LEADER_ANNOUNCE',
                             sessionId,
                             tabId: TAB_ID,
@@ -601,7 +624,9 @@ export function WebSocketProvider({
                             currentState: {
                                 state: stateRef.current,
                                 voteResults: voteResultsRef.current,
-                                questions: questionsRef.current
+                                questions: questionsRef.current,
+                                voteSequence: voteSequenceRef.current,
+                                qaSequence: qaSequenceRef.current,
                             }
                         });
                     }
@@ -639,13 +664,18 @@ export function WebSocketProvider({
                     if (msg.currentState.state) setState(msg.currentState.state);
                     if (msg.currentState.voteResults) setVoteResults(msg.currentState.voteResults);
                     if (msg.currentState.questions) setQuestions(msg.currentState.questions);
+                    syncSequenceRefs(voteSequenceRef, qaSequenceRef, msg.currentState.state);
+                    syncSequenceRefs(voteSequenceRef, qaSequenceRef, msg.currentState);
                     setInitialStateError(null);
                     setLastStateSyncAt(Date.now());
                 }
             };
 
-
-            bc.postMessage({ type: 'REQUEST_LEADER', sessionId, tabId: TAB_ID });
+            broadcastChannel.postMessage({
+                type: 'REQUEST_LEADER',
+                sessionId,
+                tabId: TAB_ID
+            });
 
             leaderCheckTimeoutRef.current = setTimeout(() => {
                 if (!isMountedRef.current) return;
@@ -705,6 +735,7 @@ export function WebSocketProvider({
                 setState(data);
                 if (data.questions) setQuestions(data.questions);
                 if (data.voteCounts) setVoteResults(data.voteCounts);
+                syncSequenceRefs(voteSequenceRef, qaSequenceRef, data);
                 setInitialStateError(null);
                 setLastStateSyncAt(Date.now());
             }

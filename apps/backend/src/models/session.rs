@@ -88,4 +88,10 @@ pub struct SessionState {
     pub slides: Vec<Slide>,
     pub questions: Vec<Question>,
     pub vote_counts: std::collections::HashMap<String, std::collections::HashMap<String, i32>>,
+    /// Sequence number for vote updates - used for deduplication
+    #[serde(default)]
+    pub vote_sequence: u64,
+    /// Sequence number for Q&A updates - used for deduplication
+    #[serde(default)]
+    pub qa_sequence: u64,
 }

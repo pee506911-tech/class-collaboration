@@ -43,6 +43,8 @@ export const StateUpdatePayloadSchema = z.object({
     showResults: z.boolean().optional(),
     isResultsVisible: z.boolean().optional(),
     stateVersion: z.number().optional(),
+    voteSequence: z.number().optional(),
+    qaSequence: z.number().optional(),
 });
 
 export const QASlideContentSchema = z.object({
@@ -176,6 +178,8 @@ export interface StateUpdatePayload {
     isResultsVisible?: boolean;
     isPresentationActive?: boolean;
     stateVersion?: number;
+    voteSequence?: number;
+    qaSequence?: number;
     isBlackout?: boolean;
     showResults?: boolean;
     lostCount?: number;

@@ -168,6 +168,7 @@ dependencies = [
  "bcrypt",
  "chrono",
  "dotenvy",
+ "futures-util",
  "governor",
  "hmac",
  "jsonwebtoken",
@@ -2555,6 +2556,12 @@ version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8fa9be0de6cf49e536ce1851f987bd21a43b771b09473c3549a6c853db37c1c"
 dependencies = [
+ "futures-core",
+ "futures-util",
+ "pin-project",
+ "pin-project-lite",
+ "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",

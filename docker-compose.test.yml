@@ -1,0 +1,102 @@
+# Test Infrastructure Docker Compose
+# Provides isolated MySQL database and Ably stub for concurrency testing
+# Usage: docker-compose -f docker-compose.test.yml up -d
+
+version: '3.8'
+
+services:
+  # MySQL 8.0 for testing - isolated per test run
+  mysql-test:
+    image: mysql:8.0
+    container_name: classcolab-test-mysql
+    platform: linux/amd64
+    environment:
+      MYSQL_ROOT_PASSWORD: testpassword
+      MYSQL_DATABASE: classcolab_test
+      MYSQL_USER: classcolab
+      MYSQL_PASSWORD: testpassword
+    ports:
+      - "3307:3306"  # Use port 3307 to avoid conflict with dev MySQL
+    volumes:
+      - mysql_test_data:/var/lib/mysql
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --innodb-lock-wait-timeout=10
+      --max-connections=500
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "classcolab", "-ptestpassword"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Ably Stub - Mock Ably REST API for testing
+  # Captures published events and supports fault injection
+  ably-stub:
+    build:
+      context: ./loadtest/ably-stub
+      dockerfile: Dockerfile
+      platforms:
+        - linux/amd64
+    container_name: classcolab-test-ably-stub
+    environment:
+      PORT: 8081
+      ABLY_API_KEY: "test.key:secret"
+      CAPTURE_DIR: /tmp/ably-captures
+      FAULT_MODE: "none"  # Options: none, delay, drop, duplicate, reorder, error
+      DELAY_MS: 0
+      ERROR_RATE: 0.0
+    ports:
+      - "8081:8081"
+    volumes:
+      - ably_captures:/tmp/ably-captures
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--spider", "http://localhost:8081/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Toxiproxy - Network fault injection (optional, for advanced testing)
+  toxiproxy:
+    image: shopify/toxiproxy:2.1.4
+    platform: linux/amd64
+    container_name: classcolab-test-toxiproxy
+    ports:
+      - "8474:8474"  # Toxiproxy control API
+      - "3308:3308"  # Proxy to MySQL
+    depends_on:
+      - mysql-test
+    command: >
+      -host=0.0.0.0
+    volumes:
+      - ./loadtest/toxiproxy-config.json:/config/toxiproxy-config.json:ro
+
+  # Test runner - executes concurrency tests
+  test-runner:
+    build:
+      context: .
+      dockerfile: loadtest/Dockerfile.test
+      platforms:
+        - linux/amd64
+    container_name: classcolab-test-runner
+    environment:
+      DATABASE_URL: "mysql://classcolab:testpassword@mysql-test:3306/classcolab_test"
+      ABLY_API_KEY: "test.key:secret"
+      ABLY_REST_URL: "http://ably-stub:8081"
+      TEST_CONCURRENCY: "100"  # Default concurrency level
+    depends_on:
+      mysql-test:
+        condition: service_healthy
+      ably-stub:
+        condition: service_healthy
+    volumes:
+      - test_results:/app/test-results
+      - ably_captures:/tmp/ably-captures:ro
+
+volumes:
+  mysql_test_data:
+  ably_captures:
+  test_results:
+
+networks:
+  default:
+    name: classcolab-test-network

@@ -1,7 +1,9 @@
 -- Add missing indexes for performance
-CREATE INDEX IF NOT EXISTS idx_sessions_creator ON sessions(creator_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_share_token ON sessions(share_token);
-CREATE INDEX IF NOT EXISTS idx_slides_session ON slides(session_id);
+--
+-- NOTE: MySQL does not support `CREATE INDEX IF NOT EXISTS`.
+-- These base indexes are already created in `20241201140000_create_sessions_and_slides.sql`,
+-- so we intentionally skip redundant index creation here.
+SELECT "Skipping redundant base index creation (already created in 20241201140000_create_sessions_and_slides.sql)";
 
 -- Upvote tracking table to prevent spam (one upvote per participant per question)
 CREATE TABLE IF NOT EXISTS question_upvotes (

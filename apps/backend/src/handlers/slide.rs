@@ -26,7 +26,7 @@ pub async fn get_slides(
     verify_session_ownership(&pool, &session_id, &user_id).await?;
 
     let slides = query_as::<_, Slide>(
-        "SELECT * FROM slides WHERE session_id = ? ORDER BY order_index ASC, id ASC",
+        "SELECT id, session_id, type, content, order_index, is_hidden FROM slides WHERE session_id = ? ORDER BY order_index ASC, id ASC",
     )
     .bind(&session_id)
     .fetch_all(&pool)
@@ -75,10 +75,12 @@ pub async fn create_slide(
         .execute(&mut *tx)
         .await?;
 
-    let slide = query_as::<_, Slide>("SELECT * FROM slides WHERE id = ?")
-        .bind(&id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let slide = query_as::<_, Slide>(
+        "SELECT id, session_id, type, content, order_index, is_hidden FROM slides WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_one(&mut *tx)
+    .await?;
 
     tx.commit().await?;
 
@@ -91,7 +93,7 @@ async fn find_slide_by_client_request_id(
     client_request_id: &str,
 ) -> Result<Option<Slide>> {
     let slide = query_as::<_, Slide>(
-        "SELECT * FROM slides WHERE session_id = ? AND client_request_id = ? LIMIT 1 FOR UPDATE",
+        "SELECT id, session_id, type, content, order_index, is_hidden FROM slides WHERE session_id = ? AND client_request_id = ? LIMIT 1 FOR UPDATE",
     )
     .bind(session_id)
     .bind(client_request_id)
@@ -111,12 +113,14 @@ pub async fn update_slide(
     let pool = app_state.db_pool.pool().await?;
     verify_session_ownership(&pool, &session_id, &user_id).await?;
 
-    let _slide: Slide = query_as("SELECT * FROM slides WHERE id = ? AND session_id = ?")
+    let slide: Option<Slide> = query_as::<_, Slide>(
+            "SELECT id, session_id, type, content, order_index, is_hidden FROM slides WHERE id = ? AND session_id = ?",
+        )
         .bind(&slide_id)
         .bind(&session_id)
         .fetch_optional(&pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Slide not found".to_string()))?;
+        .await?;
+    let _slide = slide.ok_or_else(|| AppError::NotFound("Slide not found".to_string()))?;
 
     if let Some(slide_type) = payload.slide_type {
         query("UPDATE slides SET type = ? WHERE id = ?")
@@ -134,10 +138,12 @@ pub async fn update_slide(
             .await?;
     }
 
-    let updated_slide = query_as::<_, Slide>("SELECT * FROM slides WHERE id = ?")
-        .bind(&slide_id)
-        .fetch_one(&pool)
-        .await?;
+    let updated_slide = query_as::<_, Slide>(
+        "SELECT id, session_id, type, content, order_index, is_hidden FROM slides WHERE id = ?",
+    )
+    .bind(&slide_id)
+    .fetch_one(&pool)
+    .await?;
 
     Ok(Json(ApiResponse::success(updated_slide)))
 }
@@ -235,11 +241,16 @@ pub async fn reorder_slides(
         return Err(AppError::Input("No slides to reorder".to_string()));
     }
 
-    let session_slide_ids =
-        query_scalar::<_, String>("SELECT id FROM slides WHERE session_id = ? FOR UPDATE")
-            .bind(&session_id)
-            .fetch_all(&mut *tx)
-            .await?;
+    // Lock only the session row (single-row lock), not all slides.
+    // Validate that all requested slide IDs belong to this session using a
+    // non-locking read. The session-level lock from lock_owned_session provides
+    // isolation for this session's data.
+    let session_slide_ids = query_scalar::<_, String>(
+        "SELECT id FROM slides WHERE session_id = ? ORDER BY order_index ASC, id ASC",
+    )
+    .bind(&session_id)
+    .fetch_all(&mut *tx)
+    .await?;
 
     validate_reorder_payload(&session_slide_ids, &payload.slide_ids)?;
     apply_order_mapping(&mut tx, &session_id, &payload.slide_ids, |index| {
@@ -250,6 +261,13 @@ pub async fn reorder_slides(
         (index as i32) * ORDER_STEP
     })
     .await?;
+
+    // Bump state_version to signal slide order change to real-time clients
+    sqlx::query("UPDATE sessions SET state_version = state_version + 1 WHERE id = ?")
+        .bind(&session_id)
+        .execute(&mut *tx)
+        .await?;
+
     tx.commit().await?;
 
     Ok(Json(ApiResponse::success(

@@ -82,7 +82,13 @@ pub async fn report_client_error(Json(payload): Json<ClientErrorReport>) -> Stat
     let (session_id, role, participant_id) = payload
         .context
         .as_ref()
-        .map(|c| (c.session_id.as_deref(), c.role.as_deref(), c.participant_id.as_deref()))
+        .map(|c| {
+            (
+                c.session_id.as_deref(),
+                c.role.as_deref(),
+                c.participant_id.as_deref(),
+            )
+        })
         .unwrap_or((None, None, None));
 
     tracing::error!(
@@ -103,4 +109,3 @@ pub async fn report_client_error(Json(payload): Json<ClientErrorReport>) -> Stat
 
     StatusCode::NO_CONTENT
 }
-

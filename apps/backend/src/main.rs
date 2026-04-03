@@ -1,9 +1,13 @@
 use axum::{
+    error_handling::HandleErrorLayer,
     http::header::HeaderName,
     routing::{get, post, put},
     Extension, Router,
 };
 use std::sync::Arc;
+use tower::buffer::BufferLayer;
+use tower::limit::ConcurrencyLimitLayer;
+use tower::{BoxError, ServiceBuilder};
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
 use tower_governor::GovernorLayer;
@@ -19,12 +23,13 @@ mod middleware;
 mod models;
 mod repositories;
 mod services;
+mod tidb_ru;
 
 use config::Config;
-use db::LazyDbPool;
+use db::{DbPoolSettings, LazyDbPool};
 use repositories::session::SessionRepository;
 use repositories::sqlx_session::SqlxSessionRepository;
-use services::session::SessionService;
+use services::session::{SessionService, SessionStateCache};
 
 /// Application state shared across all handlers
 #[derive(Clone)]
@@ -49,6 +54,19 @@ async fn main() -> anyhow::Result<()> {
     // Load config (fast, ~5ms)
     let config = Config::from_env();
     let config_arc = Arc::new(config.clone());
+    tracing::info!(
+        environment = %config.environment,
+        db_max_connections = config.db_max_connections,
+        db_max_lifetime_seconds = config.db_max_lifetime_seconds,
+        api_concurrency_limit = config.api_concurrency_limit,
+        api_buffer_size = config.api_buffer_size,
+        session_state_cache_ttl_ms = config.session_state_cache_ttl_ms,
+        session_state_cache_max_entries = config.session_state_cache_max_entries,
+        enable_general_rate_limit = config.enable_general_rate_limit,
+        rate_limit_general_per_second = config.rate_limit_general_per_second,
+        rate_limit_general_burst = config.rate_limit_general_burst,
+        "Config loaded"
+    );
 
     // Create lazy DB pool (instant, no blocking)
     let lazy_pool = LazyDbPool::new();
@@ -56,14 +74,27 @@ async fn main() -> anyhow::Result<()> {
     // Start background DB initialization.
     // SQLx tracks applied migrations, so rerunning on boot only applies new ones.
     let run_migrations = true;
-    lazy_pool
-        .clone()
-        .start_background_init(config.database_url.clone(), run_migrations);
+    let db_pool_settings = DbPoolSettings {
+        max_connections: config.db_max_connections,
+        min_connections: config.db_min_connections,
+        acquire_timeout_seconds: config.db_acquire_timeout_seconds,
+        idle_timeout_seconds: config.db_idle_timeout_seconds,
+        max_lifetime_seconds: config.db_max_lifetime_seconds,
+    };
+    lazy_pool.clone().start_background_init(
+        config.database_url.clone(),
+        run_migrations,
+        db_pool_settings,
+    );
 
     // Initialize Services with lazy pool
     let session_repository: Arc<dyn SessionRepository> =
         Arc::new(SqlxSessionRepository::new_lazy(lazy_pool.clone()));
-    let session_service = Arc::new(SessionService::new(session_repository));
+    let state_cache = SessionStateCache::new(
+        std::time::Duration::from_millis(config.session_state_cache_ttl_ms),
+        config.session_state_cache_max_entries,
+    );
+    let session_service = Arc::new(SessionService::new(session_repository, state_cache));
 
     let app_state = AppState {
         db_pool: lazy_pool,
@@ -75,8 +106,8 @@ async fn main() -> anyhow::Result<()> {
     // Rate limiting configuration
     let general_governor_conf = Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(2)
-            .burst_size(30)
+            .per_second(config.rate_limit_general_per_second)
+            .burst_size(config.rate_limit_general_burst)
             .key_extractor(SmartIpKeyExtractor)
             .finish()
             .unwrap(),
@@ -84,8 +115,8 @@ async fn main() -> anyhow::Result<()> {
 
     let strict_governor_conf = Arc::new(
         GovernorConfigBuilder::default()
-            .per_second(1)
-            .burst_size(10)
+            .per_second(config.rate_limit_strict_per_second)
+            .burst_size(config.rate_limit_strict_burst)
             .key_extractor(SmartIpKeyExtractor)
             .finish()
             .unwrap(),
@@ -117,21 +148,42 @@ async fn main() -> anyhow::Result<()> {
         ])
         .allow_credentials(true);
 
-    // Routes
-    let app = Router::new()
+    // Routes: keep health endpoints unthrottled; apply "strict" only to auth; apply
+    // "general" to the rest of the API. The previous approach stacked both
+    // limiters globally, which effectively enforced the strict limits everywhere.
+    let overload_protection = ServiceBuilder::new()
+        .layer(HandleErrorLayer::new(|_err: BoxError| async move {
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Server busy, please retry",
+            )
+        }))
+        .layer(BufferLayer::new(config.api_buffer_size))
+        .layer(ConcurrencyLimitLayer::new(config.api_concurrency_limit));
+
+    let health_routes = Router::new()
         // Health endpoints (no rate limiting, no auth)
         .route("/health", get(handlers::health::health_check))
         .route("/health/live", get(handlers::health::liveness))
-        .route("/health/ready", get(handlers::health::readiness))
-        // Authentication
+        .route("/health/ready", get(handlers::health::readiness));
+
+    let auth_routes = Router::new()
+        // Authentication (strict rate limiting)
         .route("/api/auth/register", post(handlers::auth::register))
         .route("/api/auth/login", post(handlers::auth::login))
-        .route("/api/auth/ably", get(handlers::ably::get_ably_token))
+        .layer(overload_protection.clone())
+        .layer(GovernorLayer {
+            config: strict_governor_conf,
+        });
+
+    let api_routes = Router::new()
         // Client-side telemetry (no auth)
         .route(
             "/api/client-error",
             post(handlers::client_error::report_client_error),
         )
+        // Ably token request signing (public; must tolerate classroom NAT bursts)
+        .route("/api/auth/ably", get(handlers::ably::get_ably_token))
         // Public endpoints (no auth required)
         .route(
             "/api/share/:token",
@@ -235,14 +287,21 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/sessions/:id/register-participant",
             post(handlers::student::register_participant),
-        )
-        // Rate limiting layers
-        .layer(GovernorLayer {
-            config: strict_governor_conf,
-        })
-        .layer(GovernorLayer {
+        );
+
+    let api_routes = api_routes.layer(overload_protection);
+    let api_routes = if config.enable_general_rate_limit {
+        api_routes.layer(GovernorLayer {
             config: general_governor_conf,
         })
+    } else {
+        api_routes
+    };
+
+    let app = Router::new()
+        .merge(health_routes)
+        .merge(auth_routes)
+        .merge(api_routes)
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .layer(Extension(config_arc))

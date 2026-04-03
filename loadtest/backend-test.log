@@ -1,0 +1,71 @@
+   Compiling backend-rust v0.1.0 (/Users/rd-cream/Downloads/classcolab/class-collaboration/apps/backend)
+warning: struct `DbQuestion` is never constructed
+  --> src/handlers/stats.rs:91:8
+   |
+91 | struct DbQuestion {
+   |        ^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `role` is never read
+  --> src/middleware/auth.rs:24:9
+   |
+22 | pub struct AuthUser {
+   |            -------- field in this struct
+23 |     pub user_id: String,
+24 |     pub role: String,
+   |         ^^^^
+
+warning: associated function `error` is never used
+  --> src/models/response.rs:20:12
+   |
+11 | impl<T> ApiResponse<T> {
+   | ---------------------- associated function in this implementation
+...
+20 |     pub fn error(message: String, data: T) -> Self {
+   |            ^^^^^
+
+warning: struct `Vote` is never constructed
+  --> src/models/student.rs:74:12
+   |
+74 | pub struct Vote {
+   |            ^^^^
+
+warning: associated functions `create`, `create_many`, `find_by_slide`, `count_by_option`, `get_vote_counts`, and `has_voted` are never used
+   --> src/models/student.rs:89:18
+    |
+ 88 | impl Vote {
+    | --------- associated functions in this implementation
+ 89 |     pub async fn create(
+    |                  ^^^^^^
+...
+122 |     pub async fn create_many(
+    |                  ^^^^^^^^^^^
+...
+152 |     pub async fn find_by_slide(pool: &DbPool, slide_id: &str) -> Result<Vec<Self>> {
+    |                  ^^^^^^^^^^^^^
+...
+163 |     pub async fn count_by_option(pool: &DbPool, slide_id: &str, option_id: &str) -> Result<i64> {
+    |                  ^^^^^^^^^^^^^^^
+...
+173 |     pub async fn get_vote_counts(pool: &DbPool, slide_id: &str) -> Result<Vec<(String, i64)>> {
+    |                  ^^^^^^^^^^^^^^^
+...
+183 |     pub async fn has_voted(pool: &DbPool, slide_id: &str, participant_id: &str) -> Result<bool> {
+    |                  ^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> src/repositories/sqlx_session.rs:49:12
+   |
+48 | impl SqlxSessionRepository {
+   | -------------------------- associated function in this implementation
+49 |     pub fn new(pool: Pool<MySql>) -> Self {
+   |            ^^^
+
+warning: `backend-rust` (bin "backend-rust") generated 6 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.82s
+     Running `target/debug/backend-rust`
+2026-04-03T04:31:38.667504Z  WARN backend_rust::handlers::ably: Empty or missing participant_id for session test-session-nwxibb1w role student. Using fallback: student-test-session-nwxibb1w. This may cause connection sharing issues!
+2026-04-03T04:32:01.032913Z ERROR backend_rust::services::ably: Ably publish failed channel="session:4td7l83i" event_name="VOTE_UPDATE" status=500 Internal Server Error body={"error":"Internal server error (fault injection)","code":50000}
+2026-04-03T04:32:01.033192Z ERROR backend_rust::services::ably: Failed to publish vote update: Ably publish failed: 500 Internal Server Error
+2026-04-03T04:32:01.033221Z  WARN backend_rust::handlers::student: Vote update committed but realtime publish failed - clients will converge via refresh session_id=4td7l83i slide_id=a04b1pmr

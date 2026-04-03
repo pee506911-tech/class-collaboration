@@ -13,17 +13,22 @@ static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
         .expect("Failed to create HTTP client")
 });
 
-/// Publish a message to an Ably channel
+/// Get the Ably REST URL from environment or use default
+fn get_ably_base_url() -> String {
+    env::var("ABLY_REST_URL").unwrap_or_else(|_| "https://rest.ably.io".to_string())
+}
+
+/// Publish a message to an Ably channel with failure tracking
 pub async fn publish_to_channel<T: Serialize>(
     channel: &str,
     event_name: &str,
     data: &T,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let ably_api_key = match env::var("ABLY_API_KEY") {
         Ok(key) => key,
         Err(_) => {
             tracing::warn!("ABLY_API_KEY not set, skipping real-time publish");
-            return Ok(());
+            return Ok(false); // Returns false to indicate degraded mode (no realtime)
         }
     };
 
@@ -36,8 +41,10 @@ pub async fn publish_to_channel<T: Serialize>(
     let key_name = key_parts[0];
     let key_secret = key_parts[1];
 
+    let base_url = get_ably_base_url();
     let url = format!(
-        "https://rest.ably.io/channels/{}/messages",
+        "{}/channels/{}/messages",
+        base_url.trim_end_matches('/'),
         urlencoding::encode(channel)
     );
 
@@ -62,60 +69,114 @@ pub async fn publish_to_channel<T: Serialize>(
                     event_name,
                     channel
                 );
-                Ok(())
+                Ok(true) // Successfully published
             } else {
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
-                tracing::error!("Ably publish failed: {} - {}", status, body);
+                tracing::error!(
+                    event_name = %event_name,
+                    channel = %channel,
+                    status = %status,
+                    body = %body,
+                    "Ably publish failed"
+                );
                 Err(format!("Ably publish failed: {}", status))
             }
         }
         Err(e) => {
-            tracing::error!("Ably request failed: {}", e);
+            tracing::error!(
+                event_name = %event_name,
+                channel = %channel,
+                error = %e,
+                "Ably request failed"
+            );
             Err(format!("Ably request failed: {}", e))
         }
     }
 }
 
 /// Publish a state update to a session channel
-pub async fn publish_state_update(session_id: &str, state: &impl Serialize) {
+/// Returns true if published successfully, false if in degraded mode
+pub async fn publish_state_update(session_id: &str, state: &impl Serialize) -> bool {
     let channel = format!("session:{}", session_id);
     let payload = serde_json::json!({
         "payload": state
     });
 
-    if let Err(e) = publish_to_channel(&channel, "STATE_UPDATE", &payload).await {
-        tracing::error!("Failed to publish state update: {}", e);
+    match publish_to_channel(&channel, "STATE_UPDATE", &payload).await {
+        Ok(success) => success,
+        Err(e) => {
+            tracing::error!("Failed to publish state update: {}", e);
+            false
+        }
     }
 }
 
-/// Publish a vote update to a session channel
+/// Publish a vote update to a session channel with sequence number
+/// Returns true if published successfully, false if in degraded mode
 pub async fn publish_vote_update(
     session_id: &str,
     slide_id: &str,
     results: &std::collections::HashMap<String, i32>,
-) {
+    sequence: u64,
+) -> bool {
     let channel = format!("session:{}", session_id);
     let payload = serde_json::json!({
         "slideId": slide_id,
-        "results": results
+        "results": results,
+        "sequence": sequence
     });
 
-    if let Err(e) = publish_to_channel(&channel, "VOTE_UPDATE", &payload).await {
-        tracing::error!("Failed to publish vote update: {}", e);
+    match publish_to_channel(&channel, "VOTE_UPDATE", &payload).await {
+        Ok(success) => success,
+        Err(e) => {
+            tracing::error!("Failed to publish vote update: {}", e);
+            false
+        }
     }
 }
 
-/// Publish a Q&A update to a session channel
-pub async fn publish_qa_update(session_id: &str, questions: &impl Serialize) {
+/// Publish a Q&A update to a session channel with sequence number
+/// Returns true if published successfully, false if in degraded mode
+pub async fn publish_qa_update(
+    session_id: &str,
+    questions: &impl Serialize,
+    sequence: u64,
+) -> bool {
     let channel = format!("session:{}", session_id);
     let payload = serde_json::json!({
         "payload": {
             "questions": questions
-        }
+        },
+        "sequence": sequence
     });
 
-    if let Err(e) = publish_to_channel(&channel, "QA_UPDATE", &payload).await {
-        tracing::error!("Failed to publish Q&A update: {}", e);
+    match publish_to_channel(&channel, "QA_UPDATE", &payload).await {
+        Ok(success) => success,
+        Err(e) => {
+            tracing::error!("Failed to publish Q&A update: {}", e);
+            false
+        }
     }
 }
+
+/// Publish a slides update to a session channel
+/// Returns true if published successfully, false if in degraded mode
+pub async fn publish_slides_update(
+    session_id: &str,
+    slides: &impl Serialize,
+) -> bool {
+    let channel = format!("session:{}", session_id);
+    let payload = serde_json::json!({
+        "slides": slides
+    });
+
+    match publish_to_channel(&channel, "SLIDES_UPDATE", &payload).await {
+        Ok(success) => success,
+        Err(e) => {
+            tracing::error!("Failed to publish slides update: {}", e);
+            false
+        }
+    }
+}
+

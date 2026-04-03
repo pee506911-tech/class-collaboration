@@ -1,0 +1,10 @@
+{
+  "proxies": [
+    {
+      "name": "mysql-proxy",
+      "listen": ":3308",
+      "upstream": "mysql-test:3306",
+      "toxics": []
+    }
+  ]
+}

@@ -2,6 +2,17 @@ use crate::error::Result;
 use crate::models::session::Session;
 use async_trait::async_trait;
 
+/// Minimal session fields required for `/api/sessions/:id/state`.
+#[derive(Debug, Clone)]
+pub struct SessionStateHeader {
+    pub current_slide_id: Option<String>,
+    pub is_presentation_active: bool,
+    pub is_results_visible: bool,
+    pub state_version: i64,
+    pub vote_sequence: u64,
+    pub qa_sequence: u64,
+}
+
 /// Repository trait - defines the contract for data access
 /// The Application Layer depends on this trait, not the implementation
 #[async_trait]
@@ -18,6 +29,9 @@ pub trait SessionRepository: Send + Sync {
     async fn delete(&self, id: &str) -> Result<u64>;
     async fn verify_ownership(&self, session_id: &str, user_id: &str) -> Result<bool>;
 
+    // Hot-path method for join storms: one small point read instead of `SELECT *`.
+    async fn get_state_header(&self, session_id: &str) -> Result<Option<SessionStateHeader>>;
+
     // Related data methods
     async fn get_slides(&self, session_id: &str) -> Result<Vec<crate::models::slide::Slide>>;
     async fn get_questions(
@@ -29,6 +43,7 @@ pub trait SessionRepository: Send + Sync {
         session_id: &str,
     ) -> Result<Vec<crate::models::student::Participant>>;
     async fn get_vote_counts(&self, session_id: &str) -> Result<Vec<(String, String, i64)>>; // (slide_id, option_id, count)
+    async fn get_sequences(&self, session_id: &str) -> Result<SessionSequences>;
 }
 
 /// DTO for creating a new session
@@ -49,4 +64,11 @@ pub struct SessionUpdates {
     pub status: Option<String>,
     pub allow_questions: Option<bool>,
     pub require_name: Option<bool>,
+}
+
+/// Session sequence numbers for deduplication
+#[derive(Debug, Clone, Default)]
+pub struct SessionSequences {
+    pub vote_sequence: u64,
+    pub qa_sequence: u64,
 }
