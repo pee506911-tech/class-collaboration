@@ -3,6 +3,9 @@ import {
   safeSessionStorageGetJson,
   safeSessionStorageRemove,
   safeSessionStorageSetJson,
+  safeLocalStorageGetJson,
+  safeLocalStorageRemove,
+  safeLocalStorageSetJson,
 } from "@/lib/storage";
 import type { ApiResponse } from "shared";
 
@@ -48,11 +51,15 @@ export function readPreloadedPublicSession(token: string): { requestId: string; 
   const normalized = normalizeJoinCode(token);
   if (!isValidJoinCode(normalized)) return null;
 
-  const value = safeSessionStorageGetJson<PreloadedPublicSession>(preloadKey(normalized));
+  const key = preloadKey(normalized);
+  const value =
+    safeSessionStorageGetJson<PreloadedPublicSession>(key) ??
+    safeLocalStorageGetJson<PreloadedPublicSession>(key);
   if (!value) return null;
 
   if (typeof value.expiresAt !== "number" || value.expiresAt < Date.now()) {
-    safeSessionStorageRemove(preloadKey(normalized));
+    safeSessionStorageRemove(key);
+    safeLocalStorageRemove(key);
     return null;
   }
 
@@ -63,11 +70,15 @@ export function writePreloadedPublicSession(token: string, data: any, requestId:
   const normalized = normalizeJoinCode(token);
   if (!isValidJoinCode(normalized)) return;
 
-  safeSessionStorageSetJson(preloadKey(normalized), {
+  const value = {
     expiresAt: Date.now() + PRELOAD_TTL_MS,
     requestId,
     data,
-  } satisfies PreloadedPublicSession);
+  } satisfies PreloadedPublicSession;
+
+  const key = preloadKey(normalized);
+  safeSessionStorageSetJson(key, value);
+  safeLocalStorageSetJson(key, value);
 }
 
 const PUBLIC_LOOKUP_RETRY: RetryConfig = {
@@ -149,4 +160,3 @@ export async function getPublicSessionByToken(
     };
   }
 }
-

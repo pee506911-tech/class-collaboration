@@ -51,7 +51,17 @@ function buildPreloadedSession() {
 async function seedPreloadedSession(context: BrowserContext) {
   await context.addInitScript(
     ({ key, value }) => {
-      window.sessionStorage.setItem(key, JSON.stringify(value));
+      const serialized = JSON.stringify(value);
+      try {
+        window.sessionStorage.setItem(key, serialized);
+      } catch {
+        // ignore inaccessible session storage in transitional reload documents
+      }
+      try {
+        window.localStorage.setItem(key, serialized);
+      } catch {
+        // ignore inaccessible local storage in transitional reload documents
+      }
     },
     { key: PRELOAD_KEY, value: buildPreloadedSession() }
   );

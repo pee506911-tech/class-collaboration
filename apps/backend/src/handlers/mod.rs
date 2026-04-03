@@ -3,6 +3,7 @@ pub mod auth;
 pub mod client_error;
 pub mod health;
 pub mod live;
+pub mod perf;
 pub mod public;
 pub mod session;
 pub mod slide;

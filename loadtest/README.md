@@ -58,6 +58,48 @@ cd loadtest
 npm run test:auth-burst:130
 ```
 
+### 3b. Run Against a Live Backend URL
+
+```bash
+cd loadtest
+
+# Auth-burst only against prod or staging
+ABLY_API_KEY="..." ./test-concurrency.sh --base-url https://prod.example.com --concurrency 130
+```
+
+This mode only runs the Ably token burst against the live backend URL. The rest of
+`test-concurrency.sh` stays local-only because it depends on Docker MySQL, the Ably stub,
+and direct database assertions.
+
+### 3c. Run the Full HTTPS k6 Scenario
+
+```bash
+cd loadtest
+
+ABLY_API_KEY="..." PERF_TEST_TOKEN="..." ./test-concurrency-k6.sh --base-url https://prod.example.com --concurrency 100
+# or
+npm run test:prod-concurrency -- --base-url https://prod.example.com
+# write a CI-friendly JSON summary
+ABLY_API_KEY="..." PERF_TEST_TOKEN="..." ./test-concurrency-k6.sh \
+  --base-url https://prod.example.com \
+  --summary-file ./artifacts/prod-concurrency-summary.json
+```
+
+This scenario drives the real backend API over HTTPS with `k6`:
+
+- staff signup/login
+- session + slide creation
+- Ably token burst
+- participant registration
+- live controls + stats reads
+- vote burst
+- question burst + upvotes
+- final state/stats verification
+- guarded cleanup via `DELETE /api/internal/perf/sessions/:id`
+
+Set `PERF_TEST_TOKEN` on the backend to enable the cleanup route. If you want to keep
+the temporary session for inspection, add `--skip-cleanup`.
+
 ### 4. Clean Up
 
 ```bash

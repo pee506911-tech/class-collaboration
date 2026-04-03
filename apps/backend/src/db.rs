@@ -1,6 +1,6 @@
 use crate::error::{AppError, Result};
-use sqlx::mysql::MySqlPoolOptions;
 use sqlx::migrate::Migrator;
+use sqlx::mysql::MySqlPoolOptions;
 use sqlx::{MySql, Pool};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -177,17 +177,18 @@ impl LazyDbPool {
         }
 
         for version in REPAIRABLE_MIGRATION_VERSIONS {
-            let Some(migration) = MIGRATOR.iter().find(|migration| migration.version == *version)
+            let Some(migration) = MIGRATOR
+                .iter()
+                .find(|migration| migration.version == *version)
             else {
                 continue;
             };
 
-            let applied_checksum: Option<Vec<u8>> = sqlx::query_scalar(
-                "SELECT checksum FROM _sqlx_migrations WHERE version = ?",
-            )
-            .bind(version)
-            .fetch_optional(pool)
-            .await?;
+            let applied_checksum: Option<Vec<u8>> =
+                sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = ?")
+                    .bind(version)
+                    .fetch_optional(pool)
+                    .await?;
 
             if let Some(applied_checksum) = applied_checksum {
                 if applied_checksum.as_slice() != migration.checksum.as_ref() {

@@ -172,8 +172,8 @@ pub async fn get_ably_token(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
     use serde_json::json;
+    use std::collections::HashSet;
 
     fn expected_mac(
         key_secret: &str,
@@ -194,8 +194,8 @@ mod tests {
             "{}\n{}\n{}\n{}\n{}\n{}\n",
             key_name, ttl, capability, client_id, timestamp, nonce
         );
-        let mut mac = HmacSha256::new_from_slice(key_secret.as_bytes())
-            .expect("test key should create HMAC");
+        let mut mac =
+            HmacSha256::new_from_slice(key_secret.as_bytes()).expect("test key should create HMAC");
         mac.update(sign_text.as_bytes());
         base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
     }
@@ -276,7 +276,9 @@ mod tests {
         )
         .expect_err("invalid role should be rejected");
 
-        assert!(matches!(err, crate::error::AppError::Input(message) if message.contains("Invalid role")));
+        assert!(
+            matches!(err, crate::error::AppError::Input(message) if message.contains("Invalid role"))
+        );
     }
 
     #[test]

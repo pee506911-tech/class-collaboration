@@ -62,10 +62,16 @@ warning: associated function `new` is never used
 49 |     pub fn new(pool: Pool<MySql>) -> Self {
    |            ^^^
 
-warning: `backend-rust` (bin "backend-rust") generated 6 warnings
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.82s
+warning: function `publish_slides_update` is never used
+   --> src/services/ably.rs:165:14
+    |
+165 | pub async fn publish_slides_update(session_id: &str, slides: &impl Serialize) -> bool {
+    |              ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `backend-rust` (bin "backend-rust") generated 7 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10.03s
      Running `target/debug/backend-rust`
-2026-04-03T04:31:38.667504Z  WARN backend_rust::handlers::ably: Empty or missing participant_id for session test-session-nwxibb1w role student. Using fallback: student-test-session-nwxibb1w. This may cause connection sharing issues!
-2026-04-03T04:32:01.032913Z ERROR backend_rust::services::ably: Ably publish failed channel="session:4td7l83i" event_name="VOTE_UPDATE" status=500 Internal Server Error body={"error":"Internal server error (fault injection)","code":50000}
-2026-04-03T04:32:01.033192Z ERROR backend_rust::services::ably: Failed to publish vote update: Ably publish failed: 500 Internal Server Error
-2026-04-03T04:32:01.033221Z  WARN backend_rust::handlers::student: Vote update committed but realtime publish failed - clients will converge via refresh session_id=4td7l83i slide_id=a04b1pmr
+2026-04-03T08:05:52.149984Z  WARN backend_rust::handlers::ably: Empty or missing participant_id for session test-session-xvyxojc7 role student. Using fallback: student-test-session-xvyxojc7. This may cause connection sharing issues!
+2026-04-03T08:06:13.705368Z ERROR backend_rust::services::ably: Ably publish failed event_name=VOTE_UPDATE channel=session:3wj0jzmi status=500 Internal Server Error body={"error":"Internal server error (fault injection)","code":50000}
+2026-04-03T08:06:13.705841Z ERROR backend_rust::services::ably: Failed to publish vote update: Ably publish failed: 500 Internal Server Error
+2026-04-03T08:06:13.705875Z  WARN backend_rust::handlers::student: Vote update committed but realtime publish failed - clients will converge via refresh session_id=3wj0jzmi slide_id=187xuxpe

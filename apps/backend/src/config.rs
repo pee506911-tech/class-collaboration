@@ -36,6 +36,7 @@ pub struct Config {
     // slides/questions/vote_counts aggregations.
     pub session_state_cache_ttl_ms: u64,
     pub session_state_cache_max_entries: usize,
+    pub perf_test_token: Option<String>,
 }
 
 impl Config {
@@ -133,6 +134,11 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(200);
 
+        let perf_test_token = env::var("PERF_TEST_TOKEN")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
         Self {
             environment,
             database_url,
@@ -153,6 +159,7 @@ impl Config {
             api_buffer_size,
             session_state_cache_ttl_ms,
             session_state_cache_max_entries,
+            perf_test_token,
         }
     }
 }

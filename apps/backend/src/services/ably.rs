@@ -162,10 +162,7 @@ pub async fn publish_qa_update(
 
 /// Publish a slides update to a session channel
 /// Returns true if published successfully, false if in degraded mode
-pub async fn publish_slides_update(
-    session_id: &str,
-    slides: &impl Serialize,
-) -> bool {
+pub async fn publish_slides_update(session_id: &str, slides: &impl Serialize) -> bool {
     let channel = format!("session:{}", session_id);
     let payload = serde_json::json!({
         "slides": slides
@@ -179,4 +176,3 @@ pub async fn publish_slides_update(
         }
     }
 }
-

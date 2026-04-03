@@ -1,7 +1,7 @@
 use axum::{
     error_handling::HandleErrorLayer,
     http::header::HeaderName,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Extension, Router,
 };
 use std::sync::Arc;
@@ -62,6 +62,7 @@ async fn main() -> anyhow::Result<()> {
         api_buffer_size = config.api_buffer_size,
         session_state_cache_ttl_ms = config.session_state_cache_ttl_ms,
         session_state_cache_max_entries = config.session_state_cache_max_entries,
+        perf_test_enabled = config.perf_test_token.is_some(),
         enable_general_rate_limit = config.enable_general_rate_limit,
         rate_limit_general_per_second = config.rate_limit_general_per_second,
         rate_limit_general_burst = config.rate_limit_general_burst,
@@ -288,6 +289,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/sessions/:id/register-participant",
             post(handlers::student::register_participant),
         );
+    let api_routes = api_routes.route(
+        "/api/internal/perf/sessions/:id",
+        delete(handlers::perf::cleanup_session),
+    );
 
     let api_routes = api_routes.layer(overload_protection);
     let api_routes = if config.enable_general_rate_limit {

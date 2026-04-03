@@ -15,6 +15,7 @@
 #   --leave-backend   Don't stop backend started by this script
 #   --skip-cleanup    Don't clean up Docker containers after tests
 #   --concurrency N   Set concurrency level (default: 100)
+#   --base-url URL    Run auth burst only against a live backend URL
 #   --help            Show this help message
 
 set -e
@@ -32,10 +33,12 @@ SKIP_BACKEND=false
 LEAVE_BACKEND=false
 SKIP_CLEANUP=false
 CONCURRENCY=100
+BASE_URL=""
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( dirname "$SCRIPT_DIR" )"
 BACKEND_PID=""
 STARTED_BACKEND=false
+AUTH_ONLY=false
 
 cleanup_backend() {
   if [ "$STARTED_BACKEND" = true ] && [ "$LEAVE_BACKEND" = false ] && [ -n "$BACKEND_PID" ]; then
@@ -71,8 +74,24 @@ while [[ $# -gt 0 ]]; do
       CONCURRENCY="$2"
       shift 2
       ;;
+    --base-url)
+      BASE_URL="$2"
+      AUTH_ONLY=true
+      shift 2
+      ;;
     --help)
-      head -20 "$0" | tail -15
+      cat <<'EOF'
+Usage: ./test-concurrency.sh [options]
+
+Options:
+  --skip-setup      Skip Docker setup (assume services already running)
+  --skip-backend    Skip starting backend (assume already running on :8080)
+  --leave-backend   Don't stop backend started by this script
+  --skip-cleanup    Don't clean up Docker containers after tests
+  --concurrency N   Set concurrency level (default: 100)
+  --base-url URL    Run auth burst only against a live backend URL
+  --help            Show this help message
+EOF
       exit 0
       ;;
     *)
@@ -81,6 +100,14 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [ "$AUTH_ONLY" = true ] && [ -z "$BASE_URL" ]; then
+  BASE_URL="http://localhost:8080"
+fi
+
+if [ "$AUTH_ONLY" = true ]; then
+  echo "[INFO] Auth-only mode enabled (base-url=$BASE_URL)"
+fi
 
 # Helper functions
 log_info() {
@@ -123,11 +150,33 @@ docker_compose() {
 # Check prerequisites
 log_info "Checking prerequisites..."
 check_command node
-check_command pnpm
-check_command cargo
-if ! command -v docker-compose &> /dev/null && ! command -v docker &> /dev/null; then
-  log_error "Docker (or docker-compose) is required but not installed"
-  exit 1
+if [ "$AUTH_ONLY" = false ]; then
+  check_command pnpm
+  check_command cargo
+  if ! command -v docker-compose &> /dev/null && ! command -v docker &> /dev/null; then
+    log_error "Docker (or docker-compose) is required but not installed"
+    exit 1
+  fi
+fi
+
+if [ "$AUTH_ONLY" = true ]; then
+  cd "$SCRIPT_DIR"
+
+  if [ ! -d node_modules ]; then
+    log_info "Installing Node dependencies..."
+    npm install --silent
+  fi
+
+  log_info "Running Ably auth burst against $BASE_URL (prod-safe mode)..."
+  : "${ABLY_API_KEY:?ABLY_API_KEY is required for auth-only mode}"
+  node run-auth-burst-test.js --concurrency "$CONCURRENCY" --base-url "$BASE_URL" || {
+    log_error "Ably auth burst test failed"
+    exit 1
+  }
+
+  log_success "Ably auth burst test passed"
+  log_success "Prod-safe run completed"
+  exit 0
 fi
 
 cd "$SCRIPT_DIR"
