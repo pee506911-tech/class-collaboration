@@ -46,6 +46,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 20241201000001")
         .execute(&pool)
         .await?;
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 20241201140000")
+        .execute(&pool)
+        .await?;
     sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 20241201150000")
         .execute(&pool)
         .await?;
@@ -61,7 +64,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .execute(&pool)
         .await?;
 
-    // Drop FK constraints on session_scores
+    // Drop FK constraints on session_scores.
+    // fk_1 is the legacy constraint seen in the production failure log.
+    let _ = sqlx::query("ALTER TABLE session_scores DROP FOREIGN KEY fk_1")
+        .execute(&pool)
+        .await;
     let _ = sqlx::query("ALTER TABLE session_scores DROP FOREIGN KEY fk_2")
         .execute(&pool)
         .await;
