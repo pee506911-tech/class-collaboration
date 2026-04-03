@@ -236,6 +236,12 @@ cd "$PROJECT_ROOT/apps/backend"
 export DATABASE_URL="mysql://classcolab:testpassword@localhost:3307/classcolab_test"
 export ABLY_API_KEY="test.key:secret"
 export ABLY_REST_URL="http://localhost:8081"
+# The slide create idempotency test fans out 15 concurrent requests and each
+# request can hold a transaction open while waiting on the session lock.
+# Give the test backend a larger connection pool so it does not fail by
+# starving at the pool boundary before it reaches the write path.
+export DB_MAX_CONNECTIONS="${DB_MAX_CONNECTIONS:-20}"
+export DB_ACQUIRE_TIMEOUT_SECONDS="${DB_ACQUIRE_TIMEOUT_SECONDS:-60}"
 
 # Apply all migrations
 for migration in $(ls migrations/*.sql | sort); do

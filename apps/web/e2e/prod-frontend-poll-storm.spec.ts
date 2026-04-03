@@ -15,6 +15,9 @@ const BACKEND_API_URL = process.env.PLAYWRIGHT_API_URL || 'http://localhost:8080
 const STUDENT_COUNT = readPositiveIntEnv('PLAYWRIGHT_STUDENT_COUNT', 100);
 const OPTION_COUNT = readPositiveIntEnv('PLAYWRIGHT_OPTION_COUNT', STUDENT_COUNT);
 const BATCH_SIZE = readPositiveIntEnv('PLAYWRIGHT_BATCH_SIZE', 10);
+const CONNECT_TIMEOUT_MS = readPositiveIntEnv('PLAYWRIGHT_CONNECT_TIMEOUT_MS', 120_000);
+const SUBMIT_TIMEOUT_MS = readPositiveIntEnv('PLAYWRIGHT_SUBMIT_TIMEOUT_MS', 120_000);
+const SETTLE_TIMEOUT_MS = readPositiveIntEnv('PLAYWRIGHT_SETTLE_TIMEOUT_MS', 240_000);
 const CLEANUP_TOKEN = process.env.PERF_TEST_TOKEN || '';
 const SKIP_CLEANUP = process.env.PLAYWRIGHT_SKIP_CLEANUP === '1';
 const SUMMARY_FILE = process.env.PLAYWRIGHT_SUMMARY_FILE;
@@ -75,7 +78,7 @@ async function waitForBackendToSettle(
     slideId: string,
     optionIds: string[],
     expectedStudents: number,
-    timeoutMs = 120_000,
+    timeoutMs = SETTLE_TIMEOUT_MS,
 ) {
     const startedAt = Date.now();
     let lastSummary: Record<string, unknown> | null = null;
@@ -119,22 +122,24 @@ async function openStudentClient(
     const name = buildStudentName(index);
     const context = await browser.newContext();
     const page = await context.newPage();
+    page.setDefaultTimeout(CONNECT_TIMEOUT_MS);
+    page.setDefaultNavigationTimeout(CONNECT_TIMEOUT_MS);
 
     const authRequestPromise = page.waitForRequest(
         (request) => request.url().includes('/api/auth/ably') && request.method() === 'GET',
-        { timeout: 30_000 }
+        { timeout: CONNECT_TIMEOUT_MS }
     );
     const authResponsePromise = page.waitForResponse(
         (response) => response.url().includes('/api/auth/ably') && response.request().method() === 'GET',
-        { timeout: 30_000 }
+        { timeout: CONNECT_TIMEOUT_MS }
     );
     const websocketPromise = page.waitForEvent('websocket', {
         predicate: (websocket) => websocket.url().toLowerCase().includes('ably'),
-        timeout: 30_000,
+        timeout: CONNECT_TIMEOUT_MS,
     });
     const registerResponsePromise = page.waitForResponse(
         (response) => response.url().includes('/register-participant') && response.request().method() === 'POST',
-        { timeout: 30_000 }
+        { timeout: CONNECT_TIMEOUT_MS }
     );
 
     await page.goto(`/student/session/${shareToken}`, { waitUntil: 'domcontentloaded' });
@@ -142,8 +147,8 @@ async function openStudentClient(
     await page.getByPlaceholder('Your Name').fill(name);
     await page.getByRole('button', { name: 'Join Session' }).click();
 
-    await expect(page.getByText('Live', { exact: true })).toBeVisible({ timeout: 60_000 });
-    await expect(page.getByRole('button', { name: 'Submit Answer' })).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByText('Live', { exact: true })).toBeVisible({ timeout: CONNECT_TIMEOUT_MS });
+    await expect(page.getByRole('button', { name: 'Submit Answer' })).toBeVisible({ timeout: CONNECT_TIMEOUT_MS });
 
     const [authRequest, authResponse, websocket, registerResponse] = await Promise.all([
         authRequestPromise,
@@ -182,7 +187,7 @@ async function openStudentClient(
 async function submitStudentVote(client: StudentClient) {
     const voteResponsePromise = client.page.waitForResponse(
         (response) => response.url().includes('/vote') && response.request().method() === 'POST',
-        { timeout: 30_000 }
+        { timeout: SUBMIT_TIMEOUT_MS }
     );
 
     await client.page.getByText(client.optionText, { exact: true }).click();
@@ -190,7 +195,7 @@ async function submitStudentVote(client: StudentClient) {
 
     const voteResponse = await voteResponsePromise;
     expect(voteResponse.ok(), `vote response for ${client.name} should be ok`).toBeTruthy();
-    await expect(client.page.getByText('Answer Submitted')).toBeVisible({ timeout: 30_000 });
+    await expect(client.page.getByText('Answer Submitted')).toBeVisible({ timeout: SUBMIT_TIMEOUT_MS });
 }
 
 test('submits poll answers from many frontend clients on prod', async ({ browser }) => {

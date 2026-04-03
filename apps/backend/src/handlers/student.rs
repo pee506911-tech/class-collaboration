@@ -5,7 +5,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{MySql, Transaction};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -19,6 +19,7 @@ const MAX_QUESTION_LENGTH: usize = 1000;
 const MAX_NAME_LENGTH: usize = 100;
 const MAX_OPTION_IDS: usize = 10;
 const MAX_DEADLOCK_RETRIES: u32 = 3;
+const MY_VOTES_SLIDE_ID_CHUNK_SIZE: usize = 128;
 
 fn is_mysql_duplicate_key(e: &sqlx::Error) -> bool {
     match e {
@@ -53,6 +54,71 @@ fn is_app_error_deadlock(e: &AppError) -> bool {
         AppError::Database(sqlx_err) => is_deadlock_error(sqlx_err),
         _ => false,
     }
+}
+
+fn group_votes_by_slide(votes: Vec<(String, String)>) -> HashMap<String, Vec<String>> {
+    let mut votes_map: HashMap<String, Vec<String>> = HashMap::new();
+    for (slide_id, option_id) in votes {
+        votes_map.entry(slide_id).or_default().push(option_id);
+    }
+    votes_map
+}
+
+fn dedupe_option_ids(option_ids: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::with_capacity(option_ids.len());
+    option_ids
+        .into_iter()
+        .filter(|option_id| seen.insert(option_id.clone()))
+        .collect()
+}
+
+fn should_skip_vote_snapshot(limit_submissions: bool, rows_affected: u64) -> bool {
+    !limit_submissions && rows_affected == 0
+}
+
+async fn get_session_slide_ids(pool: &crate::db::DbPool, session_id: &str) -> Result<Vec<String>> {
+    Ok(
+        sqlx::query_scalar("SELECT id FROM slides WHERE session_id = ?")
+            .bind(session_id)
+            .fetch_all(pool)
+            .await?,
+    )
+}
+
+async fn get_votes_for_participant_by_slide_ids(
+    pool: &crate::db::DbPool,
+    participant_id: &str,
+    slide_ids: &[String],
+) -> Result<Vec<(String, String)>> {
+    if slide_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut votes = Vec::new();
+
+    // Keep lookups aligned with the existing slide_id-leading vote indexes so we
+    // do not need to reintroduce the TiDB write-heavy (session_id, participant_id) index.
+    for slide_id_chunk in slide_ids.chunks(MY_VOTES_SLIDE_ID_CHUNK_SIZE) {
+        let mut qb = sqlx::QueryBuilder::<MySql>::new(
+            "SELECT slide_id, option_id FROM votes WHERE participant_id = ",
+        );
+        qb.push_bind(participant_id);
+        qb.push(" AND slide_id IN (");
+        let mut separated = qb.separated(", ");
+        for slide_id in slide_id_chunk {
+            separated.push_bind(slide_id);
+        }
+        drop(separated);
+        qb.push(")");
+
+        let chunk_votes = qb
+            .build_query_as::<(String, String)>()
+            .fetch_all(pool)
+            .await?;
+        votes.extend(chunk_votes);
+    }
+
+    Ok(votes)
 }
 
 /// Helper function: Atomically increment vote_sequence and fetch vote counts.
@@ -155,34 +221,34 @@ pub async fn submit_vote(
 
     #[derive(sqlx::FromRow)]
     struct SlideMetaRow {
+        session_id: String,
         slide_type: String,
         content: serde_json::Value,
     }
 
-    // One hot-path point read for validation inputs (valid traffic pays 1 query).
+    // Slide ids are UUID primary keys, so a point lookup by id keeps this
+    // validation read cheap without requiring extra secondary indexes.
     let slide_meta = if crate::tidb_ru::should_sample() {
         let mut conn = pool.acquire().await?;
         let slide_meta = sqlx::query_as::<_, SlideMetaRow>(
-            "SELECT type as slide_type, content FROM slides WHERE id = ? AND session_id = ?",
+            "SELECT session_id, type as slide_type, content FROM slides WHERE id = ?",
         )
         .bind(&payload.slide_id)
-        .bind(&session_id)
         .fetch_optional(&mut *conn)
         .await?;
         crate::tidb_ru::log_last_query_info("slides.meta_for_vote", &mut *conn).await;
         slide_meta
     } else {
         sqlx::query_as::<_, SlideMetaRow>(
-            "SELECT type as slide_type, content FROM slides WHERE id = ? AND session_id = ?",
+            "SELECT session_id, type as slide_type, content FROM slides WHERE id = ?",
         )
         .bind(&payload.slide_id)
-        .bind(&session_id)
         .fetch_optional(&pool)
         .await?
     };
 
     let (slide_type, slide_content) = match slide_meta {
-        Some(m) => (m.slide_type, m.content),
+        Some(m) if m.session_id == session_id => (m.slide_type, m.content),
         None => {
             // Best-effort specificity: distinguish missing session from wrong slide.
             let session_exists: Option<bool> =
@@ -200,15 +266,22 @@ pub async fn submit_vote(
                     .to_string(),
             ));
         }
+        Some(_) => {
+            return Err(AppError::Input(
+                "Invalid slide: slide does not exist or does not belong to this session"
+                    .to_string(),
+            ));
+        }
     };
 
-    let option_ids: Vec<String> = if let Some(ids) = payload.option_ids {
+    let option_ids = if let Some(ids) = payload.option_ids {
         ids
     } else if let Some(id) = payload.option_id {
         vec![id]
     } else {
         return Err(AppError::Input("No option selected".to_string()));
     };
+    let option_ids = dedupe_option_ids(option_ids);
 
     if option_ids.is_empty() {
         return Err(AppError::Input("No option selected".to_string()));
@@ -224,13 +297,13 @@ pub async fn submit_vote(
 
     // Validate option IDs against slide content
     if let Some(options) = slide_content.get("options").and_then(|o| o.as_array()) {
-        let valid_option_ids: Vec<String> = options
+        let valid_option_ids: HashSet<&str> = options
             .iter()
-            .filter_map(|opt| opt.get("id").and_then(|id| id.as_str()).map(String::from))
+            .filter_map(|opt| opt.get("id").and_then(|id| id.as_str()))
             .collect();
 
         for opt_id in &option_ids {
-            if !valid_option_ids.contains(opt_id) {
+            if !valid_option_ids.contains(opt_id.as_str()) {
                 return Err(AppError::Input(format!(
                     "Invalid option ID: {} is not a valid option for this slide",
                     opt_id
@@ -323,29 +396,37 @@ pub async fn submit_vote(
                 row.push_bind(option_id);
             });
 
-            let create_result = query.build().execute(&mut *tx).await;
-
-            if let Err(e) = create_result {
-                let _ = tx.rollback().await;
-                // Check for deadlock - retry if so
-                if is_deadlock_error(&e) && retry_count < MAX_DEADLOCK_RETRIES {
-                    retry_count += 1;
-                    tracing::warn!(
-                        "Vote submission deadlock, retrying ({}/{})",
-                        retry_count,
-                        MAX_DEADLOCK_RETRIES
-                    );
-                    tokio::time::sleep(Duration::from_millis(50 * retry_count as u64)).await;
-                    continue;
+            match query.build().execute(&mut *tx).await {
+                Ok(result) => {
+                    if should_skip_vote_snapshot(limit_submissions, result.rows_affected()) {
+                        let _ = tx.rollback().await;
+                        return Ok(Json(ApiResponse::success(
+                            serde_json::json!({ "message": "Vote submitted successfully" }),
+                        )));
+                    }
                 }
-                tracing::error!("Failed to insert votes: {:?}", e);
-                // Check for duplicate-key error
-                if is_mysql_duplicate_key(&e) {
-                    return Err(AppError::Input(
-                        "You have already submitted a vote for this option".to_string(),
-                    ));
+                Err(e) => {
+                    let _ = tx.rollback().await;
+                    // Check for deadlock - retry if so
+                    if is_deadlock_error(&e) && retry_count < MAX_DEADLOCK_RETRIES {
+                        retry_count += 1;
+                        tracing::warn!(
+                            "Vote submission deadlock, retrying ({}/{})",
+                            retry_count,
+                            MAX_DEADLOCK_RETRIES
+                        );
+                        tokio::time::sleep(Duration::from_millis(50 * retry_count as u64)).await;
+                        continue;
+                    }
+                    tracing::error!("Failed to insert votes: {:?}", e);
+                    // Check for duplicate-key error
+                    if is_mysql_duplicate_key(&e) {
+                        return Err(AppError::Input(
+                            "You have already submitted a vote for this option".to_string(),
+                        ));
+                    }
+                    return Err(AppError::Internal(format!("Failed to insert votes: {}", e)));
                 }
-                return Err(AppError::Internal(format!("Failed to insert votes: {}", e)));
             }
         }
 
@@ -395,6 +476,30 @@ pub async fn submit_vote(
     Ok(Json(ApiResponse::success(
         serde_json::json!({ "message": "Vote submitted successfully" }),
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dedupe_option_ids, should_skip_vote_snapshot};
+
+    #[test]
+    fn dedupe_option_ids_preserves_first_occurrence_order() {
+        assert_eq!(
+            dedupe_option_ids(vec![
+                "opt-red".to_string(),
+                "opt-blue".to_string(),
+                "opt-red".to_string(),
+            ]),
+            vec!["opt-red".to_string(), "opt-blue".to_string()]
+        );
+    }
+
+    #[test]
+    fn should_skip_vote_snapshot_only_for_duplicate_non_limited_submissions() {
+        assert!(should_skip_vote_snapshot(false, 0));
+        assert!(!should_skip_vote_snapshot(true, 0));
+        assert!(!should_skip_vote_snapshot(false, 1));
+    }
 }
 
 #[derive(Deserialize)]
@@ -849,14 +954,10 @@ pub async fn get_my_votes(
         return Err(AppError::Input("Participant ID is required".to_string()));
     }
 
-    // Fetch all votes for this participant in this session
-    let votes: Vec<(String, String)> = sqlx::query_as(
-        "SELECT slide_id, option_id FROM votes WHERE session_id = ? AND participant_id = ?",
-    )
-    .bind(&session_id)
-    .bind(&query.participant_id)
-    .fetch_all(&pool)
-    .await?;
+    let session_slide_ids = get_session_slide_ids(&pool, &session_id).await?;
+    let votes =
+        get_votes_for_participant_by_slide_ids(&pool, &query.participant_id, &session_slide_ids)
+            .await?;
 
     tracing::info!(
         "Found {} votes for participant {}",
@@ -864,13 +965,7 @@ pub async fn get_my_votes(
         query.participant_id
     );
 
-    // Group by slide_id
-    let mut votes_map: HashMap<String, Vec<String>> = HashMap::new();
-    for (slide_id, option_id) in votes {
-        votes_map.entry(slide_id).or_default().push(option_id);
-    }
-
     Ok(Json(ApiResponse::success(MyVotesResponse {
-        votes: votes_map,
+        votes: group_votes_by_slide(votes),
     })))
 }
