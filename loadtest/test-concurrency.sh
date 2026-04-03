@@ -317,6 +317,16 @@ fi
 log_info "Running concurrency tests (concurrency=$CONCURRENCY)..."
 cd "$SCRIPT_DIR"
 
+log_info "Running backend slide autosave/reorder regression..."
+cd "$PROJECT_ROOT/apps/backend"
+cargo test --test concurrency t10_slide_autosave_and_reorder_are_serialized -- --ignored --test-threads=1 || {
+  log_error "Backend slide autosave/reorder regression failed"
+  exit 1
+}
+log_success "Backend slide autosave/reorder regression passed"
+
+cd "$SCRIPT_DIR"
+
 log_info "Running Ably auth burst test (concurrency=$CONCURRENCY)..."
 node run-auth-burst-test.js --concurrency "$CONCURRENCY" || {
   log_error "Ably auth burst test failed"

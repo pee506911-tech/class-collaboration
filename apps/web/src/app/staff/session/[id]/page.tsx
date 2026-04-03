@@ -655,8 +655,16 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                 onUpdate={(content) => handleUpdateSlide(previewSlide.id, content)}
                                 onSave={() => toast.success('Changes saved')}
                                 onSyncStatusChange={setEditorSync}
-                                disabled={previewSlide.optimistic?.disableEditing}
-                                disabledReason={previewSlide.optimistic?.syncState === 'retrying' ? 'This slide is retrying. Editing is disabled until it is confirmed.' : 'This slide is still syncing. Editing is disabled until it is confirmed.'}
+                                disabled={previewSlide.optimistic?.disableEditing || isReordering || hasPendingStructuralMutations}
+                                disabledReason={
+                                    isReordering
+                                        ? 'This slide is temporarily locked while the new order is being saved.'
+                                        : hasPendingStructuralMutations
+                                            ? 'This slide is temporarily locked while structural changes are syncing.'
+                                            : previewSlide.optimistic?.syncState === 'retrying'
+                                                ? 'This slide is retrying. Editing is disabled until it is confirmed.'
+                                                : 'This slide is still syncing. Editing is disabled until it is confirmed.'
+                                }
                             />
                         </div>
                     </div>

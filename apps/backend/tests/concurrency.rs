@@ -11,7 +11,7 @@
 
 use futures_util::future::join_all;
 use reqwest::Client;
-use serde_json::json;
+use serde_json::{json, Value};
 use sqlx::{MySql, Pool};
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,6 +28,43 @@ fn get_database_url() -> String {
 
 fn get_server_url() -> String {
     std::env::var("TEST_SERVER_URL").unwrap_or_else(|_| DEFAULT_SERVER_URL.to_string())
+}
+
+fn bearer(token: &str) -> String {
+    format!("Bearer {token}")
+}
+
+async fn cleanup_test_database(pool: &Pool<MySql>) {
+    sqlx::query("DELETE FROM question_upvotes WHERE question_id IS NOT NULL")
+        .execute(pool)
+        .await
+        .expect("Failed to clean question upvotes");
+
+    // Clean vote submission locks (limitSubmissions enforcement)
+    // Table may not exist on older DBs; in that case we ignore the error.
+    let _ = sqlx::query("DELETE FROM vote_submissions WHERE session_id IS NOT NULL")
+        .execute(pool)
+        .await;
+
+    sqlx::query("DELETE FROM votes WHERE session_id IS NOT NULL")
+        .execute(pool)
+        .await
+        .expect("Failed to clean votes");
+
+    sqlx::query("DELETE FROM questions WHERE session_id IS NOT NULL")
+        .execute(pool)
+        .await
+        .expect("Failed to clean questions");
+
+    sqlx::query("DELETE FROM slides WHERE session_id IS NOT NULL")
+        .execute(pool)
+        .await
+        .expect("Failed to clean slides");
+
+    sqlx::query("DELETE FROM sessions WHERE id IS NOT NULL")
+        .execute(pool)
+        .await
+        .expect("Failed to clean sessions");
 }
 
 /// Test fixture for concurrency tests
@@ -55,37 +92,7 @@ impl ConcurrencyTestFixture {
             .build()
             .expect("Failed to create HTTP client");
 
-        // Clean up any existing data
-        sqlx::query("DELETE FROM question_upvotes WHERE question_id IS NOT NULL")
-            .execute(&*pool)
-            .await
-            .expect("Failed to clean question upvotes");
-
-        // Clean vote submission locks (limitSubmissions enforcement)
-        // Table may not exist on older DBs; in that case we ignore the error.
-        let _ = sqlx::query("DELETE FROM vote_submissions WHERE session_id IS NOT NULL")
-            .execute(&*pool)
-            .await;
-
-        sqlx::query("DELETE FROM votes WHERE session_id IS NOT NULL")
-            .execute(&*pool)
-            .await
-            .expect("Failed to clean votes");
-
-        sqlx::query("DELETE FROM questions WHERE session_id IS NOT NULL")
-            .execute(&*pool)
-            .await
-            .expect("Failed to clean questions");
-
-        sqlx::query("DELETE FROM slides WHERE session_id IS NOT NULL")
-            .execute(&*pool)
-            .await
-            .expect("Failed to clean slides");
-
-        sqlx::query("DELETE FROM sessions WHERE id IS NOT NULL")
-            .execute(&*pool)
-            .await
-            .expect("Failed to clean sessions");
+        cleanup_test_database(&pool).await;
 
         // Create test session
         let session_id = uuid::Uuid::new_v4().to_string();
@@ -266,6 +273,196 @@ impl ConcurrencyTestFixture {
             .expect("Failed to get QA sequence");
 
         sequence
+    }
+}
+
+struct SlideMutationFixture {
+    pool: Arc<Pool<MySql>>,
+    client: Client,
+    server_url: String,
+    auth_token: String,
+    session_id: String,
+    slide_id: String,
+    other_slide_id: String,
+}
+
+impl SlideMutationFixture {
+    async fn new() -> Self {
+        let database_url = get_database_url();
+        let server_url = get_server_url();
+        let pool = Arc::new(
+            Pool::<MySql>::connect(&database_url)
+                .await
+                .expect("Failed to connect to test database"),
+        );
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("Failed to create HTTP client");
+
+        cleanup_test_database(&pool).await;
+
+        let unique = uuid::Uuid::new_v4().to_string();
+        let email = format!("slide-race-{unique}@example.com");
+        let password = format!("Race-{}!Aa1", &unique[..8]);
+        let name = "Slide Race";
+
+        let register_response = client
+            .post(format!("{}/api/auth/register", server_url))
+            .json(&json!({
+                "email": email,
+                "password": password,
+                "name": name,
+                "role": "staff",
+            }))
+            .send()
+            .await
+            .expect("register request failed");
+        assert!(
+            register_response.status().is_success(),
+            "register request failed: {}",
+            register_response.text().await.unwrap_or_default()
+        );
+
+        let login_response = client
+            .post(format!("{}/api/auth/login", server_url))
+            .json(&json!({
+                "email": email,
+                "password": password,
+            }))
+            .send()
+            .await
+            .expect("login request failed");
+        let login_body: Value = login_response
+            .json()
+            .await
+            .expect("login response body should be JSON");
+        let auth_token = login_body
+            .get("token")
+            .and_then(Value::as_str)
+            .expect("login token missing")
+            .to_string();
+
+        let create_session_response = client
+            .post(format!("{}/api/sessions", server_url))
+            .header("Authorization", bearer(&auth_token))
+            .json(&json!({
+                "title": format!("Slide race {unique}"),
+                "allowQuestions": false,
+                "requireName": false,
+            }))
+            .send()
+            .await
+            .expect("create session request failed");
+        assert!(
+            create_session_response.status().is_success(),
+            "create session request failed: {}",
+            create_session_response.text().await.unwrap_or_default()
+        );
+        let create_session_body: Value = create_session_response
+            .json()
+            .await
+            .expect("create session response body should be JSON");
+        let session_id = create_session_body
+            .get("data")
+            .and_then(|data| data.get("id"))
+            .and_then(Value::as_str)
+            .expect("session id missing")
+            .to_string();
+
+        let slide_id = uuid::Uuid::new_v4().to_string();
+        let other_slide_id = uuid::Uuid::new_v4().to_string();
+        let first_slide_content = json!({
+            "title": "First title",
+            "body": "First body"
+        });
+        let second_slide_content = json!({
+            "title": "Second title",
+            "body": "Second body"
+        });
+
+        sqlx::query(
+            "INSERT INTO slides (id, session_id, type, content, order_index)
+             VALUES (?, ?, 'static', ?, 0)",
+        )
+        .bind(&slide_id)
+        .bind(&session_id)
+        .bind(&first_slide_content)
+        .execute(&*pool)
+        .await
+        .expect("Failed to create first slide");
+
+        sqlx::query(
+            "INSERT INTO slides (id, session_id, type, content, order_index)
+             VALUES (?, ?, 'static', ?, 1024)",
+        )
+        .bind(&other_slide_id)
+        .bind(&session_id)
+        .bind(&second_slide_content)
+        .execute(&*pool)
+        .await
+        .expect("Failed to create second slide");
+
+        Self {
+            pool,
+            client,
+            server_url,
+            auth_token,
+            session_id,
+            slide_id,
+            other_slide_id,
+        }
+    }
+
+    async fn update_slide(
+        &self,
+        slide_id: &str,
+        content: Value,
+    ) -> reqwest::Result<reqwest::Response> {
+        self.client
+            .put(format!(
+                "{}/api/sessions/{}/slides/{}",
+                self.server_url, self.session_id, slide_id
+            ))
+            .header("Authorization", bearer(&self.auth_token))
+            .json(&json!({ "content": content }))
+            .send()
+            .await
+    }
+
+    async fn reorder_slides(&self, slide_ids: Vec<String>) -> reqwest::Result<reqwest::Response> {
+        self.client
+            .put(format!(
+                "{}/api/sessions/{}/slides/reorder",
+                self.server_url, self.session_id
+            ))
+            .header("Authorization", bearer(&self.auth_token))
+            .json(&json!({ "slideIds": slide_ids }))
+            .send()
+            .await
+    }
+
+    async fn get_slide_order(&self) -> Vec<String> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT id FROM slides WHERE session_id = ? ORDER BY order_index ASC, id ASC",
+        )
+        .bind(&self.session_id)
+        .fetch_all(&*self.pool)
+        .await
+        .expect("Failed to fetch slide order")
+    }
+
+    async fn get_slide_content(&self, slide_id: &str) -> Value {
+        let content: sqlx::types::Json<Value> =
+            sqlx::query_scalar("SELECT content FROM slides WHERE id = ? AND session_id = ?")
+                .bind(slide_id)
+                .bind(&self.session_id)
+                .fetch_one(&*self.pool)
+                .await
+                .expect("Failed to fetch slide content");
+
+        content.0
     }
 }
 
@@ -901,5 +1098,123 @@ async fn t09_question_idempotency_with_request_id() {
         qa_sequence, 1,
         "Expected qa_sequence to be 1, got {}",
         qa_sequence
+    );
+}
+
+// ============================================
+// T-10: Slide Autosave/Reorder Serialization Test
+// ============================================
+
+/// T-10: Verify that slide content autosave waits for an in-flight reorder lock
+/// and that both writes succeed once the session lock is released.
+///
+/// Test: Hold the session row lock, then start one content update and one reorder
+/// request in parallel.
+/// Assertion: Both requests remain blocked until the lock is released, then both
+/// succeed and the final slide order/content are correct.
+#[tokio::test]
+#[ignore = "requires MySQL + a running backend server (set DATABASE_URL and TEST_SERVER_URL)"]
+async fn t10_slide_autosave_and_reorder_are_serialized() {
+    let fixture = SlideMutationFixture::new().await;
+
+    let mut lock_tx = fixture
+        .pool
+        .begin()
+        .await
+        .expect("Failed to begin lock transaction");
+    sqlx::query_scalar::<_, String>("SELECT id FROM sessions WHERE id = ? FOR UPDATE")
+        .bind(&fixture.session_id)
+        .fetch_one(&mut *lock_tx)
+        .await
+        .expect("Failed to lock session row");
+
+    let update_content = json!({
+        "title": "Updated while reorder waits",
+        "body": "Autosave should serialize with reorder"
+    });
+    let expected_order = vec![fixture.other_slide_id.clone(), fixture.slide_id.clone()];
+
+    let update_client = fixture.client.clone();
+    let update_server_url = fixture.server_url.clone();
+    let update_token = fixture.auth_token.clone();
+    let update_session_id = fixture.session_id.clone();
+    let update_slide_id = fixture.slide_id.clone();
+    let update_content_for_task = update_content.clone();
+
+    let update_handle = tokio::spawn(async move {
+        update_client
+            .put(format!(
+                "{}/api/sessions/{}/slides/{}",
+                update_server_url, update_session_id, update_slide_id
+            ))
+            .header("Authorization", bearer(&update_token))
+            .json(&json!({ "content": update_content_for_task }))
+            .send()
+            .await
+    });
+
+    let reorder_client = fixture.client.clone();
+    let reorder_server_url = fixture.server_url.clone();
+    let reorder_token = fixture.auth_token.clone();
+    let reorder_session_id = fixture.session_id.clone();
+    let reorder_slide_ids = expected_order.clone();
+
+    let reorder_handle = tokio::spawn(async move {
+        reorder_client
+            .put(format!(
+                "{}/api/sessions/{}/slides/reorder",
+                reorder_server_url, reorder_session_id
+            ))
+            .header("Authorization", bearer(&reorder_token))
+            .json(&json!({ "slideIds": reorder_slide_ids }))
+            .send()
+            .await
+    });
+
+    sleep(Duration::from_millis(400)).await;
+    assert!(
+        !update_handle.is_finished(),
+        "slide update should wait for the session lock"
+    );
+    assert!(
+        !reorder_handle.is_finished(),
+        "slide reorder should wait for the session lock"
+    );
+
+    lock_tx
+        .commit()
+        .await
+        .expect("Failed to release session lock");
+
+    let update_response = update_handle
+        .await
+        .expect("update task panicked")
+        .expect("update request failed");
+    assert!(
+        update_response.status().is_success(),
+        "update request failed: {}",
+        update_response.status()
+    );
+
+    let reorder_response = reorder_handle
+        .await
+        .expect("reorder task panicked")
+        .expect("reorder request failed");
+    assert!(
+        reorder_response.status().is_success(),
+        "reorder request failed: {}",
+        reorder_response.status()
+    );
+
+    let slide_order = fixture.get_slide_order().await;
+    assert_eq!(
+        slide_order, expected_order,
+        "slide order should match the requested reorder"
+    );
+
+    let updated_slide_content = fixture.get_slide_content(&fixture.slide_id).await;
+    assert_eq!(
+        updated_slide_content, update_content,
+        "slide content should persist after the serialized autosave"
     );
 }

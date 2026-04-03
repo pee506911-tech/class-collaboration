@@ -16,6 +16,7 @@ use crate::models::slide::{CreateSlideRequest, ReorderSlidesRequest, Slide, Upda
 const ORDER_STEP: i32 = 1024;
 const CLIENT_REQUEST_ID_HEADER: &str = "x-client-request-id";
 const MAX_SLIDE_CREATE_DEADLOCK_RETRIES: u32 = 3;
+const MAX_SLIDE_UPDATE_DEADLOCK_RETRIES: u32 = 3;
 
 /// Get all slides for a session
 pub async fn get_slides(
@@ -191,6 +192,13 @@ fn is_app_error_transient_slide_create(e: &AppError) -> bool {
     }
 }
 
+fn is_app_error_transient_slide_update(e: &AppError) -> bool {
+    match e {
+        AppError::Database(sqlx_err) => is_deadlock_error(sqlx_err),
+        _ => false,
+    }
+}
+
 async fn fetch_slide_by_client_request_id(
     pool: &crate::db::DbPool,
     session_id: &str,
@@ -217,58 +225,100 @@ pub async fn update_slide(
     let pool = app_state.db_pool.pool().await?;
     verify_session_ownership(&pool, &session_id, &user_id).await?;
 
-    let existing_slide: Slide = query_as::<_, Slide>(
-            "SELECT id, session_id, type, content, order_index, is_hidden FROM slides WHERE id = ? AND session_id = ?",
-        )
-        .bind(&slide_id)
-        .bind(&session_id)
-        .fetch_optional(&pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Slide not found".to_string()))?;
+    let mut retry_count = 0;
+    loop {
+        let attempt: Result<Slide> = async {
+            let mut tx = pool.begin().await?;
+            lock_owned_session(&mut tx, &session_id, &user_id).await?;
 
-    let mut updated_slide = existing_slide.clone();
-    let mut has_changes = false;
-    let mut updated_slide_type = None;
-    let mut updated_content = None;
+            let existing_slide: Slide = query_as::<_, Slide>(
+                "SELECT id, session_id, type, content, order_index, is_hidden FROM slides WHERE id = ? AND session_id = ?",
+            )
+            .bind(&slide_id)
+            .bind(&session_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Slide not found".to_string()))?;
 
-    if let Some(slide_type) = payload.slide_type {
-        if updated_slide.slide_type != slide_type {
-            updated_slide.slide_type = slide_type.clone();
-            updated_slide_type = Some(slide_type);
-            has_changes = true;
+            let mut updated_slide = existing_slide.clone();
+            let mut has_changes = false;
+            let mut updated_slide_type = None;
+            let mut updated_content = None;
+
+            if let Some(slide_type) = payload.slide_type.as_ref() {
+                if updated_slide.slide_type != *slide_type {
+                    updated_slide.slide_type = slide_type.clone();
+                    updated_slide_type = Some(slide_type.clone());
+                    has_changes = true;
+                }
+            }
+
+            if let Some(content) = payload.content.as_ref() {
+                let content_json = sqlx::types::Json(content.clone());
+                if updated_slide.content != content_json {
+                    updated_slide.content = content_json;
+                    updated_content = Some(content.clone());
+                    has_changes = true;
+                }
+            }
+
+            if !has_changes {
+                tx.commit().await?;
+                return Ok(existing_slide);
+            }
+
+            let mut qb = QueryBuilder::<MySql>::new("UPDATE slides SET ");
+            let mut has_assignment = false;
+            if let Some(slide_type) = updated_slide_type.as_ref() {
+                if has_assignment {
+                    qb.push(", ");
+                }
+                qb.push("type = ");
+                qb.push_bind(slide_type);
+                has_assignment = true;
+            }
+            if let Some(content) = updated_content.as_ref() {
+                if has_assignment {
+                    qb.push(", ");
+                }
+                qb.push("content = ");
+                qb.push_bind(sqlx::types::Json(content));
+            }
+            qb.push(" WHERE id = ");
+            qb.push_bind(&slide_id);
+            qb.push(" AND session_id = ");
+            qb.push_bind(&session_id);
+            qb.build().execute(&mut *tx).await?;
+
+            tx.commit().await?;
+            Ok(updated_slide)
+        }
+        .await;
+
+        match attempt {
+            Ok(slide) => return Ok(Json(ApiResponse::success(slide))),
+            Err(e) => {
+                if is_app_error_transient_slide_update(&e)
+                    && retry_count < MAX_SLIDE_UPDATE_DEADLOCK_RETRIES
+                {
+                    retry_count += 1;
+                    tracing::warn!(
+                        "Slide update contention, retrying ({}/{})",
+                        retry_count,
+                        MAX_SLIDE_UPDATE_DEADLOCK_RETRIES
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(50 * retry_count as u64))
+                        .await;
+                    continue;
+                }
+
+                return match e {
+                    AppError::NotFound(_) | AppError::Auth(_) | AppError::Input(_) => Err(e),
+                    _ => Err(AppError::Internal(format!("Failed to update slide: {}", e))),
+                };
+            }
         }
     }
-
-    if let Some(content) = payload.content {
-        if updated_slide.content != sqlx::types::Json(content.clone()) {
-            updated_slide.content = sqlx::types::Json(content.clone());
-            updated_content = Some(content);
-            has_changes = true;
-        }
-    }
-
-    if !has_changes {
-        return Ok(Json(ApiResponse::success(existing_slide)));
-    }
-
-    let mut qb = QueryBuilder::<MySql>::new("UPDATE slides SET ");
-    let mut assignments = qb.separated(", ");
-    if let Some(slide_type) = updated_slide_type.as_ref() {
-        assignments.push("type = ");
-        assignments.push_bind(slide_type);
-    }
-    if let Some(content) = updated_content.as_ref() {
-        assignments.push("content = ");
-        assignments.push_bind(sqlx::types::Json(content));
-    }
-    drop(assignments);
-    qb.push(" WHERE id = ");
-    qb.push_bind(&slide_id);
-    qb.push(" AND session_id = ");
-    qb.push_bind(&session_id);
-    qb.build().execute(&pool).await?;
-
-    Ok(Json(ApiResponse::success(updated_slide)))
 }
 
 /// Delete a slide
@@ -424,12 +474,11 @@ async fn lock_owned_session(
 }
 
 async fn get_append_order_index(tx: &mut Transaction<'_, MySql>, session_id: &str) -> Result<i32> {
-    let max_order_index = query_scalar::<_, Option<i32>>(
-        "SELECT MAX(order_index) FROM slides WHERE session_id = ?",
-    )
-    .bind(session_id)
-    .fetch_one(&mut **tx)
-    .await?;
+    let max_order_index =
+        query_scalar::<_, Option<i32>>("SELECT MAX(order_index) FROM slides WHERE session_id = ?")
+            .bind(session_id)
+            .fetch_one(&mut **tx)
+            .await?;
 
     Ok(compute_append_order_index(max_order_index))
 }

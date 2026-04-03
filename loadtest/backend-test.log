@@ -69,9 +69,9 @@ warning: function `publish_slides_update` is never used
     |              ^^^^^^^^^^^^^^^^^^^^^
 
 warning: `backend-rust` (bin "backend-rust") generated 7 warnings
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.10s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.94s
      Running `target/debug/backend-rust`
-2026-04-03T10:28:00.450371Z  WARN backend_rust::handlers::ably: Empty or missing participant_id for session test-session-b6pyw9mb role student. Using fallback: student-test-session-b6pyw9mb. This may cause connection sharing issues!
-2026-04-03T10:28:18.576828Z ERROR backend_rust::services::ably: Ably publish failed event_name=VOTE_UPDATE channel=session:et68h0xp status=500 Internal Server Error body={"error":"Internal server error (fault injection)","code":50000}
-2026-04-03T10:28:18.577076Z ERROR backend_rust::services::ably: Failed to publish vote update: Ably publish failed: 500 Internal Server Error
-2026-04-03T10:28:18.577101Z  WARN backend_rust::handlers::student: Vote update committed but realtime publish failed - clients will converge via refresh session_id=et68h0xp slide_id=hddzzy80
+2026-04-03T12:22:44.432061Z  WARN backend_rust::handlers::ably: Empty or missing participant_id for session test-session-imt8jitk role student. Using fallback: student-test-session-imt8jitk. This may cause connection sharing issues!
+2026-04-03T12:23:05.383262Z ERROR backend_rust::services::ably: Ably publish failed event_name=VOTE_UPDATE channel=session:jfu40e4m status=500 Internal Server Error body={"error":"Internal server error (fault injection)","code":50000}
+2026-04-03T12:23:05.383528Z ERROR backend_rust::services::ably: Failed to publish vote update: Ably publish failed: 500 Internal Server Error
+2026-04-03T12:23:05.383557Z  WARN backend_rust::handlers::student: Vote update committed but realtime publish failed - clients will converge via refresh session_id=jfu40e4m slide_id=sxbl61c7

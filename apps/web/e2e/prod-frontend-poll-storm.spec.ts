@@ -148,7 +148,9 @@ async function openStudentClient(
     await page.getByRole('button', { name: 'Join Session' }).click();
 
     await expect(page.getByText('Live', { exact: true })).toBeVisible({ timeout: CONNECT_TIMEOUT_MS });
-    await expect(page.getByRole('button', { name: 'Submit Answer' })).toBeVisible({ timeout: CONNECT_TIMEOUT_MS });
+    const submitButton = page.getByRole('button', { name: 'Submit Answer' });
+    await expect(submitButton).toBeVisible({ timeout: CONNECT_TIMEOUT_MS });
+    await expect(submitButton, 'submit should start disabled before any choice is clicked').toBeDisabled({ timeout: CONNECT_TIMEOUT_MS });
 
     const [authRequest, authResponse, websocket, registerResponse] = await Promise.all([
         authRequestPromise,
@@ -185,13 +187,15 @@ async function openStudentClient(
 }
 
 async function submitStudentVote(client: StudentClient) {
+    const submitButton = client.page.getByRole('button', { name: 'Submit Answer' });
     const voteResponsePromise = client.page.waitForResponse(
         (response) => response.url().includes('/vote') && response.request().method() === 'POST',
         { timeout: SUBMIT_TIMEOUT_MS }
     );
 
     await client.page.getByText(client.optionText, { exact: true }).click();
-    await client.page.getByRole('button', { name: 'Submit Answer' }).click();
+    await expect(submitButton, `submit should enable after selecting ${client.optionText}`).toBeEnabled({ timeout: SUBMIT_TIMEOUT_MS });
+    await submitButton.click();
 
     const voteResponse = await voteResponsePromise;
     expect(voteResponse.ok(), `vote response for ${client.name} should be ok`).toBeTruthy();

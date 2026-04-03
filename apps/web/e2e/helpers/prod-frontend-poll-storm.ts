@@ -57,6 +57,17 @@ function buildPollOptions(optionCount: number): PollOption[] {
     return Array.from({ length: optionCount }, (_, index) => buildPollOption(index));
 }
 
+function shufflePollOptions(options: PollOption[]): PollOption[] {
+    const shuffled = [...options];
+
+    for (let index = shuffled.length - 1; index > 0; index -= 1) {
+        const swapIndex = Math.floor(Math.random() * (index + 1));
+        [shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]];
+    }
+
+    return shuffled;
+}
+
 function buildPollSlideBody(optionCount: number) {
     return {
         type: 'poll',
@@ -187,7 +198,7 @@ export async function createPollStormSetup(
             shareToken: session.shareToken,
             staffToken,
             slideId: slide.id,
-            options: buildPollOptions(optionCount),
+            options: shufflePollOptions(buildPollOptions(optionCount)),
             staffEmail,
         };
     } finally {
