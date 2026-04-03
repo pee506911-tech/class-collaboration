@@ -144,35 +144,13 @@ DEALLOCATE PREPARE stmt_shard_sdr;
 -- ============================================================
 -- 7) Add PRE_SPLIT_REGIONS to votes table (TiDB-only)
 -- ============================================================
-SET @tbl_votes_exists = (
-    SELECT COUNT(*)
-    FROM information_schema.tables
-    WHERE table_schema = DATABASE()
-      AND table_name = 'votes'
-);
-SET @sql_split_votes = IF(
-    @is_tidb AND @tbl_votes_exists > 0,
-    'ALTER TABLE votes PRE_SPLIT_REGIONS = 4',
-    'SELECT \"Skipping votes PRE_SPLIT_REGIONS (not TiDB or missing)\"'
-);
-PREPARE stmt_split_votes FROM @sql_split_votes;
-EXECUTE stmt_split_votes;
-DEALLOCATE PREPARE stmt_split_votes;
+-- NOTE: TiDB supports PRE_SPLIT_REGIONS on CREATE TABLE, but ALTER TABLE variants
+-- are not reliably supported across versions and can fail with:
+--   8200 (HY000): This type of ALTER TABLE is currently unsupported
+-- So we intentionally no-op this step.
+SELECT "Skipping votes PRE_SPLIT_REGIONS (avoid TiDB unsupported ALTER TABLE)";
 
 -- ============================================================
 -- 8) Add PRE_SPLIT_REGIONS to participants table (TiDB-only)
 -- ============================================================
-SET @tbl_participants_exists = (
-    SELECT COUNT(*)
-    FROM information_schema.tables
-    WHERE table_schema = DATABASE()
-      AND table_name = 'participants'
-);
-SET @sql_split_part = IF(
-    @is_tidb AND @tbl_participants_exists > 0,
-    'ALTER TABLE participants PRE_SPLIT_REGIONS = 4',
-    'SELECT \"Skipping participants PRE_SPLIT_REGIONS (not TiDB or missing)\"'
-);
-PREPARE stmt_split_part FROM @sql_split_part;
-EXECUTE stmt_split_part;
-DEALLOCATE PREPARE stmt_split_part;
+SELECT "Skipping participants PRE_SPLIT_REGIONS (avoid TiDB unsupported ALTER TABLE)";
