@@ -13,6 +13,7 @@
     "test:auth-burst:100": "node run-auth-burst-test.js --concurrency=100",
     "test:auth-burst:130": "node run-auth-burst-test.js --concurrency=130",
     "test:prod-concurrency": "bash ./test-concurrency-k6.sh",
+    "test:prod-frontend-poll-storm": "bash ./test-frontend-poll-storm.sh",
     "docker:up": "docker-compose -f ../docker-compose.test.yml up -d",
     "docker:down": "docker-compose -f ../docker-compose.test.yml down -v",
     "docker:logs": "docker-compose -f ../docker-compose.test.yml logs -f",

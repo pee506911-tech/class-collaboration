@@ -8,7 +8,8 @@
     "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest"
+    "test": "vitest",
+    "test:prod-frontend-poll-storm": "playwright test e2e/prod-frontend-poll-storm.spec.ts"
   },
   "dependencies": {
     "@hello-pangea/dnd": "^18.0.1",

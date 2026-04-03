@@ -1,8 +1,8 @@
 {
   "scenario": "prod-concurrency",
   "baseUrl": "https://class-collaboration-production.up.railway.app",
-  "exitCode": 107,
+  "exitCode": 0,
   "run": null,
   "cleanup": null,
-  "generatedAt": "2026-04-03T07:53:29.524Z"
+  "generatedAt": "2026-04-03T08:31:26.045Z"
 }

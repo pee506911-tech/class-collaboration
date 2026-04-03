@@ -91,7 +91,7 @@ fi
 if [ -n "$SUMMARY_FILE" ]; then
   summary_dir="$(dirname "$SUMMARY_FILE")"
   mkdir -p "$summary_dir"
-  log_file="$(mktemp "${TMPDIR:-/tmp}/classcolab-k6.XXXXXX.log")"
+  log_file="$(mktemp "${TMPDIR:-/tmp}/classcolab-k6.XXXXXX")"
 
   set +e
   k6 run \

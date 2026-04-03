@@ -153,15 +153,15 @@ function buildVoteOptionId(index) {
 }
 
 function buildStudentParticipantId(index) {
-  return `student-${index}-${randId('pid')}`;
+  return `stu-${index}-${randId('p')}`;
 }
 
 function buildQuestionParticipantId(index) {
-  return `question-${index}-${randId('pid')}`;
+  return `q-${index}-${randId('p')}`;
 }
 
 function buildUpvoteParticipantId(index) {
-  return `upvote-${index}-${randId('pid')}`;
+  return `uv-${index}-${randId('p')}`;
 }
 
 function buildStudentName(index) {
@@ -265,7 +265,9 @@ export function setup() {
   const statsRes = http.get(`${BASE_URL}/api/sessions/${sessionId}/stats?${statsQueryString()}`, authHeaders(staffToken));
   assert(statsRes.status === 200, `initial stats fetch failed (${statsRes.status})`);
   const statsBody = parseJsonResponse(statsRes, 'initial stats');
-  assert(statsBody.success === true, 'initial stats response not successful');
+  assert(Array.isArray(statsBody.participants), 'initial stats response missing participants array');
+  assert(Array.isArray(statsBody.slides), 'initial stats response missing slides array');
+  assert(Array.isArray(statsBody.questions), 'initial stats response missing questions array');
 
   return {
     baseUrl: BASE_URL,
@@ -474,12 +476,16 @@ export default function (data) {
   const finalStatsRes = http.get(`${BASE_URL}/api/sessions/${sessionId}/stats?${statsQueryString()}`, authHeaders(staffToken));
   assert(finalStatsRes.status === 200, `final stats fetch failed (${finalStatsRes.status})`);
   const finalStats = parseJsonResponse(finalStatsRes, 'final stats');
-  assert(finalStats.success === true, 'final stats response not successful');
+  assert(Array.isArray(finalStats.participants), 'final stats response missing participants array');
+  assert(Array.isArray(finalStats.slides), 'final stats response missing slides array');
+  assert(Array.isArray(finalStats.questions), 'final stats response missing questions array');
 
   const publicStatsRes = http.get(`${BASE_URL}/api/sessions/public/${sessionId}/stats?${statsQueryString()}`);
   assert(publicStatsRes.status === 200, `public stats fetch failed (${publicStatsRes.status})`);
   const publicStats = parseJsonResponse(publicStatsRes, 'public stats');
-  assert(publicStats.success === true, 'public stats response not successful');
+  assert(Array.isArray(publicStats.participants), 'public stats response missing participants array');
+  assert(Array.isArray(publicStats.slides), 'public stats response missing slides array');
+  assert(Array.isArray(publicStats.questions), 'public stats response missing questions array');
 
   const myVotesRes = http.get(
     `${BASE_URL}/api/sessions/${sessionId}/my-votes?participantId=${encodeURIComponent(studentParticipants[0])}`
@@ -501,12 +507,12 @@ export default function (data) {
   assert(voteCountTotal === voteSuccessCount, `vote count mismatch (expected=${voteSuccessCount} got=${voteCountTotal})`);
   assert(Array.isArray(finalState.slides) && finalState.slides.length === data.slideIds.length, `slide count mismatch (expected=${data.slideIds.length} got=${finalState.slides?.length})`);
   assert(Array.isArray(finalState.questions) && finalState.questions.length === 1 + questionSuccessCount, `question count mismatch (expected=${1 + questionSuccessCount} got=${finalState.questions?.length})`);
-  assert(Array.isArray(finalStats.data?.participants) && finalStats.data.participants.length === registerSuccessCount, `participant count mismatch (expected=${registerSuccessCount} got=${finalStats.data?.participants?.length})`);
-  assert(Array.isArray(finalStats.data?.slides) && finalStats.data.slides.length === data.slideIds.length, `stats slide count mismatch (expected=${data.slideIds.length} got=${finalStats.data?.slides?.length})`);
-  assert(Array.isArray(finalStats.data?.questions) && finalStats.data.questions.length === 1 + questionSuccessCount, `stats question count mismatch (expected=${1 + questionSuccessCount} got=${finalStats.data?.questions?.length})`);
-  assert(Array.isArray(publicStats.data?.participants) && publicStats.data.participants.length === registerSuccessCount, `public stats participant count mismatch`);
-  assert(Array.isArray(publicStats.data?.slides) && publicStats.data.slides.length === data.slideIds.length, `public stats slide count mismatch`);
-  assert(Array.isArray(publicStats.data?.questions) && publicStats.data.questions.length === 1 + questionSuccessCount, `public stats question count mismatch`);
+  assert(finalStats.participants.length === registerSuccessCount, `participant count mismatch (expected=${registerSuccessCount} got=${finalStats.participants.length})`);
+  assert(finalStats.slides.length === data.slideIds.length, `stats slide count mismatch (expected=${data.slideIds.length} got=${finalStats.slides.length})`);
+  assert(finalStats.questions.length === 1 + questionSuccessCount, `stats question count mismatch (expected=${1 + questionSuccessCount} got=${finalStats.questions.length})`);
+  assert(publicStats.participants.length === registerSuccessCount, `public stats participant count mismatch`);
+  assert(publicStats.slides.length === data.slideIds.length, `public stats slide count mismatch`);
+  assert(publicStats.questions.length === 1 + questionSuccessCount, `public stats question count mismatch`);
 
   const voteOptions = myVotes.data?.votes?.[voteSlideId];
   assert(Array.isArray(voteOptions), 'my-votes response missing vote array');
@@ -526,9 +532,9 @@ export default function (data) {
       upvoteSuccessCount,
       voteSequence: finalState.voteSequence,
       qaSequence: finalState.qaSequence,
-      participants: finalStats.data.participants.length,
-      questions: finalStats.data.questions.length,
-      slides: finalStats.data.slides.length,
+      participants: finalStats.participants.length,
+      questions: finalStats.questions.length,
+      slides: finalStats.slides.length,
     })
   );
 }

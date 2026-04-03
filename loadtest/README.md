@@ -100,6 +100,27 @@ This scenario drives the real backend API over HTTPS with `k6`:
 Set `PERF_TEST_TOKEN` on the backend to enable the cleanup route. If you want to keep
 the temporary session for inspection, add `--skip-cleanup`.
 
+### 3d. Run the Frontend Browser Storm
+
+```bash
+cd loadtest
+
+# Prod backend + local frontend dev server
+PERF_TEST_TOKEN="..." ./test-frontend-poll-storm.sh \
+  --summary-file ./artifacts/prod-frontend-poll-storm-summary.json
+
+# Fully remote run with a deployed frontend URL
+PERF_TEST_TOKEN="..." ./test-frontend-poll-storm.sh \
+  --frontend-url https://your-frontend.example.com \
+  --base-url https://class-collaboration-production.up.railway.app/api \
+  --summary-file ./artifacts/prod-frontend-poll-storm-summary.json
+```
+
+This scenario opens many independent student browser contexts, waits for each one to
+mount its own Ably realtime connection, submits the poll answer from the UI, and then
+verifies the backend state, `my-votes`, and participant registration. Each student gets a
+unique choice so the final vote count should be one per option.
+
 ### 4. Clean Up
 
 ```bash
