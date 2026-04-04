@@ -134,6 +134,16 @@ export async function httpFetch(
   const retryConfig =
     options.retry === false ? null : options.retry ?? (options.idempotent ? DEFAULT_RETRY : null);
 
+  // Automatically add Bearer token from localStorage if not already present
+  const headers = mergeHeaders(options.headers, { "X-Client-Request-Id": requestId });
+  const finalHeaders = new Headers(headers);
+  if (!finalHeaders.has("Authorization")) {
+    const token = getAuthToken();
+    if (token) {
+      finalHeaders.set("Authorization", `Bearer ${token}`);
+    }
+  }
+
   let lastError: HttpRequestError | null = null;
 
   for (let attempt = 0; attempt <= (retryConfig?.maxRetries ?? 0); attempt++) {
@@ -157,8 +167,7 @@ export async function httpFetch(
         controller.abort();
       }, timeoutMs);
 
-      const headers = mergeHeaders(options.headers, { "X-Client-Request-Id": requestId });
-      const response = await fetch(url, { ...options, headers, signal: controller.signal });
+      const response = await fetch(url, { ...options, headers: finalHeaders, signal: controller.signal });
 
       if (!response.ok) {
         const retriable = isRetryableStatus(response.status);

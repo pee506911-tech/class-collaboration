@@ -5,7 +5,7 @@ export const runtime = 'edge';
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Slide, Session } from 'shared';
-import { getSlides, createSlide, deleteSlide, reorderSlides, getSession, updateSession, updateSlideVisibility, goLiveSession, stopSession } from '@/lib/api';
+import { getSlides, createSlide, deleteSlide, reorderSlides, getSession, updateSession, updateSlideVisibility, goLiveSession, stopSession, ApiRequestError } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Plus, Layout, BarChart2, HelpCircle, Play, X, CheckSquare, Smartphone, GripVertical, Share2, ArrowLeft, Settings, Edit2, MessageSquare, Users, Eye, EyeOff, Square, Copy, ExternalLink } from 'lucide-react';
 import Link from 'next/link';
@@ -857,6 +857,7 @@ export default function SlideEditor() {
     const [session, setSession] = useState<Session | null>(null);
     const [loading, setLoading] = useState(true);
     const [authChecked, setAuthChecked] = useState(false);
+    const [notFound, setNotFound] = useState(false);
 
     useEffect(() => {
         // Check auth first
@@ -866,7 +867,7 @@ export default function SlideEditor() {
             return;
         }
         setAuthChecked(true);
-        
+
         if (id) {
             loadSlides();
             loadSession();
@@ -879,6 +880,12 @@ export default function SlideEditor() {
             setSession(data);
         } catch (e) {
             console.error(e);
+            if (e instanceof ApiRequestError && e.status === 404) {
+                setNotFound(true);
+                toast.error('Session not found');
+                router.push('/sessions');
+                return;
+            }
             toast.error('Failed to load session details');
         }
     }
@@ -889,6 +896,10 @@ export default function SlideEditor() {
             setSlides(normalizeSlides(data));
         } catch (e) {
             console.error(e);
+            if (e instanceof ApiRequestError && e.status === 404) {
+                setNotFound(true);
+                return;
+            }
             toast.error('Failed to load slides');
         } finally {
             setLoading(false);
@@ -896,6 +907,16 @@ export default function SlideEditor() {
     }
 
     if (!id || !authChecked) return null;
+
+    if (notFound) {
+        return (
+            <div className="h-screen flex items-center justify-center bg-slate-100">
+                <div className="flex flex-col items-center gap-4">
+                    <p className="text-slate-500 font-medium">Redirecting to sessions...</p>
+                </div>
+            </div>
+        );
+    }
 
     if (loading) {
         return (
