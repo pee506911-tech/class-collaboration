@@ -1,7 +1,14 @@
 export function resolvePreviewSlideId(
     slideIds: string[],
     currentPreviewSlideId: string | null,
+    tempIdMap: Record<string, string> = {},
 ): string | null {
+    const resolvedPreviewSlideId = currentPreviewSlideId ? tempIdMap[currentPreviewSlideId] ?? currentPreviewSlideId : null;
+
+    if (resolvedPreviewSlideId && slideIds.includes(resolvedPreviewSlideId)) {
+        return resolvedPreviewSlideId;
+    }
+
     if (currentPreviewSlideId && slideIds.includes(currentPreviewSlideId)) {
         return currentPreviewSlideId;
     }

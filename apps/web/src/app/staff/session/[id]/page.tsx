@@ -127,18 +127,9 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
         setPreviewSlideId((currentPreviewSlideId) => resolvePreviewSlideId(
             slides.map((slide) => slide.id),
             currentPreviewSlideId,
+            queueState.tempIdMap,
         ));
-    }, [slides]);
-
-    useEffect(() => {
-        setPreviewSlideId((currentPreviewSlideId) => {
-            if (!currentPreviewSlideId) {
-                return currentPreviewSlideId;
-            }
-
-            return queueState.tempIdMap[currentPreviewSlideId] ?? currentPreviewSlideId;
-        });
-    }, [queueState.tempIdMap]);
+    }, [queueState.tempIdMap, slides]);
 
     const handleSaveSettings = async () => {
         if (!session) return;

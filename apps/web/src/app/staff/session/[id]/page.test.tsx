@@ -631,6 +631,167 @@ describe('SlideEditor session loading', () => {
         expect(screen.getByText('Preview: Slide 1')).toBeInTheDocument();
     });
 
+    it('keeps preview on the resolved slide when a temp duplicate is confirmed', async () => {
+        mockStorage.set('token', 'valid-token');
+
+        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
+            if (url.includes('/sessions/test-session-id') && !url.includes('/slides')) {
+                return {
+                    response: {
+                        ok: true,
+                        json: async () => ({
+                            success: true,
+                            data: {
+                                id: 'test-session-id',
+                                title: 'Test Session',
+                                status: 'draft',
+                                createdAt: '2024-01-01T00:00:00Z',
+                                allowQuestions: false,
+                                requireName: false,
+                                createdBy: 'user-1',
+                            },
+                        }),
+                    },
+                };
+            }
+
+            if (url.includes('/slides')) {
+                return {
+                    response: {
+                        ok: true,
+                        json: async () => ({
+                            success: true,
+                            data: [
+                                {
+                                    id: 'slide-one',
+                                    sessionId: 'test-session-id',
+                                    type: 'static',
+                                    content: {
+                                        title: 'Slide 1',
+                                        body: 'First',
+                                    },
+                                    orderIndex: 0,
+                                    isHidden: false,
+                                    version: 1,
+                                },
+                                {
+                                    id: 'slide-twenty-three',
+                                    sessionId: 'test-session-id',
+                                    type: 'static',
+                                    content: {
+                                        title: 'Slide 23',
+                                        body: 'Last confirmed slide',
+                                    },
+                                    orderIndex: 1,
+                                    isHidden: false,
+                                    version: 1,
+                                },
+                            ],
+                        }),
+                    },
+                };
+            }
+
+            return { response: { ok: true, json: async () => ({ success: true, data: null }) } };
+        });
+
+        queueMockState.slides = [
+            {
+                id: 'slide-one',
+                sessionId: 'test-session-id',
+                type: 'static',
+                content: {
+                    title: 'Slide 1',
+                    body: 'First',
+                },
+                orderIndex: 0,
+                isHidden: false,
+                version: 1,
+            },
+            {
+                id: 'slide-twenty-three',
+                sessionId: 'test-session-id',
+                type: 'static',
+                content: {
+                    title: 'Slide 23',
+                    body: 'Last confirmed slide',
+                },
+                orderIndex: 1,
+                isHidden: false,
+                version: 1,
+            },
+            {
+                id: 'temp-duplicate',
+                sessionId: 'test-session-id',
+                type: 'static',
+                content: {
+                    title: 'Slide 24 draft',
+                    body: 'Last confirmed slide',
+                },
+                orderIndex: 2,
+                isHidden: false,
+                version: 0,
+                optimistic: {
+                    isPending: true,
+                    isTemp: true,
+                    disableEditing: true,
+                    syncState: 'syncing',
+                },
+            },
+        ];
+
+        const { default: SlideEditor } = await import('./page');
+        const { rerender } = render(<SlideEditor />);
+
+        fireEvent.click(await screen.findByText('Slide 24 draft'));
+        expect(await screen.findByText('Preview: Slide 3')).toBeInTheDocument();
+
+        queueMockState.tempIdMap = { 'temp-duplicate': 'slide-twenty-four' };
+        queueMockState.slides = [
+            {
+                id: 'slide-one',
+                sessionId: 'test-session-id',
+                type: 'static',
+                content: {
+                    title: 'Slide 1',
+                    body: 'First',
+                },
+                orderIndex: 0,
+                isHidden: false,
+                version: 1,
+            },
+            {
+                id: 'slide-twenty-three',
+                sessionId: 'test-session-id',
+                type: 'static',
+                content: {
+                    title: 'Slide 23',
+                    body: 'Last confirmed slide',
+                },
+                orderIndex: 1,
+                isHidden: false,
+                version: 1,
+            },
+            {
+                id: 'slide-twenty-four',
+                sessionId: 'test-session-id',
+                type: 'static',
+                content: {
+                    title: 'Slide 24 draft',
+                    body: 'Last confirmed slide',
+                },
+                orderIndex: 2,
+                isHidden: false,
+                version: 1,
+            },
+        ];
+
+        rerender(<SlideEditor />);
+
+        expect(await screen.findByText('Preview: Slide 3')).toBeInTheDocument();
+        expect(screen.queryByText('Preview: Slide 1')).not.toBeInTheDocument();
+    });
+
     it('keeps a confirmed slide editable while a new temp slide is still syncing', async () => {
         mockStorage.set('token', 'valid-token');
         queueMockState.hasPendingStructuralMutations = true;
