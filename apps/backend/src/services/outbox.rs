@@ -12,6 +12,7 @@ const BATCH_SIZE: usize = 50;
 const CLEANUP_AGE_HOURS: i64 = 24;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[allow(clippy::enum_variant_names)]
 pub enum OutboxEventType {
     StateUpdate,
     VoteUpdate,
@@ -45,6 +46,7 @@ impl std::str::FromStr for OutboxEventType {
 }
 
 #[derive(Debug, sqlx::FromRow)]
+#[allow(dead_code)]
 pub struct OutboxEvent {
     pub id: String,
     pub session_id: String,

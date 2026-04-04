@@ -43,6 +43,7 @@ impl CircuitBreaker {
     }
 
     /// Create a new circuit breaker with millisecond precision (for testing).
+    #[cfg(test)]
     pub fn new_with_millis(failure_threshold: u32, recovery_timeout_ms: u64) -> Self {
         Self {
             failures: AtomicU32::new(0),

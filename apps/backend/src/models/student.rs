@@ -71,6 +71,7 @@ impl Participant {
 
 #[derive(Debug, Serialize, Deserialize, FromRow, Clone)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct Vote {
     pub id: String,
     #[sqlx(rename = "session_id")]
@@ -85,6 +86,7 @@ pub struct Vote {
     pub created_at: Option<DateTime<Utc>>,
 }
 
+#[allow(dead_code)]
 impl Vote {
     pub async fn create(
         pool: &DbPool,

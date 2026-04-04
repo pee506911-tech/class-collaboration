@@ -46,6 +46,7 @@ struct SessionStateHeaderRow {
 }
 
 impl SqlxSessionRepository {
+    #[allow(dead_code)]
     pub fn new(pool: Pool<MySql>) -> Self {
         Self {
             pool: Some(pool),

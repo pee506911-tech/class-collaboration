@@ -94,7 +94,7 @@ describe('Optimistic Vote UI - PollSlide', () => {
 
       let hasSubmitted = false;
       let selectedOption: string | null = null;
-      const previousState = { hasSubmitted: false, selectedOption: null };
+      const previousState: { hasSubmitted: boolean; selectedOption: string | null } = { hasSubmitted: false, selectedOption: null };
 
       // Simulate optimistic update with rollback
       const handleSubmitWithRollback = async () => {

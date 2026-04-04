@@ -261,7 +261,7 @@ impl SessionService {
         for (slide_id, option_id, count) in vote_counts_raw {
             vote_map
                 .entry(slide_id)
-                .or_insert_with(std::collections::HashMap::new)
+                .or_default()
                 .insert(option_id, count as i32);
         }
 
@@ -323,7 +323,7 @@ impl SessionService {
         for (slide_id, option_id, count) in vote_counts_raw {
             vote_counts
                 .entry(slide_id)
-                .or_insert_with(std::collections::HashMap::new)
+                .or_default()
                 .insert(option_id, count as i32);
         }
 
@@ -342,6 +342,7 @@ impl SessionService {
 }
 
 #[derive(Clone)]
+#[allow(clippy::type_complexity)]
 pub struct SessionStateCache {
     ttl: Duration,
     max_entries: usize,

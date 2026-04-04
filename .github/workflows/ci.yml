@@ -140,6 +140,13 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('apps/backend/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      - name: Run database migrations
+        run: |
+          cargo install sqlx-cli --no-default-features --features mysql --locked
+          sqlx migrate run
+        env:
+          DATABASE_URL: mysql://root:root@localhost:3306/test_db
+
       - name: Run integration tests
         env:
           DATABASE_URL: mysql://root:root@localhost:3306/test_db

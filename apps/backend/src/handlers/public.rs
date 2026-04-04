@@ -9,7 +9,7 @@ use sqlx::{MySql, query_as};
 
 use crate::error::Result;
 use crate::models::response::ApiResponse;
-use crate::models::session::{PublicSessionResponse, Session};
+use crate::models::session::Session;
 use crate::services::outbox::{self, OutboxEventType};
 
 /// Standard Cache-Control header for read-only session endpoints

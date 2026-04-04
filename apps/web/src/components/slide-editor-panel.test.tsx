@@ -229,7 +229,7 @@ describe('SlideEditorPanel', () => {
             });
 
             // Dirty should be true
-            const lastCall = onSyncStatusChange.mock.calls.at(-1)[0];
+            const lastCall = onSyncStatusChange.mock.calls.at(-1)![0];
             expect(lastCall.dirty).toBe(true);
         });
 
@@ -260,7 +260,7 @@ describe('SlideEditorPanel', () => {
             // The pump runs synchronously with fake timers after advancing
             // Wait for the error state
             await vi.waitFor(() => {
-                const lastCall = onSyncStatusChange.mock.calls.at(-1)[0];
+                const lastCall = onSyncStatusChange.mock.calls.at(-1)![0];
                 expect(lastCall.lastError).toBe('Network error');
             });
 
@@ -270,7 +270,7 @@ describe('SlideEditorPanel', () => {
             });
 
             // Error should be cleared immediately (updateContent calls setLastErrorState)
-            const lastCall = onSyncStatusChange.mock.calls.at(-1)[0];
+            const lastCall = onSyncStatusChange.mock.calls.at(-1)![0];
             expect(lastCall.lastError).toBe(null);
         });
     });
@@ -411,7 +411,7 @@ describe('SlideEditorPanel', () => {
             });
 
             // Should return to clean
-            const cleanCall = onSyncStatusChange.mock.calls.at(-1)[0];
+            const cleanCall = onSyncStatusChange.mock.calls.at(-1)![0];
             expect(cleanCall.dirty).toBe(false);
             expect(cleanCall.saving).toBe(false);
         });
@@ -456,7 +456,7 @@ describe('SlideEditorPanel', () => {
             expect(screen.getByDisplayValue('Fresh')).toBeTruthy();
 
             // Should be clean (not dirty)
-            const lastCall = onSyncStatusChange.mock.calls.at(-1)[0];
+            const lastCall = onSyncStatusChange.mock.calls.at(-1)![0];
             expect(lastCall.dirty).toBe(false);
         });
     });

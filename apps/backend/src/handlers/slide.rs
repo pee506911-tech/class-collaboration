@@ -1001,7 +1001,6 @@ async fn apply_order_assignments(
     for (slide_id, _) in assignments {
         separated.push_bind(slide_id);
     }
-    drop(separated);
     qb.push(")");
 
     qb.build().execute(&mut **tx).await?;

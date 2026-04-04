@@ -33,8 +33,9 @@ pub struct UpdateSessionRequest {
 /// - Extract user identity
 /// - Call service layer
 /// - Return HTTP responses
+///
 /// NO business logic or database access here!
-
+///
 /// Get all sessions for the authenticated user
 pub async fn get_sessions(
     State(app_state): State<crate::AppState>,

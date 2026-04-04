@@ -6,7 +6,7 @@ import React from "react";
 
 // --- Mock: Ably SDK ---
 vi.mock("ably", () => {
-  const Realtime = vi.fn(function _RealtimeCtor(_opts: unknown) {
+  const Realtime = vi.fn(function _RealtimeCtor(this: any, _opts: unknown) {
     this.connection = {
       state: "connecting" as string,
       on: vi.fn(),
@@ -131,8 +131,33 @@ import { WebSocketProvider, useWebSocket, SendAck } from "./websocket";
 import * as Ably from "ably";
 import { httpFetch } from "@/lib/http";
 
-const mockAbly = Ably.Realtime as ReturnType<typeof vi.fn>;
-const mockHttp = httpFetch as ReturnType<typeof vi.fn>;
+const mockAbly = Ably.Realtime as unknown as ReturnType<typeof vi.fn>;
+const mockHttp = httpFetch as unknown as ReturnType<typeof vi.fn>;
+
+// Helper type matching the WebSocketContextType from websocket.tsx
+interface WSContext {
+  isConnected: boolean;
+  isConnecting: boolean;
+  connectionError: string | null;
+  state: any | null;
+  initialStateError: string | null;
+  voteResults: Record<string, Record<string, number>>;
+  sendMessage: (type: string, payload: any) => Promise<any>;
+  refreshState: () => Promise<any>;
+  updateState: (updates: Partial<any>) => void;
+  lostCount: number;
+  serverTimeOffset: number;
+  slideStartTime: number | null;
+  questions: any[];
+  activeParticipants: number;
+  lastSlideUpdate: number;
+  lastStateSyncAt: number | null;
+  lastRealtimeMessageAt: number | null;
+  socket: any | null;
+  initialStateLoaded: boolean;
+  participantId: string;
+  myVotes: Record<string, string[]>;
+}
 
 // ─── Test Utilities ────────────────────────────────────────────────────────
 
@@ -194,7 +219,8 @@ function triggerAblyMessage(name: string, data: unknown) {
 function ContextCapturer({
   onCapture,
 }: {
-  onCapture: (ctx: ReturnType<typeof useWebSocket>) => void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  onCapture: (ctx: any) => void;
 }) {
   const ctx = useWebSocket();
   React.useEffect(() => { onCapture(ctx); });
@@ -260,7 +286,7 @@ describe("WebSocketProvider - Initial State Fetch", () => {
       requestId: "req-1",
     });
 
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-q" role="staff">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -279,7 +305,7 @@ describe("WebSocketProvider - Initial State Fetch", () => {
       requestId: "req-1",
     });
 
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-v" role="staff">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -297,7 +323,7 @@ describe("WebSocketProvider - Initial State Fetch", () => {
       requestId: "req-1",
     });
 
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-err" role="staff">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -350,7 +376,7 @@ describe("WebSocketProvider - Connection State via Context", () => {
   });
 
   it("starts with isConnecting=true and isConnected=false", () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-state" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -418,7 +444,7 @@ describe("WebSocketProvider - Connection State via Context", () => {
   });
 
   it("sets isConnected=true, isConnecting=false on connected event", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-state2" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -438,7 +464,7 @@ describe("WebSocketProvider - Connection State via Context", () => {
   });
 
   it("sets isConnected=false on disconnected event", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-state3" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -458,7 +484,7 @@ describe("WebSocketProvider - Connection State via Context", () => {
   });
 
   it("sets connectionError on failed event", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-state4" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -624,7 +650,7 @@ describe("WebSocketProvider - Message Handling via Ably", () => {
   });
 
   it("STATE_UPDATE applies payload to context state", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-msg1" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -644,7 +670,7 @@ describe("WebSocketProvider - Message Handling via Ably", () => {
   });
 
   it("STATE_UPDATE updates questions when present", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-msg2" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -664,7 +690,7 @@ describe("WebSocketProvider - Message Handling via Ably", () => {
   });
 
   it("STATE_UPDATE updates voteCounts when present", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-msg3" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -684,7 +710,7 @@ describe("WebSocketProvider - Message Handling via Ably", () => {
   });
 
   it("VOTE_UPDATE merges results for the given slideId", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-vote1" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -704,7 +730,7 @@ describe("WebSocketProvider - Message Handling via Ably", () => {
   });
 
   it("QA_UPDATE replaces questions list (nested payload format)", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-qa1" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -725,7 +751,7 @@ describe("WebSocketProvider - Message Handling via Ably", () => {
   });
 
   it("QA_UPDATE handles direct questions format (not nested)", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-qa2" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -746,7 +772,7 @@ describe("WebSocketProvider - Message Handling via Ably", () => {
   });
 
   it("PARTICIPANT_COUNT_UPDATE sets active participants", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-part" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -763,7 +789,7 @@ describe("WebSocketProvider - Message Handling via Ably", () => {
   });
 
   it("SLIDES_UPDATE updates lastSlideUpdate timestamp", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-slides" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -781,7 +807,7 @@ describe("WebSocketProvider - Message Handling via Ably", () => {
   });
 
   it("unknown message type is silently ignored", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-unknown" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -826,7 +852,7 @@ describe("WebSocketProvider - Sequence Number Deduplication", () => {
   });
 
   it("VOTE_UPDATE with stale sequence is ignored", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-seq1" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -846,7 +872,7 @@ describe("WebSocketProvider - Sequence Number Deduplication", () => {
   });
 
   it("VOTE_UPDATE with newer sequence is applied", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-seq2" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -867,7 +893,7 @@ describe("WebSocketProvider - Sequence Number Deduplication", () => {
   });
 
   it("QA_UPDATE with stale sequence is ignored", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-seq3" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -886,7 +912,7 @@ describe("WebSocketProvider - Sequence Number Deduplication", () => {
   });
 
   it("STATE_UPDATE without stateVersion always applies", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-seq4" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -924,7 +950,7 @@ describe("WebSocketProvider - sendMessage", () => {
   });
 
   it("SUBMIT_VOTE → POST /sessions/:id/vote with participantId", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-send1" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -946,14 +972,14 @@ describe("WebSocketProvider - sendMessage", () => {
         (c[1] as any)?.method === "POST"
     );
     expect(voteCall).toBeDefined();
-    const body = JSON.parse(voteCall[1].body);
+    const body = JSON.parse(voteCall![1].body);
     expect(body.participantId).toBe("test-participant-abc");
     expect(body.slideId).toBe("slide-1");
     expect(body.optionId).toBe("opt-1");
   });
 
   it("SUBMIT_QUESTION → POST /sessions/:id/questions", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-send2" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -974,7 +1000,7 @@ describe("WebSocketProvider - sendMessage", () => {
   });
 
   it("UPVOTE_QUESTION → POST /sessions/:id/questions/:id/upvote", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-send3" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -990,11 +1016,11 @@ describe("WebSocketProvider - sendMessage", () => {
       (c: unknown[]) => (c[0] as string).includes("/questions/q-42/upvote")
     );
     expect(upCall).toBeDefined();
-    expect(JSON.parse(upCall[1].body).participantId).toBe("test-participant-abc");
+    expect(JSON.parse(upCall![1].body).participantId).toBe("test-participant-abc");
   });
 
   it("SET_SLIDE → PUT /sessions/:id/current-slide", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-send4" role="staff">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -1010,11 +1036,11 @@ describe("WebSocketProvider - sendMessage", () => {
       (c: unknown[]) => (c[0] as string).includes("/current-slide")
     );
     expect(slideCall).toBeDefined();
-    expect(slideCall[1]?.method).toBe("PUT");
+    expect(slideCall![1]?.method).toBe("PUT");
   });
 
   it("unknown type returns { ok: false }", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-send5" role="staff">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -1030,7 +1056,7 @@ describe("WebSocketProvider - sendMessage", () => {
   });
 
   it("HTTP error in sendMessage returns error ack", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-send6" role="student">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -1070,7 +1096,7 @@ describe("WebSocketProvider - refreshState", () => {
   });
 
   it("fetches state and returns { ok: true }", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-refresh1" role="staff">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -1085,7 +1111,7 @@ describe("WebSocketProvider - refreshState", () => {
   });
 
   it("returns { ok: false } on HTTP failure", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-refresh2" role="staff">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -1187,7 +1213,7 @@ describe("WebSocketProvider - Error Handling", () => {
       requestId: "req-1",
     });
 
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-err500" role="staff">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -1202,7 +1228,7 @@ describe("WebSocketProvider - Error Handling", () => {
   it("initial state fetch network error sets initialStateError", async () => {
     mockHttp.mockRejectedValue(new Error("NetworkError: fetch failed"));
 
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-neterr" role="staff">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />
@@ -1234,7 +1260,7 @@ describe("WebSocketProvider - updateState", () => {
   });
 
   it("merges partial updates into existing state", async () => {
-    let ctx: ReturnType<typeof useWebSocket> | null = null;
+    let ctx: any = null;
     render(
       <WebSocketProvider sessionId="sess-update" role="staff">
         <ContextCapturer onCapture={(c) => { ctx = c; }} />

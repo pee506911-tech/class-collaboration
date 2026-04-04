@@ -88,6 +88,7 @@ pub struct Question {
 }
 
 #[derive(Debug, FromRow)]
+#[allow(dead_code)]
 struct DbQuestion {
     id: String,
     content: String,
@@ -233,7 +234,7 @@ pub async fn get_session_stats(
     for vc in vote_counts {
         vote_map
             .entry(vc.slide_id)
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(vc.option_id, vc.count as i32);
     }
 
@@ -242,7 +243,7 @@ pub async fn get_session_stats(
     for vi in vote_interactions {
         interaction_map
             .entry(vi.slide_id.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(SlideInteraction {
                 name: vi.participant_name,
                 answer: vi.option_id,
@@ -421,7 +422,7 @@ pub async fn get_public_session_stats(
     for vc in vote_counts {
         vote_map
             .entry(vc.slide_id)
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(vc.option_id, vc.count as i32);
     }
 
@@ -430,7 +431,7 @@ pub async fn get_public_session_stats(
     for vi in vote_interactions {
         interaction_map
             .entry(vi.slide_id.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(SlideInteraction {
                 name: vi.participant_name,
                 answer: vi.option_id,

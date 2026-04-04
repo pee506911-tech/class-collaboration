@@ -127,7 +127,6 @@ async fn get_votes_for_participant_by_slide_ids(
         for slide_id in slide_id_chunk {
             separated.push_bind(slide_id);
         }
-        drop(separated);
         qb.push(")");
 
         let chunk_votes = qb

@@ -32,7 +32,7 @@ describe('useVoteSubmission', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     // Mock storage functions
-    vi.spyOn(storage, 'safeLocalStorageSet').mockImplementation(() => {});
+    vi.spyOn(storage, 'safeLocalStorageSet').mockImplementation(() => true);
     vi.spyOn(storage, 'safeLocalStorageGet').mockImplementation(() => null);
   });
 
