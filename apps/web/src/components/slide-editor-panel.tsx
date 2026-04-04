@@ -1,4 +1,4 @@
-import type { Slide } from 'shared';
+import type { Slide, StaticSlideContent, PollSlideContent, QuizSlideContent, MultipleChoiceSlideContent } from 'shared';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Plus, GripVertical, Trash2, Type, List, Trophy, CheckCircle2, AlertCircle, LoaderCircle } from 'lucide-react';
@@ -420,8 +420,8 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
                     <TabsContent value="content" className="space-y-6 mt-0">
                         {slide.type === 'static' && (
                             <StaticSlideEditor
-                                content={localContent}
-                                onChange={handleContentEditorChange}
+                                content={localContent as StaticSlideContent}
+                                onChange={(next) => handleContentEditorChange(next)}
                                 onBlur={() => { void flushSave(undefined, { mode: 'auto' }); }}
                                 disabled={disabled}
                             />
@@ -429,24 +429,24 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
 
                         {slide.type === 'poll' && (
                             <PollSlideEditor
-                                content={localContent}
-                                onChange={handleContentEditorChange}
+                                content={localContent as PollSlideContent}
+                                onChange={(next) => handleContentEditorChange(next as SlideContentDraft)}
                                 disabled={disabled}
                             />
                         )}
 
                         {slide.type === 'quiz' && (
                             <QuizSlideEditor
-                                content={localContent}
-                                onChange={handleContentEditorChange}
+                                content={localContent as QuizSlideContent}
+                                onChange={(next) => handleContentEditorChange(next as SlideContentDraft)}
                                 disabled={disabled}
                             />
                         )}
 
                         {slide.type === 'multiple-choice' && (
                             <MultipleChoiceSlideEditor
-                                content={localContent}
-                                onChange={handleContentEditorChange}
+                                content={localContent as MultipleChoiceSlideContent}
+                                onChange={(next) => handleContentEditorChange(next as SlideContentDraft)}
                                 disabled={disabled}
                             />
                         )}
