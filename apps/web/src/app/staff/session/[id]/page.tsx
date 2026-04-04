@@ -315,7 +315,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
     const currentSlide = slides[currentSlideIndex];
 
     async function onDragEnd(result: DropResult) {
-        if (hasPendingStructuralMutations) {
+        if (isStructuralSyncing) {
             return;
         }
 
@@ -346,7 +346,8 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
         }
     }
 
-    const isShareEnabled = !(editorSync.dirty || editorSync.saving || hasPendingStructuralMutations || isReordering || isTogglingVisibility || isSavingSettings);
+    const isStructuralSyncing = hasPendingStructuralMutations || isReordering;
+    const isShareEnabled = !(editorSync.dirty || editorSync.saving || isStructuralSyncing || isTogglingVisibility || isSavingSettings);
 
     return (
         <div className="h-screen bg-slate-50 flex overflow-hidden font-sans text-slate-900">
@@ -400,7 +401,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                 ref={provided.innerRef}
                             >
                                 {slides.map((slide, index) => (
-                                    <Draggable key={slide.id} draggableId={slide.id} index={index} isDragDisabled={hasPendingStructuralMutations}>
+                                    <Draggable key={slide.id} draggableId={slide.id} index={index} isDragDisabled={isStructuralSyncing}>
                                         {(provided, snapshot) => (
                                             <div
                                                 ref={provided.innerRef}
@@ -484,14 +485,10 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                     </Draggable>
                                 ))}
                                 {provided.placeholder}
-                                {hasPendingStructuralMutations && (
-                                    <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-[11px] text-blue-700">
-                                        We&apos;re saving your slide changes. You can rearrange slides again in a moment.
-                                    </div>
-                                )}
                                 <Button
                                     variant="outline"
                                     onClick={() => setShowTypeSelector(true)}
+                                    disabled={isStructuralSyncing}
                                     className="w-full h-12 border-dashed border-slate-300 text-slate-500 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50"
                                 >
                                     <Plus className="w-4 h-4 mr-2" /> Add New Slide
@@ -640,7 +637,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                     size="icon"
                                     className="h-8 w-8 text-slate-400 hover:text-blue-600"
                                     onClick={() => handleDuplicateSlide(previewSlide.id)}
-                                    disabled={previewSlide.optimistic?.isPending}
+                                    disabled={previewSlide.optimistic?.isPending || isStructuralSyncing}
                                     title="Duplicate Slide"
                                 >
                                     <span className="sr-only">Duplicate</span>
@@ -651,7 +648,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                     size="icon"
                                     className="h-8 w-8 text-slate-400 hover:text-red-600 hover:bg-red-50"
                                     onClick={() => handleDeleteSlide(previewSlide.id)}
-                                    disabled={previewSlide.optimistic?.isPending}
+                                    disabled={previewSlide.optimistic?.isPending || isStructuralSyncing}
                                     title="Delete Slide"
                                 >
                                     <span className="sr-only">Delete</span>
@@ -666,7 +663,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                 onUpdate={(content) => handleUpdateSlide(previewSlide.id, content)}
                                 onSave={() => toast.success('Changes saved')}
                                 onSyncStatusChange={setEditorSync}
-                                disabled={previewSlide.optimistic?.disableEditing || isReordering || hasPendingStructuralMutations}
+                                disabled={previewSlide.optimistic?.disableEditing || isStructuralSyncing}
                                 disabledReason={
                                     isReordering
                                         ? 'This slide is temporarily locked while the new order is being saved.'

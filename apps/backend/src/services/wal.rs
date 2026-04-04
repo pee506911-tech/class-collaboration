@@ -10,6 +10,7 @@ use sqlx::mysql::MySqlQueryResult;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{MySql, Pool, Row, Sqlite, Transaction};
 use tokio::sync::watch;
+use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
 use crate::error::{AppError, Result};
@@ -380,6 +381,43 @@ impl WalStore {
         Ok(count)
     }
 
+    pub async fn fetch_latest_pending_response<T: DeserializeOwned>(
+        &self,
+        session_id: &str,
+        resource_id: &str,
+        op_type: WalOpType,
+    ) -> Result<Option<T>> {
+        let row = sqlx::query(
+            "SELECT response_payload
+             FROM wal_entries
+             WHERE flushed = 0
+               AND flush_error IS NULL
+               AND session_id = ?
+               AND resource_id = ?
+               AND op_type = ?
+             ORDER BY wal_id DESC
+             LIMIT 1",
+        )
+        .bind(session_id)
+        .bind(resource_id)
+        .bind(op_type.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let response_payload: String = row.try_get("response_payload")?;
+        serde_json::from_str(&response_payload)
+            .map(Some)
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "Failed to decode latest pending WAL response payload: {error}"
+                ))
+            })
+    }
+
     pub async fn mark_flushed(&self, wal_id: i64) -> Result<()> {
         sqlx::query(
             "UPDATE wal_entries
@@ -516,6 +554,8 @@ pub async fn run_wal_worker(
     tracing::info!("WAL worker started");
     let mut flush_interval = tokio::time::interval(Duration::from_millis(FLUSH_INTERVAL_MS));
     let mut cleanup_interval = tokio::time::interval(Duration::from_secs(60));
+    flush_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    cleanup_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
@@ -1244,5 +1284,46 @@ mod tests {
         let pending = store.fetch_pending(10).await.expect("pending");
         let ordered_ids: Vec<_> = pending.into_iter().map(|entry| entry.client_request_id).collect();
         assert_eq!(ordered_ids, vec!["req-2", "req-3", "req-1"]);
+    }
+
+    #[tokio::test]
+    async fn fetch_latest_pending_response_returns_newest_match() {
+        let store = WalStore::open_test().await.expect("wal store");
+
+        for version in [1_i64, 2_i64] {
+            store
+                .append_or_get_existing(AppendWalEntry {
+                    op_type: WalOpType::UpdateSlide,
+                    session_id: "session-1".to_string(),
+                    client_request_id: format!("req-{version}"),
+                    resource_id: Some("slide-1".to_string()),
+                    payload: serde_json::json!({ "baseVersion": version - 1 }),
+                    response_payload: serde_json::json!({
+                        "id": "slide-1",
+                        "sessionId": "session-1",
+                        "type": "static",
+                        "content": { "title": format!("v{version}") },
+                        "orderIndex": 0,
+                        "isHidden": false,
+                        "version": version
+                    }),
+                    priority: 1,
+                })
+                .await
+                .expect("append");
+        }
+
+        let latest = store
+            .fetch_latest_pending_response::<serde_json::Value>(
+                "session-1",
+                "slide-1",
+                WalOpType::UpdateSlide,
+            )
+            .await
+            .expect("latest pending response")
+            .expect("pending response should exist");
+
+        assert_eq!(latest["version"], 2);
+        assert_eq!(latest["content"]["title"], "v2");
     }
 }

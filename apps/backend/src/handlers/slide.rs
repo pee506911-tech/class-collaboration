@@ -497,14 +497,26 @@ pub async fn update_slide(
         return crate::services::wal::queued_success_response(&existing);
     }
 
-    let existing_slide: Slide = query_as::<_, Slide>(
-        "SELECT id, session_id, type, content, order_index, is_hidden, version FROM slides WHERE id = ? AND session_id = ?",
-    )
-    .bind(&slide_id)
-    .bind(&session_id)
-    .fetch_optional(&pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Slide not found".to_string()))?;
+    let existing_slide = if let Some(pending_slide) = app_state
+        .wal_store
+        .fetch_latest_pending_response::<Slide>(
+            &session_id,
+            &slide_id,
+            crate::services::wal::WalOpType::UpdateSlide,
+        )
+        .await?
+    {
+        pending_slide
+    } else {
+        query_as::<_, Slide>(
+            "SELECT id, session_id, type, content, order_index, is_hidden, version FROM slides WHERE id = ? AND session_id = ?",
+        )
+        .bind(&slide_id)
+        .bind(&session_id)
+        .fetch_optional(&pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Slide not found".to_string()))?
+    };
 
     if let Some(base_version) = payload.base_version {
         if base_version != existing_slide.version {

@@ -2,13 +2,14 @@ use serde::{Deserialize, Serialize};
 use sqlx::{MySql, Pool};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::time::MissedTickBehavior;
 use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::ws::registry::Broadcaster;
 
 const MAX_RETRIES: u32 = 5;
-const POLL_INTERVAL_MS: u64 = 500;
+const POLL_INTERVAL_MS: u64 = 100;
 const BATCH_SIZE: usize = 50;
 const CLEANUP_AGE_HOURS: i64 = 24;
 
@@ -214,14 +215,26 @@ pub async fn run_outbox_worker(
     tracing::info!("Outbox worker started");
     let mut poll_interval = tokio::time::interval(Duration::from_millis(POLL_INTERVAL_MS));
     let mut cleanup_interval = tokio::time::interval(Duration::from_secs(60));
+    poll_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    cleanup_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
         tokio::select! {
             _ = poll_interval.tick() => {
+                let started_at = std::time::Instant::now();
                 match process_pending_batch(&pool, broadcaster.as_ref()).await {
-                    Ok(0) => {} // No pending events
+                    Ok(0) => {
+                        tracing::trace!(
+                            latency_ms = started_at.elapsed().as_millis(),
+                            "Outbox worker poll found no pending events"
+                        );
+                    }
                     Ok(count) => {
-                        tracing::info!(count, "Outbox worker processed events");
+                        tracing::info!(
+                            count,
+                            latency_ms = started_at.elapsed().as_millis(),
+                            "Outbox worker processed events"
+                        );
                     }
                     Err(e) => {
                         tracing::error!("Outbox worker error processing batch: {}", e);
@@ -347,7 +360,7 @@ mod tests {
     #[test]
     fn constants_have_expected_values() {
         assert_eq!(MAX_RETRIES, 5);
-        assert_eq!(POLL_INTERVAL_MS, 500);
+        assert_eq!(POLL_INTERVAL_MS, 100);
         assert_eq!(BATCH_SIZE, 50);
         assert_eq!(CLEANUP_AGE_HOURS, 24);
     }
