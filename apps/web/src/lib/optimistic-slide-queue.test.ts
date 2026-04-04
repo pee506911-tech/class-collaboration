@@ -127,7 +127,8 @@ describe('optimistic slide queue', () => {
             sessionId: 'session-1',
             targetId: 'A',
             clientRequestId: 'req-1',
-            previewSlideId: 'A',
+            restorePreviewSlideId: 'A',
+            fallbackPreviewSlideId: 'B',
             deletedSlide: baseSlides[0],
         });
 

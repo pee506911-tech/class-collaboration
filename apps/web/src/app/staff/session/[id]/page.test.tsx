@@ -1,7 +1,24 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { httpFetch } from '@/lib/http';
 import { ApiRequestError } from '@/lib/api';
+
+const dndState = vi.hoisted(() => ({
+    dragEndHandlers: [] as Array<(result: any) => void | Promise<void>>,
+}));
+
+const apiMockState = vi.hoisted(() => ({
+    reorderSlides: vi.fn(),
+}));
+
+const queueMockState = vi.hoisted(() => ({
+    onDeleteRollback: null as null | ((rollback: {
+        restorePreviewSlideId: string | null;
+        fallbackPreviewSlideId: string | null;
+    }) => void),
+    slides: null as null | any[],
+    tempIdMap: {} as Record<string, string>,
+}));
 
 // Mock next/navigation
 const mockPush = vi.fn();
@@ -12,11 +29,36 @@ const mockEnqueueDeleteSlide = vi.fn(() => ({ accepted: false }));
 const mockClearInlineError = vi.fn();
 const mockClearSessionInlineError = vi.fn();
 const mockResolveOptimisticId = vi.fn((id: string | null) => id);
-const mockQueueState = { tempIdMap: {} };
-
 vi.mock('next/navigation', () => ({
     useParams: () => ({ id: 'test-session-id' }),
     useRouter: () => ({ push: mockPush }),
+}));
+
+vi.mock('@hello-pangea/dnd', () => ({
+    DragDropContext: ({ children, onDragEnd }: { children: React.ReactNode; onDragEnd: (result: any) => void | Promise<void> }) => {
+        dndState.dragEndHandlers.push(onDragEnd);
+        return children;
+    },
+    Droppable: ({ children }: { children: (provided: any) => React.ReactNode }) => children({
+        innerRef: vi.fn(),
+        droppableProps: {},
+        placeholder: null,
+    }),
+    Draggable: ({ children }: { children: (provided: any, snapshot: any) => React.ReactNode }) => children({
+        innerRef: vi.fn(),
+        draggableProps: {
+            style: {},
+            onTransitionEnd: undefined,
+            'data-rfd-draggable-context-id': 'test-context',
+            'data-rfd-draggable-id': 'test-draggable',
+        },
+        dragHandleProps: {
+            tabIndex: 0,
+            role: 'button',
+            draggable: false,
+            'aria-describedby': 'drag-handle',
+        },
+    }, { isDragging: false }),
 }));
 
 // Mock toast
@@ -28,6 +70,14 @@ const mockToast = {
 vi.mock('sonner', () => ({
     toast: mockToast,
 }));
+
+vi.mock('@/lib/api', async () => {
+    const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api');
+    return {
+        ...actual,
+        reorderSlides: apiMockState.reorderSlides,
+    };
+});
 
 // Mock localStorage
 const mockStorage = new Map<string, string>();
@@ -47,6 +97,11 @@ Object.defineProperty(global, 'localStorage', {
 
 Object.defineProperty(window, 'localStorage', {
     value: mockLocalStorage,
+    writable: true,
+});
+
+Object.defineProperty(window, 'confirm', {
+    value: vi.fn(() => true),
     writable: true,
 });
 
@@ -72,22 +127,29 @@ vi.mock('@/lib/websocket', () => ({
 }));
 
 vi.mock('@/lib/use-optimistic-slide-queue', () => ({
-    useOptimisticSlideQueue: ({ baseSlides, refreshBaseSlides }: {
+    useOptimisticSlideQueue: ({ baseSlides, refreshBaseSlides, onDeleteRollback }: {
         baseSlides: any[];
         refreshBaseSlides: () => Promise<void>;
-    }) => ({
-        slides: baseSlides,
-        queueState: mockQueueState,
-        enqueueCreateSlide: mockEnqueueCreateSlide,
-        enqueueDuplicateSlide: mockEnqueueDuplicateSlide,
-        enqueueDeleteSlide: mockEnqueueDeleteSlide,
-        clearInlineError: mockClearInlineError,
-        clearSessionInlineError: mockClearSessionInlineError,
-        resolveOptimisticId: mockResolveOptimisticId,
-        requestRefreshAfterDrain: refreshBaseSlides,
-        hasPendingStructuralMutations: false,
-        sessionInlineError: null,
-    }),
+        onDeleteRollback?: (rollback: {
+            restorePreviewSlideId: string | null;
+            fallbackPreviewSlideId: string | null;
+        }) => void;
+    }) => {
+        queueMockState.onDeleteRollback = onDeleteRollback ?? null;
+        return {
+            slides: queueMockState.slides ?? baseSlides,
+            queueState: { tempIdMap: queueMockState.tempIdMap },
+            enqueueCreateSlide: mockEnqueueCreateSlide,
+            enqueueDuplicateSlide: mockEnqueueDuplicateSlide,
+            enqueueDeleteSlide: mockEnqueueDeleteSlide,
+            clearInlineError: mockClearInlineError,
+            clearSessionInlineError: mockClearSessionInlineError,
+            resolveOptimisticId: mockResolveOptimisticId,
+            requestRefreshAfterDrain: refreshBaseSlides,
+            hasPendingStructuralMutations: false,
+            sessionInlineError: null,
+        };
+    },
 }));
 
 vi.mock('@/lib/slide-update', () => ({
@@ -107,8 +169,15 @@ describe('SlideEditor session loading', () => {
         mockClearInlineError.mockReset();
         mockClearSessionInlineError.mockReset();
         mockResolveOptimisticId.mockClear();
+        apiMockState.reorderSlides.mockReset();
+        dndState.dragEndHandlers = [];
+        queueMockState.onDeleteRollback = null;
+        queueMockState.slides = null;
+        queueMockState.tempIdMap = {};
         mockSaveSlideUpdate.mockResolvedValue({ status: 'saved' });
+        apiMockState.reorderSlides.mockResolvedValue(undefined);
         vi.mocked(httpFetch).mockReset();
+        vi.mocked(window.confirm).mockClear();
     });
 
     it('redirects to dashboard when session returns 404', async () => {
@@ -324,5 +393,239 @@ describe('SlideEditor session loading', () => {
         });
 
         expect(await screen.findByDisplayValue('Agenda')).toBeInTheDocument();
+    });
+
+    it('keeps a newer preview selection when delete rollback arrives late', async () => {
+        mockStorage.set('token', 'valid-token');
+        mockEnqueueDeleteSlide.mockReturnValueOnce({ accepted: true });
+
+        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
+            if (url.includes('/sessions/test-session-id') && !url.includes('/slides')) {
+                return {
+                    response: {
+                        ok: true,
+                        json: async () => ({
+                            success: true,
+                            data: {
+                                id: 'test-session-id',
+                                title: 'Test Session',
+                                status: 'draft',
+                                createdAt: '2024-01-01T00:00:00Z',
+                                allowQuestions: false,
+                                requireName: false,
+                                createdBy: 'user-1',
+                            },
+                        }),
+                    },
+                };
+            }
+
+            if (url.includes('/slides')) {
+                return {
+                    response: {
+                        ok: true,
+                        json: async () => ({
+                            success: true,
+                            data: [
+                                {
+                                    id: 'slide-poll',
+                                    sessionId: 'test-session-id',
+                                    type: 'poll',
+                                    content: {
+                                        question: 'Favorite color?',
+                                        options: [
+                                            { id: 'opt-1', text: 'Red' },
+                                            { id: 'opt-2', text: 'Blue' },
+                                        ],
+                                        chartType: 'bar',
+                                        limitSubmissions: true,
+                                    },
+                                    orderIndex: 0,
+                                    isHidden: false,
+                                    version: 1,
+                                },
+                                {
+                                    id: 'slide-agenda',
+                                    sessionId: 'test-session-id',
+                                    type: 'static',
+                                    content: {
+                                        title: 'Agenda',
+                                        body: 'Second slide',
+                                    },
+                                    orderIndex: 1,
+                                    isHidden: false,
+                                    version: 1,
+                                },
+                                {
+                                    id: 'slide-wrap',
+                                    sessionId: 'test-session-id',
+                                    type: 'static',
+                                    content: {
+                                        title: 'Wrap up',
+                                        body: 'Third slide',
+                                    },
+                                    orderIndex: 2,
+                                    isHidden: false,
+                                    version: 1,
+                                },
+                            ],
+                        }),
+                    },
+                };
+            }
+
+            return { response: { ok: true, json: async () => ({ success: true, data: null }) } };
+        });
+
+        const { default: SlideEditor } = await import('./page');
+        render(<SlideEditor />);
+
+        await screen.findByDisplayValue('Red');
+
+        fireEvent.click(screen.getByRole('button', { name: /delete/i }));
+        expect(await screen.findByDisplayValue('Agenda')).toBeInTheDocument();
+
+        fireEvent.click(screen.getAllByText('Wrap up')[0]);
+        expect(await screen.findByDisplayValue('Wrap up')).toBeInTheDocument();
+
+        act(() => {
+            queueMockState.onDeleteRollback?.({
+                restorePreviewSlideId: 'slide-poll',
+                fallbackPreviewSlideId: 'slide-agenda',
+            });
+        });
+
+        expect(screen.getByDisplayValue('Wrap up')).toBeInTheDocument();
+    });
+
+    it('falls back to an existing slide when the preview temp slide disappears', async () => {
+        mockStorage.set('token', 'valid-token');
+        mockEnqueueDuplicateSlide.mockReturnValueOnce('temp-duplicate');
+
+        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
+            if (url.includes('/sessions/test-session-id') && !url.includes('/slides')) {
+                return {
+                    response: {
+                        ok: true,
+                        json: async () => ({
+                            success: true,
+                            data: {
+                                id: 'test-session-id',
+                                title: 'Test Session',
+                                status: 'draft',
+                                createdAt: '2024-01-01T00:00:00Z',
+                                allowQuestions: false,
+                                requireName: false,
+                                createdBy: 'user-1',
+                            },
+                        }),
+                    },
+                };
+            }
+
+            if (url.includes('/slides')) {
+                return {
+                    response: {
+                        ok: true,
+                        json: async () => ({
+                            success: true,
+                            data: [
+                                {
+                                    id: 'slide-agenda',
+                                    sessionId: 'test-session-id',
+                                    type: 'static',
+                                    content: {
+                                        title: 'Agenda',
+                                        body: 'First slide',
+                                    },
+                                    orderIndex: 0,
+                                    isHidden: false,
+                                    version: 1,
+                                },
+                                {
+                                    id: 'slide-wrap',
+                                    sessionId: 'test-session-id',
+                                    type: 'static',
+                                    content: {
+                                        title: 'Wrap up',
+                                        body: 'Second slide',
+                                    },
+                                    orderIndex: 1,
+                                    isHidden: false,
+                                    version: 1,
+                                },
+                            ],
+                        }),
+                    },
+                };
+            }
+
+            return { response: { ok: true, json: async () => ({ success: true, data: null }) } };
+        });
+
+        const { default: SlideEditor } = await import('./page');
+        const { rerender } = render(<SlideEditor />);
+
+        expect(await screen.findByDisplayValue('Agenda')).toBeInTheDocument();
+
+        queueMockState.slides = [
+            {
+                id: 'slide-agenda',
+                sessionId: 'test-session-id',
+                type: 'static',
+                content: {
+                    title: 'Agenda',
+                    body: 'First slide',
+                },
+                orderIndex: 0,
+                isHidden: false,
+                version: 1,
+            },
+            {
+                id: 'temp-duplicate',
+                sessionId: 'test-session-id',
+                type: 'static',
+                content: {
+                    title: 'Agenda',
+                    body: 'First slide',
+                },
+                orderIndex: 1,
+                isHidden: false,
+                version: 0,
+                optimistic: {
+                    isPending: true,
+                    isTemp: true,
+                    disableEditing: true,
+                    syncState: 'syncing',
+                },
+            },
+            {
+                id: 'slide-wrap',
+                sessionId: 'test-session-id',
+                type: 'static',
+                content: {
+                    title: 'Wrap up',
+                    body: 'Second slide',
+                },
+                orderIndex: 2,
+                isHidden: false,
+                version: 1,
+            },
+        ];
+        rerender(<SlideEditor />);
+
+        fireEvent.click(screen.getByRole('button', { name: /duplicate/i }));
+
+        await waitFor(() => {
+            expect(screen.getByText('Preview: Slide 2')).toBeInTheDocument();
+        });
+
+        queueMockState.slides = null;
+        rerender(<SlideEditor />);
+
+        await waitFor(() => {
+            expect(screen.getByDisplayValue('Agenda')).toBeInTheDocument();
+        });
+        expect(screen.getByText('Preview: Slide 1')).toBeInTheDocument();
     });
 });

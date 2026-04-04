@@ -32,7 +32,10 @@ type UseOptimisticSlideQueueArgs = {
     baseSlides: Slide[];
     setBaseSlides: Dispatch<SetStateAction<Slide[]>>;
     refreshBaseSlides: () => Promise<void>;
-    onDeleteRollback?: (previewSlideId: string | null) => void;
+    onDeleteRollback?: (rollback: {
+        restorePreviewSlideId: string | null;
+        fallbackPreviewSlideId: string | null;
+    }) => void;
 };
 
 type EnqueueCreateArgs = {
@@ -131,7 +134,10 @@ export function useOptimisticSlideQueue({
                     }, retryDelayMs);
                 } else {
                     if (head.type === 'delete' && onDeleteRollback) {
-                        onDeleteRollback(head.rollback.previewSlideId);
+                        onDeleteRollback({
+                            restorePreviewSlideId: head.rollback.restorePreviewSlideId,
+                            fallbackPreviewSlideId: head.rollback.fallbackPreviewSlideId,
+                        });
                     }
                     setState((prev) => failOpPermanently(prev, head.opId, apiError.message));
                 }
@@ -177,7 +183,10 @@ export function useOptimisticSlideQueue({
         return tempId;
     }
 
-    function enqueueDeleteSlide(targetId: string, previewSlideId: string | null): { accepted: boolean } {
+    function enqueueDeleteSlide(
+        targetId: string,
+        rollbackPreview: { restorePreviewSlideId: string | null; fallbackPreviewSlideId: string | null },
+    ): { accepted: boolean } {
         const resolvedTargetId = resolveSlideId(targetId, state.tempIdMap) ?? targetId;
         const deletedSlide = baseSlides.find((slide) => slide.id === resolvedTargetId);
         if (!deletedSlide) {
@@ -193,7 +202,8 @@ export function useOptimisticSlideQueue({
             sessionId,
             targetId: resolvedTargetId,
             clientRequestId: createLocalId('req'),
-            previewSlideId,
+            restorePreviewSlideId: rollbackPreview.restorePreviewSlideId,
+            fallbackPreviewSlideId: rollbackPreview.fallbackPreviewSlideId,
             deletedSlide,
         }));
 

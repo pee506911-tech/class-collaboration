@@ -25,26 +25,9 @@ import { safeLocalStorageGet } from '@/lib/storage';
 import { formatRequestId, mapHttpErrorToUiMessage } from '@/lib/http-error-ui';
 import { saveSlideUpdate, SlideVersionConflictError } from '@/lib/slide-update';
 import { SlideListItem } from '@/components/slide-list-item';
-
-function reindexSlides(slides: Slide[]): Slide[] {
-    return slides.map((slide, index) => ({ ...slide, orderIndex: index }));
-}
-
-function getNextPreviewSlideId(slides: Slide[], deletedSlideId: string, currentPreviewSlideId: string | null): string | null {
-    if (currentPreviewSlideId !== deletedSlideId) {
-        return currentPreviewSlideId;
-    }
-
-    const deletedIndex = slides.findIndex(slide => slide.id === deletedSlideId);
-    const remainingSlides = slides.filter(slide => slide.id !== deletedSlideId);
-
-    if (remainingSlides.length === 0) {
-        return null;
-    }
-
-    const fallbackIndex = Math.min(deletedIndex, remainingSlides.length - 1);
-    return remainingSlides[fallbackIndex]?.id ?? remainingSlides[remainingSlides.length - 1].id;
-}
+import { getSlideEditorLockState } from '@/lib/slide-editor-lock';
+import { reorderSlidesWithRollback } from '@/lib/slide-reorder';
+import { getNextPreviewSlideId, resolveDeleteRollbackPreviewId, resolvePreviewSlideId } from '@/lib/slide-preview-selection';
 
 function getDefaultSlideContent(type: Slide['type']) {
     if (type === 'static') return { title: 'New Slide', body: 'Content here' };
@@ -120,7 +103,13 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
         baseSlides,
         setBaseSlides: setBaseSlidesSynced,
         refreshBaseSlides: loadSlides,
-        onDeleteRollback: setPreviewSlideId,
+        onDeleteRollback: ({ restorePreviewSlideId, fallbackPreviewSlideId }) => {
+            setPreviewSlideId((currentPreviewSlideId) => resolveDeleteRollbackPreviewId({
+                currentPreviewSlideId,
+                restorePreviewSlideId,
+                fallbackPreviewSlideId,
+            }));
+        },
     });
 
     useEffect(() => {
@@ -135,10 +124,11 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
     }, [state?.currentSlideId]);
 
     useEffect(() => {
-        if (!previewSlideId && slides[0]) {
-            setPreviewSlideId(slides[0].id);
-        }
-    }, [previewSlideId, slides]);
+        setPreviewSlideId((currentPreviewSlideId) => resolvePreviewSlideId(
+            slides.map((slide) => slide.id),
+            currentPreviewSlideId,
+        ));
+    }, [slides]);
 
     useEffect(() => {
         setPreviewSlideId((currentPreviewSlideId) => {
@@ -262,8 +252,15 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
         if (!slide || slide.optimistic?.isPending) return;
         if (!confirm('Are you sure you want to delete this slide?')) return;
 
-        const nextPreviewSlideId = getNextPreviewSlideId(slides, slideId, previewSlideId);
-        const result = enqueueDeleteSlide(slideId, previewSlideId);
+        const nextPreviewSlideId = getNextPreviewSlideId(
+            slides.map((entry) => entry.id),
+            slideId,
+            previewSlideId,
+        );
+        const result = enqueueDeleteSlide(slideId, {
+            restorePreviewSlideId: previewSlideId,
+            fallbackPreviewSlideId: nextPreviewSlideId,
+        });
         if (!result.accepted) {
             return;
         }
@@ -327,6 +324,12 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
 
     const currentSlideIndex = slides.findIndex(s => s.id === state?.currentSlideId);
     const currentSlide = slides[currentSlideIndex];
+    const editorLockState = getSlideEditorLockState({
+        hasPendingStructuralMutations,
+        isReordering,
+        disableEditing: previewSlide?.optimistic?.disableEditing,
+        syncState: previewSlide?.optimistic?.syncState,
+    });
 
     async function onDragEnd(result: DropResult) {
         if (isStructuralSyncing) {
@@ -340,21 +343,24 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
 
         if (sourceIndex === destinationIndex) return;
 
-        const previousBaseSlides = baseSlides;
-        const newSlides = Array.from(slides).map(toSlide);
-        const [reorderedItem] = newSlides.splice(sourceIndex, 1);
-        newSlides.splice(destinationIndex, 0, reorderedItem);
-        const reindexedSlides = reindexSlides(newSlides);
-
-        setBaseSlidesSynced(reindexedSlides);
-
         setIsReordering(true);
         try {
-            await reorderSlides(id, reindexedSlides.map(s => s.id));
-            toast.success('Slide order updated');
+            const reorderedSlides = Array.from(slides).map(toSlide);
+            const result = await reorderSlidesWithRollback({
+                slides: reorderedSlides,
+                sourceIndex,
+                destinationIndex,
+                applySlides: setBaseSlidesSynced,
+                saveOrder: (slideIds) => reorderSlides(id, slideIds),
+            });
+
+            if (result.status === 'saved') {
+                toast.success('Slide order updated');
+            } else {
+                toast.error('Failed to save slide order');
+            }
         } catch (e) {
             toast.error('Failed to save slide order');
-            setBaseSlidesSynced(previousBaseSlides);
         } finally {
             setIsReordering(false);
         }
@@ -633,16 +639,8 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                 onUpdate={(content) => handleUpdateSlide(previewSlide.id, content)}
                                 onSave={() => toast.success('Changes saved')}
                                 onSyncStatusChange={setEditorSync}
-                                disabled={previewSlide.optimistic?.disableEditing || isStructuralSyncing}
-                                disabledReason={
-                                    isReordering
-                                        ? 'This slide is temporarily locked while the new order is being saved.'
-                                        : hasPendingStructuralMutations
-                                            ? 'This slide is temporarily locked while structural changes are syncing.'
-                                            : previewSlide.optimistic?.syncState === 'retrying'
-                                                ? 'This slide is retrying. Editing is disabled until it is confirmed.'
-                                                : 'This slide is still syncing. Editing is disabled until it is confirmed.'
-                                }
+                                disabled={editorLockState.disabled}
+                                disabledReason={editorLockState.reason ?? undefined}
                             />
                         </div>
                     </div>

@@ -49,7 +49,8 @@ export type DeleteStructuralOp = StructuralOpBase & {
     type: 'delete';
     targetId: string;
     rollback: {
-        previewSlideId: string | null;
+        restorePreviewSlideId: string | null;
+        fallbackPreviewSlideId: string | null;
         deletedSlide: Slide;
     };
 };
@@ -97,7 +98,8 @@ export type EnqueueDeleteParams = {
     sessionId: string;
     targetId: string;
     clientRequestId: string;
-    previewSlideId: string | null;
+    restorePreviewSlideId: string | null;
+    fallbackPreviewSlideId: string | null;
     deletedSlide: Slide;
 };
 
@@ -301,7 +303,8 @@ export function enqueueDelete(
         clientRequestId: params.clientRequestId,
         retryCount: 0,
         rollback: {
-            previewSlideId: params.previewSlideId,
+            restorePreviewSlideId: params.restorePreviewSlideId,
+            fallbackPreviewSlideId: params.fallbackPreviewSlideId,
             deletedSlide: params.deletedSlide,
         },
     };
