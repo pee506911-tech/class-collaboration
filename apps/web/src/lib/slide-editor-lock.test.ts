@@ -22,8 +22,20 @@ describe('getSlideEditorLockState', () => {
             disableEditing: false,
             syncState: undefined,
         })).toEqual({
+            disabled: false,
+            reason: null,
+        });
+    });
+
+    it('still locks the optimistic preview slide while it is syncing', () => {
+        expect(getSlideEditorLockState({
+            hasPendingStructuralMutations: true,
+            isReordering: false,
+            disableEditing: true,
+            syncState: 'syncing',
+        })).toEqual({
             disabled: true,
-            reason: 'This slide is temporarily locked while structural changes are syncing.',
+            reason: 'This slide is still syncing. Editing is disabled until it is confirmed.',
         });
     });
 

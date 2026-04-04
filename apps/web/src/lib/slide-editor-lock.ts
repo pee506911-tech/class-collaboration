@@ -1,5 +1,5 @@
 export function getSlideEditorLockState({
-    hasPendingStructuralMutations,
+    hasPendingStructuralMutations: _hasPendingStructuralMutations,
     isReordering,
     disableEditing,
     syncState,
@@ -20,13 +20,6 @@ export function getSlideEditorLockState({
         return {
             disabled: true,
             reason: 'This slide is still syncing. Editing is disabled until it is confirmed.',
-        };
-    }
-
-    if (hasPendingStructuralMutations) {
-        return {
-            disabled: true,
-            reason: 'This slide is temporarily locked while structural changes are syncing.',
         };
     }
 

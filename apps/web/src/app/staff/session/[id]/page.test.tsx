@@ -18,6 +18,7 @@ const queueMockState = vi.hoisted(() => ({
     }) => void),
     slides: null as null | any[],
     tempIdMap: {} as Record<string, string>,
+    hasPendingStructuralMutations: false,
 }));
 
 // Mock next/navigation
@@ -146,7 +147,7 @@ vi.mock('@/lib/use-optimistic-slide-queue', () => ({
             clearSessionInlineError: mockClearSessionInlineError,
             resolveOptimisticId: mockResolveOptimisticId,
             requestRefreshAfterDrain: refreshBaseSlides,
-            hasPendingStructuralMutations: false,
+            hasPendingStructuralMutations: queueMockState.hasPendingStructuralMutations,
             sessionInlineError: null,
         };
     },
@@ -174,6 +175,7 @@ describe('SlideEditor session loading', () => {
         queueMockState.onDeleteRollback = null;
         queueMockState.slides = null;
         queueMockState.tempIdMap = {};
+        queueMockState.hasPendingStructuralMutations = false;
         mockSaveSlideUpdate.mockResolvedValue({ status: 'saved' });
         apiMockState.reorderSlides.mockResolvedValue(undefined);
         vi.mocked(httpFetch).mockReset();
@@ -627,5 +629,215 @@ describe('SlideEditor session loading', () => {
             expect(screen.getByDisplayValue('Agenda')).toBeInTheDocument();
         });
         expect(screen.getByText('Preview: Slide 1')).toBeInTheDocument();
+    });
+
+    it('keeps a confirmed slide editable while a new temp slide is still syncing', async () => {
+        mockStorage.set('token', 'valid-token');
+        queueMockState.hasPendingStructuralMutations = true;
+
+        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
+            if (url.includes('/sessions/test-session-id') && !url.includes('/slides')) {
+                return {
+                    response: {
+                        ok: true,
+                        json: async () => ({
+                            success: true,
+                            data: {
+                                id: 'test-session-id',
+                                title: 'Test Session',
+                                status: 'draft',
+                                createdAt: '2024-01-01T00:00:00Z',
+                                allowQuestions: false,
+                                requireName: false,
+                                createdBy: 'user-1',
+                            },
+                        }),
+                    },
+                };
+            }
+
+            if (url.includes('/slides')) {
+                return {
+                    response: {
+                        ok: true,
+                        json: async () => ({
+                            success: true,
+                            data: [
+                                {
+                                    id: 'slide-agenda',
+                                    sessionId: 'test-session-id',
+                                    type: 'static',
+                                    content: {
+                                        title: 'Agenda',
+                                        body: 'First slide',
+                                    },
+                                    orderIndex: 0,
+                                    isHidden: false,
+                                    version: 1,
+                                },
+                                {
+                                    id: 'slide-wrap',
+                                    sessionId: 'test-session-id',
+                                    type: 'static',
+                                    content: {
+                                        title: 'Wrap up',
+                                        body: 'Second slide',
+                                    },
+                                    orderIndex: 1,
+                                    isHidden: false,
+                                    version: 1,
+                                },
+                            ],
+                        }),
+                    },
+                };
+            }
+
+            return { response: { ok: true, json: async () => ({ success: true, data: null }) } };
+        });
+
+        queueMockState.slides = [
+            {
+                id: 'slide-agenda',
+                sessionId: 'test-session-id',
+                type: 'static',
+                content: {
+                    title: 'Agenda',
+                    body: 'First slide',
+                },
+                orderIndex: 0,
+                isHidden: false,
+                version: 1,
+            },
+            {
+                id: 'temp-new-slide',
+                sessionId: 'test-session-id',
+                type: 'static',
+                content: {
+                    title: 'New Slide',
+                    body: 'Content here',
+                },
+                orderIndex: 1,
+                isHidden: false,
+                version: 0,
+                optimistic: {
+                    isPending: true,
+                    isTemp: true,
+                    disableEditing: true,
+                    syncState: 'syncing',
+                },
+            },
+            {
+                id: 'slide-wrap',
+                sessionId: 'test-session-id',
+                type: 'static',
+                content: {
+                    title: 'Wrap up',
+                    body: 'Second slide',
+                },
+                orderIndex: 2,
+                isHidden: false,
+                version: 1,
+            },
+        ];
+
+        const { default: SlideEditor } = await import('./page');
+        render(<SlideEditor />);
+
+        fireEvent.click(await screen.findByText('New Slide'));
+        expect(await screen.findByDisplayValue('New Slide')).toBeDisabled();
+
+        fireEvent.click(screen.getAllByText('Agenda')[0]);
+
+        const agendaInput = await screen.findByDisplayValue('Agenda');
+        expect(agendaInput).not.toBeDisabled();
+        expect(screen.queryByText('This slide is temporarily locked while structural changes are syncing.')).not.toBeInTheDocument();
+    });
+
+    it('keeps the delete fallback slide editable while the delete is still syncing', async () => {
+        mockStorage.set('token', 'valid-token');
+        queueMockState.hasPendingStructuralMutations = true;
+        queueMockState.slides = [
+            {
+                id: 'slide-wrap',
+                sessionId: 'test-session-id',
+                type: 'static',
+                content: {
+                    title: 'Wrap up',
+                    body: 'Second slide',
+                },
+                orderIndex: 0,
+                isHidden: false,
+                version: 1,
+            },
+        ];
+
+        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
+            if (url.includes('/sessions/test-session-id') && !url.includes('/slides')) {
+                return {
+                    response: {
+                        ok: true,
+                        json: async () => ({
+                            success: true,
+                            data: {
+                                id: 'test-session-id',
+                                title: 'Test Session',
+                                status: 'draft',
+                                createdAt: '2024-01-01T00:00:00Z',
+                                allowQuestions: false,
+                                requireName: false,
+                                createdBy: 'user-1',
+                            },
+                        }),
+                    },
+                };
+            }
+
+            if (url.includes('/slides')) {
+                return {
+                    response: {
+                        ok: true,
+                        json: async () => ({
+                            success: true,
+                            data: [
+                                {
+                                    id: 'slide-agenda',
+                                    sessionId: 'test-session-id',
+                                    type: 'static',
+                                    content: {
+                                        title: 'Agenda',
+                                        body: 'First slide',
+                                    },
+                                    orderIndex: 0,
+                                    isHidden: false,
+                                    version: 1,
+                                },
+                                {
+                                    id: 'slide-wrap',
+                                    sessionId: 'test-session-id',
+                                    type: 'static',
+                                    content: {
+                                        title: 'Wrap up',
+                                        body: 'Second slide',
+                                    },
+                                    orderIndex: 1,
+                                    isHidden: false,
+                                    version: 1,
+                                },
+                            ],
+                        }),
+                    },
+                };
+            }
+
+            return { response: { ok: true, json: async () => ({ success: true, data: null }) } };
+        });
+
+        const { default: SlideEditor } = await import('./page');
+        render(<SlideEditor />);
+
+        const wrapInput = await screen.findByDisplayValue('Wrap up');
+        expect(wrapInput).not.toBeDisabled();
+        expect(screen.queryByText('This slide is temporarily locked while structural changes are syncing.')).not.toBeInTheDocument();
     });
 });
