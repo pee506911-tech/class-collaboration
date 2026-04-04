@@ -1,97 +1,428 @@
-warning: unused import: `PublicSessionResponse`
-  --> src/handlers/public.rs:12:30
-   |
-12 | use crate::models::session::{PublicSessionResponse, Session};
-   |                              ^^^^^^^^^^^^^^^^^^^^^
-   |
-   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+warning: static `HTTP_CLIENT` is never used
+ --> src/services/ably.rs:9:8
+  |
+9 | static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+  |        ^^^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
-warning: struct `DbQuestion` is never constructed
-  --> src/handlers/stats.rs:91:8
+warning: function `get_ably_base_url` is never used
+  --> src/services/ably.rs:30:4
    |
-91 | struct DbQuestion {
-   |        ^^^^^^^^^^
-   |
-   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+30 | fn get_ably_base_url() -> String {
+   |    ^^^^^^^^^^^^^^^^^
 
-warning: field `role` is never read
-  --> src/middleware/auth.rs:24:9
+warning: function `publish_to_channel` is never used
+  --> src/services/ably.rs:35:14
    |
-22 | pub struct AuthUser {
-   |            -------- field in this struct
-23 |     pub user_id: String,
-24 |     pub role: String,
-   |         ^^^^
+35 | pub async fn publish_to_channel<T: Serialize>(
+   |              ^^^^^^^^^^^^^^^^^^
 
-warning: associated function `error` is never used
-  --> src/models/response.rs:20:12
-   |
-11 | impl<T> ApiResponse<T> {
-   | ---------------------- associated function in this implementation
-...
-20 |     pub fn error(message: String, data: T) -> Self {
-   |            ^^^^^
-
-warning: struct `Vote` is never constructed
-  --> src/models/student.rs:74:12
-   |
-74 | pub struct Vote {
-   |            ^^^^
-
-warning: associated functions `create`, `create_many`, `find_by_slide`, `count_by_option`, `get_vote_counts`, and `has_voted` are never used
-   --> src/models/student.rs:89:18
+warning: function `publish_state_update` is never used
+   --> src/services/ably.rs:126:14
     |
- 88 | impl Vote {
-    | --------- associated functions in this implementation
- 89 |     pub async fn create(
-    |                  ^^^^^^
-...
-122 |     pub async fn create_many(
-    |                  ^^^^^^^^^^^
-...
-152 |     pub async fn find_by_slide(pool: &DbPool, slide_id: &str) -> Result<Vec<Self>> {
-    |                  ^^^^^^^^^^^^^
-...
-163 |     pub async fn count_by_option(pool: &DbPool, slide_id: &str, option_id: &str) -> Result<i64> {
-    |                  ^^^^^^^^^^^^^^^
-...
-173 |     pub async fn get_vote_counts(pool: &DbPool, slide_id: &str) -> Result<Vec<(String, i64)>> {
-    |                  ^^^^^^^^^^^^^^^
-...
-183 |     pub async fn has_voted(pool: &DbPool, slide_id: &str, participant_id: &str) -> Result<bool> {
-    |                  ^^^^^^^^^
+126 | pub async fn publish_state_update(session_id: &str, state: &impl Serialize) -> bool {
+    |              ^^^^^^^^^^^^^^^^^^^^
 
-warning: associated function `new` is never used
-  --> src/repositories/sqlx_session.rs:49:12
+warning: function `publish_vote_update` is never used
+   --> src/services/ably.rs:143:14
+    |
+143 | pub async fn publish_vote_update(
+    |              ^^^^^^^^^^^^^^^^^^^
+
+warning: function `publish_qa_update` is never used
+   --> src/services/ably.rs:167:14
+    |
+167 | pub async fn publish_qa_update(
+    |              ^^^^^^^^^^^^^^^^^
+
+warning: function `publish_slides_update` is never used
+   --> src/services/ably.rs:191:14
+    |
+191 | pub async fn publish_slides_update(session_id: &str, slides: &impl Serialize) -> bool {
+    |              ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `BroadcasterSpy` is never constructed
+  --> src/services/broadcaster_spy.rs:13:12
    |
-48 | impl SqlxSessionRepository {
-   | -------------------------- associated function in this implementation
-49 |     pub fn new(pool: Pool<MySql>) -> Self {
+13 | pub struct BroadcasterSpy {
+   |            ^^^^^^^^^^^^^^
+
+warning: associated items `new`, `failing`, `session_ids`, and `messages_for_session` are never used
+  --> src/services/broadcaster_spy.rs:25:12
+   |
+24 | impl BroadcasterSpy {
+   | ------------------- associated items in this implementation
+25 |     pub fn new() -> Self {
    |            ^^^
-
-warning: associated function `new_with_millis` is never used
-  --> src/services/circuit_breaker.rs:46:12
-   |
-28 | impl CircuitBreaker {
-   | ------------------- associated function in this implementation
 ...
-46 |     pub fn new_with_millis(failure_threshold: u32, recovery_timeout_ms: u64) -> Self {
-   |            ^^^^^^^^^^^^^^^
-
-warning: fields `status` and `retry_count` are never read
-  --> src/services/outbox.rs:53:9
-   |
-48 | pub struct OutboxEvent {
-   |            ----------- fields in this struct
+35 |     pub fn failing() -> Self {
+   |            ^^^^^^^
 ...
-53 |     pub status: String,
-   |         ^^^^^^
-54 |     pub retry_count: i32,
-   |         ^^^^^^^^^^^
-   |
-   = note: `OutboxEvent` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+45 |     pub async fn session_ids(&self) -> Vec<String> {
+   |                  ^^^^^^^^^^^
+...
+55 |     pub async fn messages_for_session(&self, session_id: &str) -> Vec<Value> {
+   |                  ^^^^^^^^^^^^^^^^^^^^
 
-warning: `backend-rust` (bin "backend-rust") generated 9 warnings (run `cargo fix --bin "backend-rust"` to apply 1 suggestion)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.53s
+warning: constant `STATE_HALF_OPEN` is never used
+ --> src/services/circuit_breaker.rs:7:7
+  |
+7 | const STATE_HALF_OPEN: u8 = 2;
+  |       ^^^^^^^^^^^^^^^
+
+warning: fields `last_failure_nanos`, `failure_threshold`, `recovery_timeout`, and `created_at` are never read
+  --> src/services/circuit_breaker.rs:20:5
+   |
+17 | pub struct CircuitBreaker {
+   |            -------------- fields in this struct
+...
+20 |     last_failure_nanos: AtomicU64,
+   |     ^^^^^^^^^^^^^^^^^^
+21 |     state: AtomicU8,
+22 |     failure_threshold: u32,
+   |     ^^^^^^^^^^^^^^^^^
+23 |     recovery_timeout: Duration,
+   |     ^^^^^^^^^^^^^^^^
+24 |     /// Reference instant captured at creation
+25 |     created_at: Instant,
+   |     ^^^^^^^^^^
+
+warning: methods `nanos_since_creation`, `allow_request`, `record_failure`, and `state_name` are never used
+   --> src/services/circuit_breaker.rs:58:8
+    |
+ 28 | impl CircuitBreaker {
+    | ------------------- methods in this implementation
+...
+ 58 |     fn nanos_since_creation(&self) -> u64 {
+    |        ^^^^^^^^^^^^^^^^^^^^
+...
+ 67 |     pub fn allow_request(&self) -> bool {
+    |            ^^^^^^^^^^^^^
+...
+103 |     pub fn record_failure(&self) {
+    |            ^^^^^^^^^^^^^^
+...
+113 |     pub fn state_name(&self) -> &'static str {
+    |            ^^^^^^^^^^
+
+warning: variant `Internal` is never constructed
+  --> src/ws/registry.rs:16:5
+   |
+14 | pub enum BroadcastError {
+   |          -------------- variant in this enum
+15 |     #[error("Broadcast failed: {0}")]
+16 |     Internal(String),
+   |     ^^^^^^^^
+   |
+   = note: `BroadcastError` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: `backend-rust` (bin "backend-rust") generated 13 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.18s
      Running `target/debug/backend-rust`
-2026-04-04T08:56:32.099766Z  WARN backend_rust::handlers::ably: Empty or missing participant_id for session test-session-0y51j26t role student. Using fallback: student-test-session-0y51j26t. This may cause connection sharing issues!
+[2m2026-04-04T11:36:00.347544Z[0m [32m INFO[0m [2mbackend_rust[0m[2m:[0m Starting server (cold start optimization enabled)...
+[2m2026-04-04T11:36:00.348137Z[0m [32m INFO[0m [2mbackend_rust[0m[2m:[0m Config loaded [3menvironment[0m[2m=[0mdevelopment [3mdb_max_connections[0m[2m=[0m20 [3mdb_max_lifetime_seconds[0m[2m=[0m0 [3mapi_concurrency_limit[0m[2m=[0m160 [3mapi_buffer_size[0m[2m=[0m1280 [3msession_state_cache_ttl_ms[0m[2m=[0m0 [3msession_state_cache_max_entries[0m[2m=[0m200 [3mperf_test_enabled[0m[2m=[0mfalse [3menable_general_rate_limit[0m[2m=[0mfalse [3mrate_limit_general_per_second[0m[2m=[0m100 [3mrate_limit_general_burst[0m[2m=[0m1500
+[2m2026-04-04T11:36:00.348383Z[0m [32m INFO[0m [2mbackend_rust[0m[2m:[0m App state created in 1.001875ms
+[2m2026-04-04T11:36:00.348581Z[0m [32m INFO[0m [2mbackend_rust::db[0m[2m:[0m Starting background database initialization...
+[2m2026-04-04T11:36:00.356182Z[0m [32m INFO[0m [2mbackend_rust[0m[2m:[0m Server listening on 0.0.0.0:8080 (startup: 8.812084ms)
+[2m2026-04-04T11:36:00.356338Z[0m [32m INFO[0m [2mbackend_rust[0m[2m:[0m Server listening on 0.0.0.0:8080 (startup: 8.974709ms)
+[2m2026-04-04T11:36:00.389371Z[0m [32m INFO[0m [2mbackend_rust::db[0m[2m:[0m Running database migrations...
+[2m2026-04-04T11:36:00.395252Z[0m [32m INFO[0m [2mbackend_rust::db[0m[2m:[0m Migrations completed
+[2m2026-04-04T11:36:00.396006Z[0m [32m INFO[0m [2mbackend_rust::db[0m[2m:[0m Database ready after 1 attempt(s)
+[2m2026-04-04T11:36:00.396072Z[0m [32m INFO[0m [2mbackend_rust::services::outbox[0m[2m:[0m Outbox worker started
+[2m2026-04-04T11:36:00.405079Z[0m [32m INFO[0m [2mbackend_rust::services::outbox[0m[2m:[0m Outbox worker processed events [3mcount[0m[2m=[0m2
+[2m2026-04-04T11:36:03.401747Z[0m [32m INFO[0m [2mbackend_rust::services::outbox[0m[2m:[0m Outbox worker processed events [3mcount[0m[2m=[0m1
+[2m2026-04-04T11:36:04.237073Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-0-tw7ltg
+[2m2026-04-04T11:36:04.237261Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-1-3qpqsv
+[2m2026-04-04T11:36:04.237372Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-5-jiejer
+[2m2026-04-04T11:36:04.237392Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-3-2cozed
+[2m2026-04-04T11:36:04.237464Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-2-1fh573
+[2m2026-04-04T11:36:04.237525Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-4-ygajcv
+[2m2026-04-04T11:36:04.237790Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-6-hiteoo
+[2m2026-04-04T11:36:04.238107Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-9-ixruf1
+[2m2026-04-04T11:36:04.238136Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-8-m3iikk
+[2m2026-04-04T11:36:04.238270Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-10-qjj398
+[2m2026-04-04T11:36:04.238285Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-14-8hx8ye
+[2m2026-04-04T11:36:04.238317Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-7-cw1l1i
+[2m2026-04-04T11:36:04.238400Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-11-zj368g
+[2m2026-04-04T11:36:04.238411Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-13-v0hu1h
+[2m2026-04-04T11:36:04.238517Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-15-32ug0m
+[2m2026-04-04T11:36:04.238523Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-12-0l7j1z
+[2m2026-04-04T11:36:04.238551Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-19-lrg3mn
+[2m2026-04-04T11:36:04.238652Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-18-5ppq87
+[2m2026-04-04T11:36:04.238663Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-17-j36b6k
+[2m2026-04-04T11:36:04.238705Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=mxcs85i8, participant=seq-vote-16-1fsbix
+[2m2026-04-04T11:36:04.434253Z[0m [32m INFO[0m [2mbackend_rust::services::outbox[0m[2m:[0m Outbox worker processed events [3mcount[0m[2m=[0m20
+[2m2026-04-04T11:36:04.958578Z[0m [32m INFO[0m [2mbackend_rust::services::outbox[0m[2m:[0m Outbox worker processed events [3mcount[0m[2m=[0m21
+[2m2026-04-04T11:36:05.316497Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-1-s5yg92
+[2m2026-04-04T11:36:05.317587Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-2-uimgx6
+[2m2026-04-04T11:36:05.317601Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-5-hkp448
+[2m2026-04-04T11:36:05.318061Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-8-uu37ci
+[2m2026-04-04T11:36:05.318304Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-11-nk96pv
+[2m2026-04-04T11:36:05.319351Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-10-ba3eu2
+[2m2026-04-04T11:36:05.320547Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-3-azmm1n
+[2m2026-04-04T11:36:05.320666Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-19-erl5q9
+[2m2026-04-04T11:36:05.323826Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-14-rcrgmv
+[2m2026-04-04T11:36:05.326253Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-6-igxs6v
+[2m2026-04-04T11:36:05.326426Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-16-6b2nop
+[2m2026-04-04T11:36:05.327107Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-18-hecv7k
+[2m2026-04-04T11:36:05.328734Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-17-mhaxxt
+[2m2026-04-04T11:36:05.329984Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-4-2jatdr
+[2m2026-04-04T11:36:05.330141Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-9-af625e
+[2m2026-04-04T11:36:05.331132Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-0-rr435l
+[2m2026-04-04T11:36:05.331383Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-13-j5da9x
+[2m2026-04-04T11:36:05.335557Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-7-3y9qto
+[2m2026-04-04T11:36:05.335570Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-15-wzr02e
+[2m2026-04-04T11:36:05.337121Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=jufkqb6e, participant=T-13-R1-voter-12-at2mgp
+[2m2026-04-04T11:36:05.480739Z[0m [32m INFO[0m [2mbackend_rust::services::outbox[0m[2m:[0m Outbox worker processed events [3mcount[0m[2m=[0m40
+[2m2026-04-04T11:36:05.551414Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-2-umymjr
+[2m2026-04-04T11:36:05.551654Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-19-ev94xt
+[2m2026-04-04T11:36:05.553059Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-7-ntuq62
+[2m2026-04-04T11:36:05.555939Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-12-hrb990
+[2m2026-04-04T11:36:05.556193Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-17-8efdnf
+[2m2026-04-04T11:36:05.557654Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-10-eviaeg
+[2m2026-04-04T11:36:05.557864Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-18-0drgzb
+[2m2026-04-04T11:36:05.557904Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-8-er1b8f
+[2m2026-04-04T11:36:05.560432Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-11-uvcou1
+[2m2026-04-04T11:36:05.561982Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-3-dds30l
+[2m2026-04-04T11:36:05.562238Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-16-zmov1g
+[2m2026-04-04T11:36:05.563821Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-1-e4buld
+[2m2026-04-04T11:36:05.563995Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-9-0fkhtf
+[2m2026-04-04T11:36:05.564363Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-4-62qh9r
+[2m2026-04-04T11:36:05.566294Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-13-dnj3jh
+[2m2026-04-04T11:36:05.568418Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-0-1xfsl5
+[2m2026-04-04T11:36:05.569961Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-6-33h6g0
+[2m2026-04-04T11:36:05.571559Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-14-28vqfx
+[2m2026-04-04T11:36:05.571601Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-5-j4f5eo
+[2m2026-04-04T11:36:05.573067Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=gj2i71i0, participant=T-14-voter-15-7tralq
+[2m2026-04-04T11:36:05.943180Z[0m [32m INFO[0m [2mbackend_rust::services::outbox[0m[2m:[0m Outbox worker processed events [3mcount[0m[2m=[0m20
+[2m2026-04-04T11:36:07.532344Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-18-ijobhq
+[2m2026-04-04T11:36:07.532392Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.532448Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m0 ms
+[2m2026-04-04T11:36:07.532496Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-8-s89ftm
+[2m2026-04-04T11:36:07.532517Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.532545Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m0 ms
+[2m2026-04-04T11:36:07.532597Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-13-3ehvpk
+[2m2026-04-04T11:36:07.532611Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.532636Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m0 ms
+[2m2026-04-04T11:36:07.532653Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-14-rlhjr3
+[2m2026-04-04T11:36:07.532667Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.532691Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m0 ms
+[2m2026-04-04T11:36:07.532726Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-12-e4w3f6
+[2m2026-04-04T11:36:07.532739Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.532761Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m0 ms
+[2m2026-04-04T11:36:07.532782Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-15-15bjrk
+[2m2026-04-04T11:36:07.532846Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.532878Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m0 ms
+[2m2026-04-04T11:36:07.532868Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-0-b0acii
+[2m2026-04-04T11:36:07.532975Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.532847Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-4-dpffzw
+[2m2026-04-04T11:36:07.533051Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.533074Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m0 ms
+[2m2026-04-04T11:36:07.533108Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m0 ms
+[2m2026-04-04T11:36:07.533164Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-17-uep4yh
+[2m2026-04-04T11:36:07.533180Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.533020Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-2-sanck8
+[2m2026-04-04T11:36:07.533220Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-9-xyvhx4
+[2m2026-04-04T11:36:07.533235Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-3-3kx2y9
+[2m2026-04-04T11:36:07.533241Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.533252Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.533206Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m0 ms
+[2m2026-04-04T11:36:07.533169Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-16-y3lx14
+[2m2026-04-04T11:36:07.533254Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-11-7vwxh4
+[2m2026-04-04T11:36:07.533287Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-5-8243bg
+[2m2026-04-04T11:36:07.533299Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.533444Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.533326Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-6-e1xgkt
+[2m2026-04-04T11:36:07.533374Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m0 ms
+[2m2026-04-04T11:36:07.533405Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.533405Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-10-kfmkf2
+[2m2026-04-04T11:36:07.533434Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.533340Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m0 ms
+[2m2026-04-04T11:36:07.533466Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m0 ms
+[2m2026-04-04T11:36:07.533468Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m0 ms
+[2m2026-04-04T11:36:07.533487Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.533651Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.533927Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-7-7hdu1x
+[2m2026-04-04T11:36:07.533947Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.533968Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m0 ms
+[2m2026-04-04T11:36:07.533970Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m1 ms
+[2m2026-04-04T11:36:07.533991Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m0 ms
+[2m2026-04-04T11:36:07.533686Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m0 ms
+[2m2026-04-04T11:36:07.534059Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-1-cggwmf
+[2m2026-04-04T11:36:07.533815Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m1 ms
+[2m2026-04-04T11:36:07.534107Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.534220Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m0 ms
+[2m2026-04-04T11:36:07.536326Z[0m [32m INFO[0m [2mbackend_rust::handlers::ably[0m[2m:[0m Generating Ably token for session oogtp7g3 role student participant student-19-4snj9n
+[2m2026-04-04T11:36:07.536432Z[0m [31mERROR[0m [2mbackend_rust::error[0m[2m:[0m Internal error: Invalid ABLY_API_KEY format
+[2m2026-04-04T11:36:07.536536Z[0m [31mERROR[0m [2mtower_http::trace::on_failure[0m[2m:[0m response failed [3mclassification[0m[2m=[0mStatus code: 500 Internal Server Error [3mlatency[0m[2m=[0m0 ms
+[2m2026-04-04T11:36:07.870066Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-1-n04d42
+[2m2026-04-04T11:36:07.870076Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-2-pda3qh
+[2m2026-04-04T11:36:07.870298Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-6-02gu0b
+[2m2026-04-04T11:36:07.870651Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-13-m6949f
+[2m2026-04-04T11:36:07.870719Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-5-7hh4pj
+[2m2026-04-04T11:36:07.870741Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-12-gkyr9d
+[2m2026-04-04T11:36:07.870786Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-16-g9ea0n
+[2m2026-04-04T11:36:07.870799Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-10-zvfawz
+[2m2026-04-04T11:36:07.870839Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-8-uqgjyo
+[2m2026-04-04T11:36:07.870850Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-17-7y8qhc
+[2m2026-04-04T11:36:07.870888Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-15-34x74d
+[2m2026-04-04T11:36:07.870899Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-11-r8re8b
+[2m2026-04-04T11:36:07.870937Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-9-4nfbko
+[2m2026-04-04T11:36:07.870949Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-18-k8us53
+[2m2026-04-04T11:36:07.871003Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-0-r6awsz
+[2m2026-04-04T11:36:07.870168Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-7-rk0n1x
+[2m2026-04-04T11:36:07.871048Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-4-7v7sak
+[2m2026-04-04T11:36:07.870224Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-3-1a4tgj
+[2m2026-04-04T11:36:07.870651Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-14-rz7zx6
+[2m2026-04-04T11:36:07.870719Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session clf4rrtk: slide=a9prnvz7, participant=mix-voter-19-d239j1
+[2m2026-04-04T11:36:07.988472Z[0m [32m INFO[0m [2mbackend_rust::services::outbox[0m[2m:[0m Outbox worker processed events [3mcount[0m[2m=[0m15
+[2m2026-04-04T11:36:08.177001Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session ua470q6h: slide=eeqa41fa, participant=sim-voter-0-vwfydl
+[2m2026-04-04T11:36:08.186241Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session ua470q6h: slide=eeqa41fa, participant=sim-voter-1-4pxlxb
+[2m2026-04-04T11:36:08.206669Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session ua470q6h: slide=eeqa41fa, participant=sim-voter-2-3kb1px
+[2m2026-04-04T11:36:08.229080Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session ua470q6h: slide=eeqa41fa, participant=sim-voter-3-v7xqvd
+[2m2026-04-04T11:36:08.256236Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session ua470q6h: slide=eeqa41fa, participant=sim-voter-4-ev0f6f
+[2m2026-04-04T11:36:08.273943Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session ua470q6h: slide=eeqa41fa, participant=sim-voter-5-s5zq2x
+[2m2026-04-04T11:36:08.285712Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session ua470q6h: slide=eeqa41fa, participant=sim-voter-6-n08x2p
+[2m2026-04-04T11:36:08.299810Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session ua470q6h: slide=eeqa41fa, participant=sim-voter-7-ylslxq
+[2m2026-04-04T11:36:08.319477Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session ua470q6h: slide=eeqa41fa, participant=sim-voter-8-7eayc9
+[2m2026-04-04T11:36:08.326862Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session ua470q6h: slide=eeqa41fa, participant=sim-voter-9-c7fhud
+[2m2026-04-04T11:36:08.333203Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session ua470q6h: slide=eeqa41fa, participant=sim-voter-10-vtsx5i
+[2m2026-04-04T11:36:08.340166Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session ua470q6h: slide=eeqa41fa, participant=sim-voter-11-u7dsc2
+[2m2026-04-04T11:36:08.351444Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session ua470q6h: slide=eeqa41fa, participant=sim-voter-12-9ql3jt
+[2m2026-04-04T11:36:08.358169Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session ua470q6h: slide=eeqa41fa, participant=sim-voter-13-j315o4
+[2m2026-04-04T11:36:08.368810Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session ua470q6h: slide=eeqa41fa, participant=sim-voter-14-73soaj
+[2m2026-04-04T11:36:08.408600Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-0-7ip7m0
+[2m2026-04-04T11:36:08.409163Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-9-7p9wal
+[2m2026-04-04T11:36:08.409253Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-16-88u73a
+[2m2026-04-04T11:36:08.409262Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-11-b5bxyf
+[2m2026-04-04T11:36:08.409352Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-10-xhx5xr
+[2m2026-04-04T11:36:08.409644Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-15-cp32u2
+[2m2026-04-04T11:36:08.409664Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-12-j1y6au
+[2m2026-04-04T11:36:08.409790Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-13-9c38do
+[2m2026-04-04T11:36:08.409798Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-18-vx4wba
+[2m2026-04-04T11:36:08.409899Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-1-4fwxvf
+[2m2026-04-04T11:36:08.410238Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-17-5uco4u
+[2m2026-04-04T11:36:08.409998Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-5-4tnx3q
+[2m2026-04-04T11:36:08.410329Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-6-q6ao95
+[2m2026-04-04T11:36:08.410015Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-3-mx2dc8
+[2m2026-04-04T11:36:08.410522Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-19-c1mdym
+[2m2026-04-04T11:36:08.410091Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-14-lg5ud4
+[2m2026-04-04T11:36:08.410284Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-7-44sllm
+[2m2026-04-04T11:36:08.410514Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-8-trtt0g
+[2m2026-04-04T11:36:08.410527Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-2-hjgwix
+[2m2026-04-04T11:36:08.410966Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 4gu4flg8: slide=or2b0ld8, participant=iso-voter-4-rp5es7
+[2m2026-04-04T11:36:08.519704Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-0-7ip7m0
+[2m2026-04-04T11:36:08.519728Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-1-4fwxvf
+[2m2026-04-04T11:36:08.519765Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-2-hjgwix
+[2m2026-04-04T11:36:08.519933Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-novote-3-43ynoo
+[2m2026-04-04T11:36:08.520003Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-9-7p9wal
+[2m2026-04-04T11:36:08.520040Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-13-9c38do
+[2m2026-04-04T11:36:08.520112Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-8-trtt0g
+[2m2026-04-04T11:36:08.520136Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-14-lg5ud4
+[2m2026-04-04T11:36:08.520162Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-7-44sllm
+[2m2026-04-04T11:36:08.520237Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-15-cp32u2
+[2m2026-04-04T11:36:08.520261Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-10-xhx5xr
+[2m2026-04-04T11:36:08.520330Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-16-88u73a
+[2m2026-04-04T11:36:08.520357Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-11-b5bxyf
+[2m2026-04-04T11:36:08.520419Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-17-5uco4u
+[2m2026-04-04T11:36:08.520473Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-5-4tnx3q
+[2m2026-04-04T11:36:08.520121Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-12-j1y6au
+[2m2026-04-04T11:36:08.520633Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-3-mx2dc8
+[2m2026-04-04T11:36:08.521021Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-novote-0-7k3i18
+[2m2026-04-04T11:36:08.521284Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-19-c1mdym
+[2m2026-04-04T11:36:08.521339Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-novote-2-mujrdm
+[2m2026-04-04T11:36:08.521379Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-6-q6ao95
+[2m2026-04-04T11:36:08.521435Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-novote-1-qan4wl
+[2m2026-04-04T11:36:08.521496Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-18-vx4wba
+[2m2026-04-04T11:36:08.521540Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 4gu4flg8 with participantId iso-voter-4-rp5es7
+[2m2026-04-04T11:36:08.528733Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-14-lg5ud4
+[2m2026-04-04T11:36:08.528910Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-2-hjgwix
+[2m2026-04-04T11:36:08.529168Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-9-7p9wal
+[2m2026-04-04T11:36:08.529328Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 0 votes for participant iso-novote-3-43ynoo
+[2m2026-04-04T11:36:08.528950Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-11-b5bxyf
+[2m2026-04-04T11:36:08.529520Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-1-4fwxvf
+[2m2026-04-04T11:36:08.529641Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-0-7ip7m0
+[2m2026-04-04T11:36:08.529703Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-15-cp32u2
+[2m2026-04-04T11:36:08.529782Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-12-j1y6au
+[2m2026-04-04T11:36:08.529880Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-10-xhx5xr
+[2m2026-04-04T11:36:08.529931Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-16-88u73a
+[2m2026-04-04T11:36:08.529554Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-8-trtt0g
+[2m2026-04-04T11:36:08.530474Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-5-4tnx3q
+[2m2026-04-04T11:36:08.530530Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-13-9c38do
+[2m2026-04-04T11:36:08.531056Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-19-c1mdym
+[2m2026-04-04T11:36:08.531165Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-7-44sllm
+[2m2026-04-04T11:36:08.531248Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-17-5uco4u
+[2m2026-04-04T11:36:08.531390Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 0 votes for participant iso-novote-0-7k3i18
+[2m2026-04-04T11:36:08.532126Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 0 votes for participant iso-novote-1-qan4wl
+[2m2026-04-04T11:36:08.532471Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-18-vx4wba
+[2m2026-04-04T11:36:08.532573Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-3-mx2dc8
+[2m2026-04-04T11:36:08.532640Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-6-q6ao95
+[2m2026-04-04T11:36:08.532845Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 0 votes for participant iso-novote-2-mujrdm
+[2m2026-04-04T11:36:08.533029Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant iso-voter-4-rp5es7
+[2m2026-04-04T11:36:08.545832Z[0m [32m INFO[0m [2mbackend_rust::services::outbox[0m[2m:[0m Outbox worker processed events [3mcount[0m[2m=[0m38
+[2m2026-04-04T11:36:08.558798Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 1v5070g8: slide=f006grzj, participant=cross-session-c95gmipn
+[2m2026-04-04T11:36:08.565402Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session s1moq78h: slide=en7czfpp, participant=cross-session-c95gmipn
+[2m2026-04-04T11:36:08.571215Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session 1v5070g8 with participantId cross-session-c95gmipn
+[2m2026-04-04T11:36:08.574371Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant cross-session-c95gmipn
+[2m2026-04-04T11:36:08.576653Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m get_my_votes called for session s1moq78h with participantId cross-session-c95gmipn
+[2m2026-04-04T11:36:08.579072Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Found 1 votes for participant cross-session-c95gmipn
+[2m2026-04-04T11:36:08.939458Z[0m [32m INFO[0m [2mbackend_rust::services::outbox[0m[2m:[0m Outbox worker processed events [3mcount[0m[2m=[0m23
+[2m2026-04-04T11:36:09.410064Z[0m [32m INFO[0m [2mbackend_rust::services::outbox[0m[2m:[0m Outbox worker processed events [3mcount[0m[2m=[0m1
+[2m2026-04-04T11:36:09.907880Z[0m [32m INFO[0m [2mbackend_rust::services::outbox[0m[2m:[0m Outbox worker processed events [3mcount[0m[2m=[0m1
+[2m2026-04-04T11:36:10.382864Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session 42hre1kq: slide=jpjkwtgx, participant=ms-voter-u1m2vncf
+[2m2026-04-04T11:36:10.401280Z[0m [32m INFO[0m [2mbackend_rust::services::outbox[0m[2m:[0m Outbox worker processed events [3mcount[0m[2m=[0m1
+[2m2026-04-04T11:36:17.443618Z[0m [32m INFO[0m [2mbackend_rust::services::outbox[0m[2m:[0m Outbox worker processed events [3mcount[0m[2m=[0m20
+[2m2026-04-04T11:36:17.501493Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=0nlnvbgf, participant=race-test-5q1gizpd-2
+[2m2026-04-04T11:36:17.501493Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=0nlnvbgf, participant=race-test-5q1gizpd-2
+[2m2026-04-04T11:36:17.723297Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=0nlnvbgf, participant=race-test-bqqx5ksu-5
+[2m2026-04-04T11:36:17.723595Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=0nlnvbgf, participant=race-test-bqqx5ksu-5
+[2m2026-04-04T11:36:17.723615Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=0nlnvbgf, participant=race-test-bqqx5ksu-5
+[2m2026-04-04T11:36:17.723623Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=0nlnvbgf, participant=race-test-bqqx5ksu-5
+[2m2026-04-04T11:36:17.723748Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=0nlnvbgf, participant=race-test-bqqx5ksu-5
+[2m2026-04-04T11:36:17.912565Z[0m [32m INFO[0m [2mbackend_rust::services::outbox[0m[2m:[0m Outbox worker processed events [3mcount[0m[2m=[0m2
+[2m2026-04-04T11:36:17.950283Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=0nlnvbgf, participant=race-test-dfek18cv-10
+[2m2026-04-04T11:36:17.950530Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=0nlnvbgf, participant=race-test-dfek18cv-10
+[2m2026-04-04T11:36:17.950647Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=0nlnvbgf, participant=race-test-dfek18cv-10
+[2m2026-04-04T11:36:17.950664Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=0nlnvbgf, participant=race-test-dfek18cv-10
+[2m2026-04-04T11:36:17.950726Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=0nlnvbgf, participant=race-test-dfek18cv-10
+[2m2026-04-04T11:36:17.950773Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=0nlnvbgf, participant=race-test-dfek18cv-10
+[2m2026-04-04T11:36:17.950783Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=0nlnvbgf, participant=race-test-dfek18cv-10
+[2m2026-04-04T11:36:17.950856Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=0nlnvbgf, participant=race-test-dfek18cv-10
+[2m2026-04-04T11:36:17.950910Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=0nlnvbgf, participant=race-test-dfek18cv-10
+[2m2026-04-04T11:36:17.951185Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=0nlnvbgf, participant=race-test-dfek18cv-10
+[2m2026-04-04T11:36:18.176832Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-wgcn609p
+[2m2026-04-04T11:36:18.176836Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-yojyolnh
+[2m2026-04-04T11:36:18.176962Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-npmy2waz
+[2m2026-04-04T11:36:18.177043Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-nmdbyvhm
+[2m2026-04-04T11:36:18.177072Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-mwadh9b3
+[2m2026-04-04T11:36:18.177184Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-2762hmtb
+[2m2026-04-04T11:36:18.177239Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-s3woxhjx
+[2m2026-04-04T11:36:18.177189Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-5unzumpo
+[2m2026-04-04T11:36:18.177408Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-smd8kg7w
+[2m2026-04-04T11:36:18.177462Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-g4lnyss5
+[2m2026-04-04T11:36:18.177535Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-e1eyh9f9
+[2m2026-04-04T11:36:18.177603Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-lbvovb2c
+[2m2026-04-04T11:36:18.177659Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-n24u8gbn
+[2m2026-04-04T11:36:18.177722Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-hntcdlrf
+[2m2026-04-04T11:36:18.177292Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-uthbbt4o
+[2m2026-04-04T11:36:18.176965Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-hitm9uz8
+[2m2026-04-04T11:36:18.177466Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-u5sb7377
+[2m2026-04-04T11:36:18.177272Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-3xiytf9n
+[2m2026-04-04T11:36:18.177980Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-qhkm69xz
+[2m2026-04-04T11:36:18.178001Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=71l1x5z6, participant=burst-ynq2gety
+[2m2026-04-04T11:36:18.433679Z[0m [32m INFO[0m [2mbackend_rust::services::outbox[0m[2m:[0m Outbox worker processed events [3mcount[0m[2m=[0m21
+[2m2026-04-04T11:36:18.779460Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=g2h40msw, participant=invalid-9hiwc81f
+[2m2026-04-04T11:36:18.779542Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=g2h40msw, participant=valid-iz9lq1az
+[2m2026-04-04T11:36:18.779542Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=g2h40msw, participant=invalid-e2fgp7ou
+[2m2026-04-04T11:36:18.779627Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=g2h40msw, participant=valid-xkx0xxeh
+[2m2026-04-04T11:36:18.779460Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=g2h40msw, participant=valid-ppb5lqoi
+[2m2026-04-04T11:36:18.779915Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=g2h40msw, participant=valid-g65tgtd7
+[2m2026-04-04T11:36:18.779679Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=g2h40msw, participant=invalid-q752e4id
+[2m2026-04-04T11:36:18.779734Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=g2h40msw, participant=invalid-yl87qzv8
+[2m2026-04-04T11:36:18.932912Z[0m [32m INFO[0m [2mbackend_rust::services::outbox[0m[2m:[0m Outbox worker processed events [3mcount[0m[2m=[0m4
+[2m2026-04-04T11:36:19.102963Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=0nlnvbgf, participant=delay-test-nujtlbd8
+[2m2026-04-04T11:36:19.113896Z[0m [32m INFO[0m [2mbackend_rust::handlers::student[0m[2m:[0m Vote submission for session b8ivj0md: slide=0nlnvbgf, participant=error-test-npvnqbeo
+[2m2026-04-04T11:36:19.208436Z[0m [32m INFO[0m [2mbackend_rust[0m[2m:[0m SIGTERM received — initiating graceful shutdown
+[2m2026-04-04T11:36:19.208436Z[0m [32m INFO[0m [2mbackend_rust[0m[2m:[0m SIGTERM received — initiating graceful shutdown
+[2m2026-04-04T11:36:19.208491Z[0m [32m INFO[0m [2mbackend_rust::services::outbox[0m[2m:[0m Outbox worker received shutdown signal, flushing pending batch

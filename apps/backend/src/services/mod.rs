@@ -1,5 +1,4 @@
-pub mod ably;
-mod ably_test;
+pub mod broadcaster_spy;
 pub mod circuit_breaker;
 pub mod outbox;
 pub mod perf;

@@ -126,15 +126,15 @@ async function openStudentClient(
     page.setDefaultNavigationTimeout(CONNECT_TIMEOUT_MS);
 
     const authRequestPromise = page.waitForRequest(
-        (request) => request.url().includes('/api/auth/ably') && request.method() === 'GET',
+        (request) => request.url().includes('/api/auth/ws-token') && request.method() === 'GET',
         { timeout: CONNECT_TIMEOUT_MS }
     );
     const authResponsePromise = page.waitForResponse(
-        (response) => response.url().includes('/api/auth/ably') && response.request().method() === 'GET',
+        (response) => response.url().includes('/api/auth/ws-token') && response.request().method() === 'GET',
         { timeout: CONNECT_TIMEOUT_MS }
     );
     const websocketPromise = page.waitForEvent('websocket', {
-        predicate: (websocket) => websocket.url().toLowerCase().includes('ably'),
+        predicate: (websocket) => websocket.url().toLowerCase().includes('/api/ws'),
         timeout: CONNECT_TIMEOUT_MS,
     });
     const registerResponsePromise = page.waitForResponse(
@@ -159,11 +159,12 @@ async function openStudentClient(
         registerResponsePromise,
     ]);
 
-    expect(authResponse.ok(), 'ably auth response should be ok').toBeTruthy();
+    expect(authResponse.ok(), 'ws-token auth response should be ok').toBeTruthy();
     expect(registerResponse.ok(), 'participant registration should be ok').toBeTruthy();
 
     const authBody = await authResponse.json();
-    expect(authBody.clientId, 'ably auth clientId should exist').toBeTruthy();
+    expect(authBody.token, 'ws-token auth should return token').toBeTruthy();
+    expect(typeof authBody.token).toBe('string');
 
     const participantId = await page.evaluate((currentSessionId) => {
         return localStorage.getItem(`studentParticipantId_${currentSessionId}`);
@@ -171,8 +172,7 @@ async function openStudentClient(
 
     expect(participantId, 'participantId should exist in localStorage').toBeTruthy();
     expect(new URL(authRequest.url()).searchParams.get('participantId')).toBe(participantId);
-    expect(authBody.clientId).toBe(participantId);
-    expect(websocket.url().toLowerCase()).toContain('ably');
+    expect(websocket.url().toLowerCase()).toContain('/api/ws');
 
     return {
         page,
@@ -256,7 +256,7 @@ test('submits poll answers from many frontend clients on prod', async ({ browser
 
         const uniqueParticipantIds = new Set(clients.map((client) => client.participantId));
         expect(uniqueParticipantIds.size, 'each browser should get a unique participantId').toBe(STUDENT_COUNT);
-        expect(clients.filter((client) => client.websocketUrl).length, 'each browser should open an Ably websocket').toBe(STUDENT_COUNT);
+        expect(clients.filter((client) => client.websocketUrl).length, 'each browser should open a WebSocket').toBe(STUDENT_COUNT);
 
         for (let start = 0; start < clients.length; start += BATCH_SIZE) {
             const batch = clients.slice(start, start + BATCH_SIZE);

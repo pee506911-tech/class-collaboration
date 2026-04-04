@@ -5,15 +5,6 @@ use serde::Serialize;
 pub struct HealthResponse {
     pub status: &'static str,
     pub database: &'static str,
-    pub ably: &'static str,
-}
-
-fn ably_state() -> &'static str {
-    if crate::services::ably::is_degraded() {
-        "open"
-    } else {
-        "closed"
-    }
 }
 
 /// Liveness probe - always returns 200 if server is running
@@ -33,7 +24,6 @@ pub async fn readiness(
             Json(HealthResponse {
                 status: "initializing",
                 database: "connecting",
-                ably: ably_state(),
             }),
         ));
     }
@@ -44,14 +34,12 @@ pub async fn readiness(
             Ok(_) => Ok(Json(HealthResponse {
                 status: "healthy",
                 database: "connected",
-                ably: ably_state(),
             })),
             Err(_) => Err((
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(HealthResponse {
                     status: "unhealthy",
                     database: "error",
-                    ably: ably_state(),
                 }),
             )),
         }
@@ -61,7 +49,6 @@ pub async fn readiness(
             Json(HealthResponse {
                 status: "initializing",
                 database: "not_ready",
-                ably: ably_state(),
             }),
         ))
     }

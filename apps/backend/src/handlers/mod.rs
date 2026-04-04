@@ -1,4 +1,3 @@
-pub mod ably;
 pub mod auth;
 mod auth_test;
 pub mod client_error;
@@ -13,3 +12,4 @@ pub mod stats;
 pub mod student;
 mod vote_dedup_test;
 mod serde_test;
+pub mod ws_token;

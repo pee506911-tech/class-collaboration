@@ -424,7 +424,7 @@ impl SessionStateCache {
     /// Invalidate cached state for a session after a mutation.
     /// Ensures read-after-write consistency: the next GET will fetch fresh data from DB.
     /// This is critical for correctness - without it, HTTP API may return stale data
-    /// that disagrees with what Ably just pushed to clients.
+    /// that disagrees with what WebSocket just pushed to clients.
     pub async fn invalidate(&self, session_id: &str) {
         let mut states = self.states.write().await;
         states.remove(session_id);

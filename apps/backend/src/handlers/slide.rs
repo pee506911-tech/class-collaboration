@@ -22,10 +22,10 @@ const MAX_BATCH_SLIDE_COUNT: usize = 50;
 
 /// Enqueue a SlidesUpdate outbox event within the caller's transaction.
 /// This ensures that every slide mutation that clients need to observe
-/// produces an outbox event for real-time Ably delivery.
+/// produces an outbox event for real-time WebSocket delivery.
 ///
 /// Note: This deliberately does NOT bump `state_version`, so that single-slide
-/// updates avoid acquiring a session row lock. The `SLIDES_UPDATE` Ably message
+/// updates avoid acquiring a session row lock. The `SLIDES_UPDATE` WebSocket message
 /// bypasses the `shouldApplyStateUpdate()` gate entirely (it triggers via
 /// `lastSlideUpdate` on the frontend). For batch creation, callers should bump
 /// `state_version` separately since they already hold a session lock.

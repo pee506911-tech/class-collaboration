@@ -1,5 +1,5 @@
 # Test Infrastructure Docker Compose
-# Provides isolated MySQL database and Ably stub for concurrency testing
+# Provides isolated MySQL database for WebSocket concurrency testing
 # Usage: docker-compose -f docker-compose.test.yml up -d
 
 version: '3.8'
@@ -29,32 +29,6 @@ services:
       timeout: 5s
       retries: 10
 
-  # Ably Stub - Mock Ably REST API for testing
-  # Captures published events and supports fault injection
-  ably-stub:
-    build:
-      context: ./loadtest/ably-stub
-      dockerfile: Dockerfile
-      platforms:
-        - linux/amd64
-    container_name: classcolab-test-ably-stub
-    environment:
-      PORT: 8081
-      ABLY_API_KEY: "test.key:secret"
-      CAPTURE_DIR: /tmp/ably-captures
-      FAULT_MODE: "none"  # Options: none, delay, drop, duplicate, reorder, error
-      DELAY_MS: 0
-      ERROR_RATE: 0.0
-    ports:
-      - "8081:8081"
-    volumes:
-      - ably_captures:/tmp/ably-captures
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--spider", "http://localhost:8081/health"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
   # Toxiproxy - Network fault injection (optional, for advanced testing)
   toxiproxy:
     image: shopify/toxiproxy:2.1.4
@@ -80,21 +54,15 @@ services:
     container_name: classcolab-test-runner
     environment:
       DATABASE_URL: "mysql://classcolab:testpassword@mysql-test:3306/classcolab_test"
-      ABLY_API_KEY: "test.key:secret"
-      ABLY_REST_URL: "http://ably-stub:8081"
       TEST_CONCURRENCY: "100"  # Default concurrency level
     depends_on:
       mysql-test:
         condition: service_healthy
-      ably-stub:
-        condition: service_healthy
     volumes:
       - test_results:/app/test-results
-      - ably_captures:/tmp/ably-captures:ro
 
 volumes:
   mysql_test_data:
-  ably_captures:
   test_results:
 
 networks:

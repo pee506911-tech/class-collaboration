@@ -28,6 +28,7 @@ mod middleware;
 mod models;
 mod repositories;
 mod services;
+mod ws;
 mod tidb_ru;
 
 use config::Config;
@@ -57,6 +58,7 @@ async fn shutdown_signal() {
 pub struct AppState {
     pub db_pool: LazyDbPool,
     pub session_service: Arc<SessionService>,
+    pub registry: Arc<ws::registry::InMemoryRegistry>,
 }
 
 #[tokio::main]
@@ -118,19 +120,30 @@ async fn main() -> anyhow::Result<()> {
     );
     let session_service = Arc::new(SessionService::new(session_repository, state_cache));
 
+    // WebSocket session registry — in-memory broadcast registry for real-time
+    // event delivery to connected WebSocket clients.
+    let registry = Arc::new(ws::registry::InMemoryRegistry::new());
+
     let app_state = AppState {
         db_pool: lazy_pool.clone(),
         session_service,
+        registry: registry.clone(),
     };
 
     // Spawn the outbox worker in the background once the DB pool is ready.
     // The worker accepts a shutdown signal so it can flush pending events before exit.
     let (outbox_shutdown_tx, outbox_shutdown_rx) = watch::channel(false);
+    let registry_for_outbox = registry.clone();
 
     tokio::spawn(async move {
         match lazy_pool.pool().await {
             Ok(pool) => {
-                crate::services::outbox::run_outbox_worker(pool, outbox_shutdown_rx).await;
+                crate::services::outbox::run_outbox_worker(
+                    pool,
+                    registry_for_outbox,
+                    outbox_shutdown_rx,
+                )
+                .await;
             }
             Err(e) => {
                 tracing::error!("Failed to get DB pool for outbox worker: {}", e);
@@ -215,6 +228,8 @@ async fn main() -> anyhow::Result<()> {
         // Authentication (strict rate limiting)
         .route("/api/auth/register", post(handlers::auth::register))
         .route("/api/auth/login", post(handlers::auth::login))
+        // WS token endpoint (requires auth cookie)
+        .route("/api/auth/ws-token", get(handlers::ws_token::get_ws_token))
         .layer(overload_protection.clone())
         .layer(GovernorLayer {
             config: strict_governor_conf,
@@ -226,8 +241,8 @@ async fn main() -> anyhow::Result<()> {
             "/api/client-error",
             post(handlers::client_error::report_client_error),
         )
-        // Ably token request signing (public; must tolerate classroom NAT bursts)
-        .route("/api/auth/ably", get(handlers::ably::get_ably_token))
+        // WebSocket upgrade endpoint (public; JWT-validated via query param)
+        .route("/api/ws", get(ws::handler::ws_handler))
         // Public endpoints (no auth required)
         .route(
             "/api/share/:token",

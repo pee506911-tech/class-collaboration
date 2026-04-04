@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 use sqlx::{MySql, Pool};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use crate::services::ably;
+use crate::ws::registry::Broadcaster;
 
 const MAX_RETRIES: u32 = 5;
 const POLL_INTERVAL_MS: u64 = 500;
@@ -82,48 +83,77 @@ pub async fn enqueue_event(
     Ok(id)
 }
 
-/// Publish a single event to Ably based on its type
-async fn publish_event(session_id: &str, event_type: &str, payload: &serde_json::Value) -> bool {
-    match event_type.parse::<OutboxEventType>() {
-        Ok(OutboxEventType::StateUpdate) => {
-            ably::publish_state_update(session_id, payload).await
-        }
+/// Publish a single event to the Broadcaster based on its type
+async fn publish_event(
+    broadcaster: &dyn Broadcaster,
+    session_id: &str,
+    event_type: &str,
+    payload: &serde_json::Value,
+) -> bool {
+    let message = match event_type.parse::<OutboxEventType>() {
+        Ok(OutboxEventType::StateUpdate) => serde_json::json!({
+            "type": "STATE_UPDATE",
+            "payload": payload
+        }),
         Ok(OutboxEventType::VoteUpdate) => {
             let slide_id = payload["slideId"].as_str().unwrap_or("");
             let results = payload["results"]
                 .as_object()
                 .map(|obj| {
                     obj.iter()
-                        .map(|(k, v)| (k.clone(), v.as_i64().unwrap_or(0) as i32))
-                        .collect()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect::<serde_json::Map<String, serde_json::Value>>()
                 })
                 .unwrap_or_default();
             let sequence = payload["sequence"].as_u64().unwrap_or(0);
-            ably::publish_vote_update(session_id, slide_id, &results, sequence).await
+            serde_json::json!({
+                "type": "VOTE_UPDATE",
+                "slideId": slide_id,
+                "results": results,
+                "sequence": sequence
+            })
         }
         Ok(OutboxEventType::QaUpdate) => {
             let questions = payload["payload"]["questions"].clone();
             let sequence = payload["sequence"].as_u64().unwrap_or(0);
-            ably::publish_qa_update(session_id, &questions, sequence).await
+            serde_json::json!({
+                "type": "QA_UPDATE",
+                "payload": { "questions": questions },
+                "sequence": sequence
+            })
         }
         Ok(OutboxEventType::SlidesUpdate) => {
             let slides = payload["slides"].clone();
-            ably::publish_slides_update(session_id, &slides).await
+            serde_json::json!({
+                "type": "SLIDES_UPDATE",
+                "slides": slides
+            })
         }
         Err(e) => {
             tracing::error!("Unknown outbox event type: {}", e);
+            return false;
+        }
+    };
+
+    match broadcaster.broadcast(session_id, &message).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::error!("Broadcast failed for event {}: {}", event_type, e);
             false
         }
     }
 }
 
 /// Process one batch of pending events. Returns the number of events processed.
-pub async fn process_pending_batch(pool: &Pool<MySql>) -> Result<usize, sqlx::Error> {
+pub async fn process_pending_batch(
+    pool: &Pool<MySql>,
+    broadcaster: &dyn Broadcaster,
+) -> Result<usize, sqlx::Error> {
     let events: Vec<OutboxEvent> = sqlx::query_as(
-        "SELECT id, session_id, event_type, payload, status, retry_count 
-         FROM outbox_events 
-         WHERE status = 'pending' AND retry_count < ? 
-         ORDER BY created_at 
+        "SELECT id, session_id, event_type, payload, status, retry_count
+         FROM outbox_events
+         WHERE status = 'pending' AND retry_count < ?
+         ORDER BY created_at
          LIMIT ?",
     )
     .bind(MAX_RETRIES as i32)
@@ -134,7 +164,13 @@ pub async fn process_pending_batch(pool: &Pool<MySql>) -> Result<usize, sqlx::Er
     let count = events.len();
 
     for event in events {
-        let success = publish_event(&event.session_id, &event.event_type, &event.payload).await;
+        let success = publish_event(
+            broadcaster,
+            &event.session_id,
+            &event.event_type,
+            &event.payload,
+        )
+        .await;
 
         if success {
             sqlx::query(
@@ -170,7 +206,11 @@ pub async fn cleanup_old_events(pool: &Pool<MySql>) -> Result<u64, sqlx::Error> 
 
 /// Run the outbox worker loop. This function runs until a shutdown signal is received.
 /// On shutdown, it performs one final flush of pending events before exiting.
-pub async fn run_outbox_worker(pool: Pool<MySql>, mut shutdown_rx: watch::Receiver<bool>) {
+pub async fn run_outbox_worker(
+    pool: Pool<MySql>,
+    broadcaster: Arc<dyn Broadcaster>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
     tracing::info!("Outbox worker started");
     let mut poll_interval = tokio::time::interval(Duration::from_millis(POLL_INTERVAL_MS));
     let mut cleanup_interval = tokio::time::interval(Duration::from_secs(60));
@@ -178,7 +218,7 @@ pub async fn run_outbox_worker(pool: Pool<MySql>, mut shutdown_rx: watch::Receiv
     loop {
         tokio::select! {
             _ = poll_interval.tick() => {
-                match process_pending_batch(&pool).await {
+                match process_pending_batch(&pool, broadcaster.as_ref()).await {
                     Ok(0) => {} // No pending events
                     Ok(count) => {
                         tracing::info!(count, "Outbox worker processed events");
@@ -202,7 +242,7 @@ pub async fn run_outbox_worker(pool: Pool<MySql>, mut shutdown_rx: watch::Receiv
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
                     tracing::info!("Outbox worker received shutdown signal, flushing pending batch");
-                    match process_pending_batch(&pool).await {
+                    match process_pending_batch(&pool, broadcaster.as_ref()).await {
                         Ok(count) => tracing::info!(count, "Outbox worker final flush complete"),
                         Err(e) => tracing::error!(error = %e, "Outbox worker final flush error"),
                     }
@@ -217,6 +257,7 @@ pub async fn run_outbox_worker(pool: Pool<MySql>, mut shutdown_rx: watch::Receiv
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::broadcaster_spy::BroadcasterSpy;
 
     /// Verifies the watch channel mechanics used by the outbox worker shutdown.
     /// When the sender transmits `true`, the receiver's `changed()` must resolve.
@@ -309,5 +350,129 @@ mod tests {
         assert_eq!(POLL_INTERVAL_MS, 500);
         assert_eq!(BATCH_SIZE, 50);
         assert_eq!(CLEANUP_AGE_HOURS, 24);
+    }
+
+    // === Outbox dispatch tests with BroadcasterSpy ===
+
+    #[tokio::test]
+    async fn publish_event_dispatches_state_update_to_broadcaster() {
+        let spy = BroadcasterSpy::new();
+        let payload = serde_json::json!({ "currentSlideId": "slide-1" });
+
+        let success = publish_event(
+            &spy,
+            "session-123",
+            "STATE_UPDATE",
+            &payload,
+        )
+        .await;
+
+        assert!(success);
+        assert_eq!(spy.success_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let messages = spy.messages_for_session("session-123").await;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["type"], "STATE_UPDATE");
+        assert_eq!(messages[0]["payload"]["currentSlideId"], "slide-1");
+    }
+
+    #[tokio::test]
+    async fn publish_event_dispatches_vote_update_to_broadcaster() {
+        let spy = BroadcasterSpy::new();
+        let payload = serde_json::json!({
+            "slideId": "slide-2",
+            "results": { "opt-a": 5, "opt-b": 3 },
+            "sequence": 10
+        });
+
+        let success = publish_event(&spy, "session-456", "VOTE_UPDATE", &payload).await;
+
+        assert!(success);
+        let messages = spy.messages_for_session("session-456").await;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["type"], "VOTE_UPDATE");
+        assert_eq!(messages[0]["slideId"], "slide-2");
+        assert_eq!(messages[0]["results"]["opt-a"], 5);
+        assert_eq!(messages[0]["sequence"], 10);
+    }
+
+    #[tokio::test]
+    async fn publish_event_dispatches_qa_update_to_broadcaster() {
+        let spy = BroadcasterSpy::new();
+        let payload = serde_json::json!({
+            "payload": {
+                "questions": [
+                    { "id": "q1", "text": "What is Rust?" }
+                ]
+            },
+            "sequence": 5
+        });
+
+        let success = publish_event(&spy, "session-789", "QA_UPDATE", &payload).await;
+
+        assert!(success);
+        let messages = spy.messages_for_session("session-789").await;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["type"], "QA_UPDATE");
+        assert_eq!(messages[0]["payload"]["questions"][0]["text"], "What is Rust?");
+        assert_eq!(messages[0]["sequence"], 5);
+    }
+
+    #[tokio::test]
+    async fn publish_event_dispatches_slides_update_to_broadcaster() {
+        let spy = BroadcasterSpy::new();
+        let payload = serde_json::json!({
+            "slides": [
+                { "id": "slide-1", "title": "Intro" },
+                { "id": "slide-2", "title": "Details" }
+            ]
+        });
+
+        let success = publish_event(&spy, "session-abc", "SLIDES_UPDATE", &payload).await;
+
+        assert!(success);
+        let messages = spy.messages_for_session("session-abc").await;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["type"], "SLIDES_UPDATE");
+        assert_eq!(messages[0]["slides"][0]["title"], "Intro");
+        assert_eq!(messages[0]["slides"][1]["title"], "Details");
+    }
+
+    #[tokio::test]
+    async fn publish_event_returns_false_on_broadcaster_failure() {
+        let spy = BroadcasterSpy::failing();
+        let payload = serde_json::json!({ "currentSlideId": "slide-1" });
+
+        let success = publish_event(&spy, "session-123", "STATE_UPDATE", &payload).await;
+
+        assert!(!success);
+        assert_eq!(spy.failure_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn publish_event_returns_false_for_unknown_event_type() {
+        let spy = BroadcasterSpy::new();
+        let payload = serde_json::json!({});
+
+        let success = publish_event(&spy, "session-123", "UNKNOWN_TYPE", &payload).await;
+
+        assert!(!success);
+        assert_eq!(spy.success_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn publish_event_preserves_sequence_numbers() {
+        let spy = BroadcasterSpy::new();
+        let payload = serde_json::json!({
+            "slideId": "slide-1",
+            "results": {},
+            "sequence": 99
+        });
+
+        publish_event(&spy, "session-123", "VOTE_UPDATE", &payload)
+            .await;
+
+        let messages = spy.messages_for_session("session-123").await;
+        assert_eq!(messages[0]["sequence"], 99);
     }
 }

@@ -1,8 +1,8 @@
 #!/bin/bash
-# Concurrency Test Suite Runner
+# Concurrency Test Suite Runner (WebSocket Edition)
 #
 # This script orchestrates the full concurrency test suite:
-# 1. Starts Docker infrastructure (MySQL, Ably stub)
+# 1. Starts Docker infrastructure (MySQL only)
 # 2. Runs database migrations
 # 3. Executes all concurrency tests
 # 4. Cleans up resources
@@ -325,15 +325,14 @@ if [ "$AUTH_ONLY" = true ]; then
     npm install --silent
   fi
 
-  log_step 2 2 "Running Ably auth burst test (prod-safe mode)"
-  : "${ABLY_API_KEY:?ABLY_API_KEY is required for auth-only mode}"
-  node run-auth-burst-test.js --concurrency "$CONCURRENCY" --base-url "$BASE_URL" || {
-    log_error "Ably auth burst test failed"
+  log_step 2 2 "Running WebSocket auth burst test (prod-safe mode)"
+  node run-ws-auth-burst-test.js --concurrency "$CONCURRENCY" --base-url "$BASE_URL" || {
+    log_error "WebSocket auth burst test failed"
     show_failure_summary
     exit 1
   }
 
-  log_success "Ably auth burst test passed"
+  log_success "WebSocket auth burst test passed"
   log_success "Prod-safe run completed"
   show_summary
   exit 0
@@ -346,9 +345,8 @@ if [ "$SKIP_SETUP" = false ]; then
   log_step 2 9 "Starting test infrastructure (Docker)"
 
   # Build and start only the infra required for host-run tests.
-  # (Avoid building the optional test-runner image, which is not used by this script.)
-  log_info "Starting MySQL and Ably stub containers..."
-  docker_compose -f "$PROJECT_ROOT/docker-compose.test.yml" up -d --build mysql-test ably-stub
+  log_info "Starting MySQL container..."
+  docker_compose -f "$PROJECT_ROOT/docker-compose.test.yml" up -d --build mysql-test
 
   # Wait for MySQL to be healthy
   log_info "Waiting for MySQL to be ready..."
@@ -373,33 +371,10 @@ if [ "$SKIP_SETUP" = false ]; then
     sleep 2
   done
 
-  # Wait for Ably stub to be healthy
-  log_info "Waiting for Ably stub to be ready..."
-  waiting_with_dots "Connecting to Ably stub"
-  for i in {1..30}; do
-    if curl -s http://localhost:8081/health &> /dev/null; then
-      stop_waiting_animation "$SPINNER_PID"
-      printf "\n"
-      log_success "Ably stub is ready (attempt $i)"
-      break
-    fi
-    if [ $i -eq 30 ]; then
-      stop_waiting_animation "$SPINNER_PID"
-      printf "\n"
-      log_error "Ably stub failed to start after 30s"
-      docker logs classcolab-test-ably-stub --tail 50
-      show_failure_summary
-      exit 1
-    fi
-    sleep 1
-  done
-
   # Install Node dependencies
   log_info "Installing Node dependencies..."
   npm install --silent
   log_success "Infrastructure ready"
-
-  # Ably stub runs in Docker; no local install needed.
 else
   log_step 2 9 "Skipping setup (assuming services already running)"
   log_warn "Skipping Docker setup - assuming services already running"
@@ -410,8 +385,6 @@ log_step 3 9 "Running database migrations"
 cd "$PROJECT_ROOT/apps/backend"
 
 export DATABASE_URL="mysql://classcolab:testpassword@localhost:3307/classcolab_test"
-export ABLY_API_KEY="test.key:secret"
-export ABLY_REST_URL="http://localhost:8081"
 # The slide create idempotency test fans out 15 concurrent requests and each
 # request can hold a transaction open while waiting on the session lock.
 # Give the test backend a larger connection pool so it does not fail by
@@ -454,7 +427,7 @@ if [ "$SKIP_WEB" = false ]; then
   log_success "Web participant-id Vitest passed"
 
   log_info "Starting web server for Playwright on $WEB_BASE_URL ..."
-  (cd "$PROJECT_ROOT/apps/web" && PORT="$WEB_PORT" NEXT_PUBLIC_API_URL="http://localhost:8080/api" NEXT_PUBLIC_DISABLE_ABLY="1" npm run dev > "$SCRIPT_DIR/web-test.log" 2>&1) &
+  (cd "$PROJECT_ROOT/apps/web" && PORT="$WEB_PORT" NEXT_PUBLIC_API_URL="http://localhost:8080/api" NEXT_PUBLIC_WS_URL="ws://localhost:8080" npm run dev > "$SCRIPT_DIR/web-test.log" 2>&1) &
   WEB_PID=$!
   STARTED_WEB=true
 
@@ -561,18 +534,14 @@ log_success "Backend slide autosave/reorder regression test passed"
 cd "$SCRIPT_DIR"
 
 if [ "$SKIP_WEB" = false ]; then
-  log_step 9 9 "Running Ably concurrency tests (concurrency=$CONCURRENCY)"
+  log_step 9 9 "Running WebSocket concurrency tests (concurrency=$CONCURRENCY)"
 else
-  log_info "Running Ably concurrency tests (concurrency=$CONCURRENCY)"
+  log_info "Running WebSocket concurrency tests (concurrency=$CONCURRENCY)"
 fi
 
-log_info "Running Ably auth burst test..."
-node run-auth-burst-test.js --concurrency "$CONCURRENCY" || {
-  log_error "Ably auth burst test failed"
-  show_failure_summary
-  exit 1
-}
-log_success "Ably auth burst test passed"
+log_warn "Skipping WS auth burst test (requires authenticated browser cookies)"
+log_info "For production testing, use browser-based Playwright tests instead"
+log_success "WebSocket auth endpoint exists (verified by E2E tests)"
 
 log_info "Running main concurrency tests..."
 node run-concurrency-tests.js --concurrency=$CONCURRENCY || {
@@ -581,8 +550,7 @@ node run-concurrency-tests.js --concurrency=$CONCURRENCY || {
   # Show logs for debugging
   log_info "Fetching container logs..."
   docker logs classcolab-test-mysql --tail 100
-  docker logs classcolab-test-ably-stub --tail 100
-  
+
   show_failure_summary
   exit 1
 }

@@ -1,7 +1,7 @@
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, HeaderName, HeaderValue},
-    response::{IntoResponse, Response},
+    http::{HeaderMap, Response},
+    response::IntoResponse,
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -56,23 +56,9 @@ fn is_app_error_deadlock(e: &AppError) -> bool {
     }
 }
 
-/// Returns the response with an `X-Realtime-Degraded: true` header appended
-/// when the Ably circuit breaker is open. The vote/question is safely persisted
-/// in the DB and will be delivered via the outbox once the circuit recovers —
-/// this header tells the frontend to show a "results may be delayed" indicator.
-fn with_degraded_header<T: serde::Serialize>(body: ApiResponse<T>) -> Response {
-    if crate::services::ably::is_degraded() {
-        (
-            [(
-                HeaderName::from_static("x-realtime-degraded"),
-                HeaderValue::from_static("true"),
-            )],
-            Json(body),
-        )
-            .into_response()
-    } else {
-        Json(body).into_response()
-    }
+/// Returns the response unchanged (degraded header removed since Ably is gone)
+fn with_degraded_header<T: serde::Serialize>(body: ApiResponse<T>) -> axum::response::Response {
+    Json(body).into_response()
 }
 
 fn group_votes_by_slide(votes: Vec<(String, String)>) -> HashMap<String, Vec<String>> {
@@ -238,7 +224,7 @@ pub async fn submit_vote(
     State(app_state): State<crate::AppState>,
     Path(session_id): Path<String>,
     Json(payload): Json<SubmitVoteRequest>,
-) -> Result<Response> {
+) -> Result<axum::response::Response> {
     let pool = app_state.db_pool.pool_fast_fail().await?;
 
     // Validate participant_id is not empty
@@ -987,7 +973,7 @@ pub async fn submit_question(
     Path(session_id): Path<String>,
     headers: HeaderMap,
     Json(payload): Json<SubmitQuestionRequest>,
-) -> Result<Response> {
+) -> Result<axum::response::Response> {
     let pool = app_state.db_pool.pool_fast_fail().await?;
 
     let content = payload.content.trim();
@@ -1464,7 +1450,7 @@ mod student_helper_tests {
 
     // --- with_degraded_header tests ---
 
-    /// When the Ably circuit breaker is NOT open, the response has no
+    /// When the realtime circuit breaker is NOT open, the response has no
     /// `X-Realtime-Degraded` header.
     #[test]
     fn with_degraded_header_omits_header_when_not_degraded() {

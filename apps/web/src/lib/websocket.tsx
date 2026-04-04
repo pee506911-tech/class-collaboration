@@ -1,15 +1,16 @@
 'use client';
 
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
-import * as Ably from 'ably';
 import { StateUpdatePayload } from 'shared';
 import { shouldApplyStateUpdate } from './state-updates';
 import { getOrCreateParticipantId } from './participant-id';
 import { createClientRequestId, httpFetch, HttpRequestError, type HttpErrorKind } from '@/lib/http';
 import { safeLocalStorageGet, safeLocalStorageSet } from '@/lib/storage';
+import { fetchWsToken } from './ws-auth';
+import { createReconnect } from './ws-reconnect';
 
 // Cross-tab connection sharing using BroadcastChannel
-// Only one tab (the "leader") maintains the actual Ably connection
+// Only one tab (the "leader") maintains the actual WebSocket connection
 // Other tabs receive messages via BroadcastChannel
 // Includes automatic leader failover when leader tab closes
 
@@ -114,10 +115,10 @@ export function WebSocketProvider({
     const [questions, setQuestions] = useState<any[]>([]);
     const [activeParticipants, setActiveParticipants] = useState(0);
     const [lastSlideUpdate, setLastSlideUpdate] = useState(0);
-    const [ablyClient, setAblyClient] = useState<Ably.Realtime | null>(null);
+    const [wsConnection, setWsConnection] = useState<WebSocket | null>(null);
     const [myVotes, setMyVotes] = useState<Record<string, string[]>>({});
 
-    // Initialize participantId synchronously to avoid race condition with Ably connection.
+    // Initialize participantId synchronously to avoid race condition with WebSocket connection.
     // Students get a session-scoped ID so separate browsers never collapse into one clientId.
     const participantIdRef = useRef<string>(getOrCreateParticipantId(role, sessionId, {
         get: safeLocalStorageGet,
@@ -125,7 +126,8 @@ export function WebSocketProvider({
             safeLocalStorageSet(key, value);
         },
     }));
-    const ablyClientRef = useRef<Ably.Realtime | null>(null);
+    const wsRef = useRef<WebSocket | null>(null);
+    const wsReconnectRef = useRef<ReturnType<typeof createReconnect> | null>(null);
     const isLeaderRef = useRef<boolean>(false);
     const leaderSinceRef = useRef<number>(0); // When we became leader
     const leaderCheckTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -153,7 +155,7 @@ export function WebSocketProvider({
     useEffect(() => { voteResultsRef.current = voteResults; }, [voteResults]);
     useEffect(() => { questionsRef.current = questions; }, [questions]);
 
-    // Fetch initial state IMMEDIATELY on mount (before Ably connection)
+    // Fetch initial state IMMEDIATELY on mount (before WebSocket connection)
     // This prevents the flash of incorrect UI state
     useEffect(() => {
         if (!sessionId || initialStateLoaded) return;
@@ -203,7 +205,7 @@ export function WebSocketProvider({
     // participantId is now initialized synchronously in useRef above
     // This effect is kept for backwards compatibility but the ref is already set
 
-    // Handle incoming Ably messages (for both leader and follower)
+    // Handle incoming WebSocket messages (for both leader and follower)
     const handleAblyMessage = useCallback((messageName: string, data: any) => {
         if (!isMountedRef.current) return;
 
@@ -279,7 +281,7 @@ export function WebSocketProvider({
     useEffect(() => {
         if (!sessionId) return;
 
-        // IMPORTANT: Disable BroadcastChannel for students so each window gets its own Ably connection
+        // IMPORTANT: Disable BroadcastChannel for students so each window gets its own WebSocket connection
         // This ensures each student has a unique connection even in the same browser
         // BroadcastChannel is only useful for staff who might have multiple tabs open
         const hasBroadcastChannel = typeof window !== 'undefined'
@@ -287,9 +289,9 @@ export function WebSocketProvider({
             && role !== 'student';
 
         isMountedRef.current = true;
-        let client: Ably.Realtime | null = null;
+        let ws: WebSocket | null = null;
         let bc: BroadcastChannel | null = null;
-        const channelName = `ably-session-${sessionId}-${role}`;
+        const channelName = `ws-session-${sessionId}-${role}`;
 
         // Track when we last heard from a leader and their priority
         let lastLeaderTimestamp = 0;
@@ -388,87 +390,163 @@ export function WebSocketProvider({
             }
         };
 
-    const createAblyConnection = () => {
-        if (client) return;
+    const createWebSocketConnection = async () => {
+        if (ws?.readyState === WebSocket.OPEN) return;
 
-        if (process.env.NEXT_PUBLIC_DISABLE_ABLY === '1') {
+        setIsConnecting(true);
+        setConnectionError(null);
+
+        try {
+            // Fetch WS token
+            const token = await fetchWsToken({
+                sessionId,
+                role,
+                participantId: participantIdRef.current,
+            });
+
+            if (!isMountedRef.current) return;
+
+            // Close existing connection
+            if (ws) {
+                ws.onclose = null;
+                ws.onerror = null;
+                ws.onmessage = null;
+                ws.close();
+            }
+
+            // Create WebSocket connection
+            const wsUrl = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8080';
+            const wsEndpoint = `${wsUrl}/api/ws?token=${encodeURIComponent(token)}`;
+            console.log(`[WS] Connecting to ${wsEndpoint}`);
+            ws = new WebSocket(wsEndpoint);
+            wsRef.current = ws;
+            setWsConnection(ws);
+
+            ws.onopen = () => {
+                if (!isMountedRef.current) return;
+                console.log('[WS] Connected');
+                setIsConnected(true);
+                setIsConnecting(false);
+                setConnectionError(null);
+
+                // End failover mode and process buffered messages
+                if (isInFailoverRef.current) {
+                    setTimeout(processBufferedMessages, 100);
+                }
+
+                // Announce leader if we have BroadcastChannel
+                if (bc && isLeaderRef.current) {
+                    bc.postMessage({
+                        type: 'LEADER_ANNOUNCE',
+                        sessionId,
+                        tabId: TAB_ID,
+                        timestamp: Date.now(),
+                        leaderSince: leaderSinceRef.current,
+                        currentState: {
+                            state: stateRef.current,
+                            voteResults: voteResultsRef.current,
+                            questions: questionsRef.current,
+                            voteSequence: voteSequenceRef.current,
+                            qaSequence: qaSequenceRef.current,
+                        }
+                    });
+                }
+            };
+
+            ws.onmessage = (event: MessageEvent) => {
+                if (!isMountedRef.current) return;
+
+                const now = Date.now();
+                if (!lastRealtimeMessageAtRef.current || now - lastRealtimeMessageAtRef.current > 1000) {
+                    lastRealtimeMessageAtRef.current = now;
+                    setLastRealtimeMessageAt(now);
+                }
+
+                try {
+                    const message = JSON.parse(event.data);
+                    const { type, ...data } = message;
+
+                    // Handle the message
+                    handleAblyMessage(type, data);
+
+                    // Broadcast to follower tabs if we're leader
+                    if (bc && isLeaderRef.current) {
+                        bc.postMessage({
+                            type: 'ABLY_MESSAGE',
+                            sessionId,
+                            message: { name: type, data },
+                            timestamp: Date.now()
+                        });
+                    }
+                } catch (e) {
+                    console.error('[WS] Failed to parse message:', e);
+                }
+            };
+
+            ws.onclose = (event: CloseEvent) => {
+                if (!isMountedRef.current) return;
+                console.log(`[WS] Disconnected (code: ${event.code})`);
+                setIsConnected(false);
+                setIsConnecting(false);
+
+                // Schedule reconnect if not intentional close
+                if (event.code !== 1000 && isLeaderRef.current) {
+                    scheduleReconnect();
+                }
+            };
+
+            ws.onerror = () => {
+                if (!isMountedRef.current) return;
+                console.error('[WS] Connection error');
+                setConnectionError('Connection failed.');
+            };
+
+            // Fetch initial state after setting up connection
+            await fetchInitialState();
+        } catch (e) {
+            if (!isMountedRef.current) return;
+            console.error('[WS] Failed to connect:', e);
             setIsConnecting(false);
-            setConnectionError(null);
+            setConnectionError(e instanceof Error ? e.message : 'Connection failed');
+            if (isLeaderRef.current) {
+                scheduleReconnect();
+            }
+        }
+    };
+
+    let reconnectAttempt = 0;
+    const maxReconnectAttempts = 10;
+    let reconnectTimeoutId: NodeJS.Timeout | null = null;
+
+    const scheduleReconnect = () => {
+        if (reconnectTimeoutId) {
+            clearTimeout(reconnectTimeoutId);
+        }
+
+        if (reconnectAttempt >= maxReconnectAttempts) {
+            setConnectionError('Connection lost. Please refresh the page.');
             return;
         }
 
-        const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
-        // Ensure participantId is set before creating connection
-        const participantId = participantIdRef.current;
-        if (!participantId) {
-            console.error('participantId is empty, this will cause connection issues');
+        const baseDelay = 1000;
+        const maxDelay = 30000;
+        const delay = Math.min(baseDelay * Math.pow(2, reconnectAttempt), maxDelay);
+        const jitteredDelay = delay * (0.5 + Math.random());
+
+        console.log(`[WS] Scheduling reconnect in ${jitteredDelay}ms (attempt ${reconnectAttempt + 1})`);
+
+        reconnectTimeoutId = setTimeout(() => {
+            reconnectAttempt++;
+            createWebSocketConnection();
+        }, jitteredDelay);
+    };
+
+    const resetReconnect = () => {
+        reconnectAttempt = 0;
+        if (reconnectTimeoutId) {
+            clearTimeout(reconnectTimeoutId);
+            reconnectTimeoutId = null;
         }
-
-        console.log(`Creating Ably connection for ${role} with participantId: ${participantId}`);
-
-        client = new Ably.Realtime({
-            authUrl: `${apiBase}/auth/ably?sessionId=${sessionId}&role=${role}&participantId=${participantId}`,
-            authMethod: 'GET',
-            disconnectedRetryTimeout: 5000,
-            suspendedRetryTimeout: 10000,
-        });
-
-        ablyClientRef.current = client;
-        setAblyClient(client);
-
-        client.connection.on('connected', () => {
-            setIsConnected(true);
-            setIsConnecting(false);
-            setConnectionError(null);
-
-            // End failover mode and process buffered messages
-            if (isInFailoverRef.current) {
-                setTimeout(processBufferedMessages, 100);
-            }
-
-            if (bc) {
-                bc.postMessage({
-                    type: 'LEADER_ANNOUNCE',
-                    sessionId,
-                    tabId: TAB_ID,
-                    timestamp: Date.now(),
-                    leaderSince: leaderSinceRef.current,
-                    currentState: {
-                        state: stateRef.current,
-                        voteResults: voteResultsRef.current,
-                        questions: questionsRef.current,
-                        voteSequence: voteSequenceRef.current,
-                        qaSequence: qaSequenceRef.current,
-                    }
-                });
-            }
-        });
-
-        client.connection.on('disconnected', () => {
-            setIsConnected(false);
-        });
-
-        client.connection.on('failed', () => {
-            setIsConnected(false);
-            setIsConnecting(false);
-            setConnectionError('Connection failed.');
-        });
-
-        const channel = client.channels.get(`session:${sessionId}`);
-        channel.subscribe((message) => {
-            handleAblyMessage(message.name || '', message.data);
-
-            if (bc && isLeaderRef.current) {
-                bc.postMessage({
-                    type: 'ABLY_MESSAGE',
-                    sessionId,
-                    message: { name: message.name, data: message.data },
-                    timestamp: Date.now()
-                });
-            }
-        });
-
-        fetchInitialState();
     };
 
         const becomeLeader = () => {
@@ -494,7 +572,7 @@ export function WebSocketProvider({
                 leaderPongTimeoutRef.current = null;
             }
 
-            createAblyConnection();
+            createWebSocketConnection();
         };
 
         const stepDown = (newLeaderTabId: string, newLeaderSince: number) => {
@@ -506,16 +584,21 @@ export function WebSocketProvider({
             currentLeaderTabId = newLeaderTabId;
             currentLeaderSince = newLeaderSince;
 
-            if (client) {
+            if (ws) {
                 try {
-                    client.close();
+                    ws.onclose = null;
+                    ws.onerror = null;
+                    ws.onmessage = null;
+                    ws.close(1000, 'Stepping down as leader');
                 } catch (e) {
                     // Ignore close errors
                 }
-                client = null;
-                ablyClientRef.current = null;
-                setAblyClient(null);
+                ws = null;
+                wsRef.current = null;
+                setWsConnection(null);
             }
+
+            resetReconnect();
 
             startLeaderHealthCheck();
         };
@@ -718,7 +801,6 @@ export function WebSocketProvider({
             fetchAbortController.abort(); // Cancel any pending fetches
 
             if (isLeaderRef.current && bc) {
-
                 bc.postMessage({ type: 'LEADER_GOODBYE', sessionId, tabId: TAB_ID });
             }
 
@@ -726,11 +808,23 @@ export function WebSocketProvider({
             if (leaderPingIntervalRef.current) clearInterval(leaderPingIntervalRef.current);
             if (leaderPongTimeoutRef.current) clearTimeout(leaderPongTimeoutRef.current);
 
-            if (client) {
+            // Close WebSocket connection
+            if (ws) {
                 try {
-                    client.connection.off();
-                    client.close();
+                    ws.onclose = null;
+                    ws.onerror = null;
+                    ws.onmessage = null;
+                    ws.close(1000, 'Component unmount');
                 } catch (e) { }
+                ws = null;
+                wsRef.current = null;
+                setWsConnection(null);
+            }
+
+            // Clear reconnect timeout
+            if (reconnectTimeoutId) {
+                clearTimeout(reconnectTimeoutId);
+                reconnectTimeoutId = null;
             }
 
             if (bc) {
@@ -740,7 +834,7 @@ export function WebSocketProvider({
 
             isLeaderRef.current = false;
             leaderStatus.delete(sessionId);
-            ablyClientRef.current = null;
+            wsRef.current = null;
             bcRef.current = null;
         };
     }, [sessionId, role, name, handleAblyMessage, processBufferedMessages]);
@@ -941,7 +1035,7 @@ export function WebSocketProvider({
             lastSlideUpdate,
             lastStateSyncAt,
             lastRealtimeMessageAt,
-            socket: ablyClient,
+            socket: wsConnection,
             initialStateLoaded,
             participantId: participantIdRef.current,
             myVotes

@@ -68,7 +68,7 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Run tests (includes contract tests)
+      - name: Run tests (includes ws-auth, ws-reconnect, contracts)
         run: pnpm test -- --run
 
       - name: Type check
@@ -156,12 +156,26 @@ jobs:
 
   # ── T3: Playwright E2E tests (on PR) ────────────────────────
   playwright-e2e:
-    name: E2E Tests (Playwright)
+    name: E2E Tests (Playwright + WebSocket)
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     defaults:
       run:
-        working-directory: apps/web
+        working-directory: apps
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: test_db
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
 
     steps:
       - uses: actions/checkout@v4
@@ -176,10 +190,60 @@ jobs:
           node-version: 20
           cache: 'pnpm'
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/backend/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('apps/backend/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
       - name: Install dependencies
+        working-directory: apps/web
         run: pnpm install --frozen-lockfile
 
+      - name: Build backend
+        working-directory: apps/backend
+        run: cargo build --release
+
+      - name: Run database migrations
+        working-directory: apps/backend
+        run: |
+          cargo install sqlx-cli --no-default-features --features mysql --locked
+          sqlx migrate run
+        env:
+          DATABASE_URL: mysql://root:root@localhost:3306/test_db
+
+      - name: Start backend server
+        working-directory: apps/backend
+        run: |
+          ./target/release/backend-rust &
+          echo "Backend PID: $!"
+          echo $! > /tmp/backend.pid
+          # Wait for server to be ready
+          for i in $(seq 1 30); do
+            if curl -s http://localhost:8080/health/ready > /dev/null 2>&1; then
+              echo "Backend is ready!"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Backend failed to start"
+          exit 1
+        env:
+          DATABASE_URL: mysql://root:root@localhost:3306/test_db
+          JWT_SECRET: test-secret-for-ci
+          ALLOWED_ORIGINS: http://localhost:3000
+          ENVIRONMENT: test
+        shell: bash
+
       - name: Install Playwright browsers
+        working-directory: apps/web
         run: npx playwright install --with-deps chromium
 
       - name: Build shared package
@@ -187,9 +251,12 @@ jobs:
         run: pnpm build
 
       - name: Run Playwright E2E tests
+        working-directory: apps/web
         run: npx playwright test
         env:
-          NEXT_PUBLIC_API_URL: http://localhost:8080
+          PLAYWRIGHT_API_URL: http://localhost:8080/api
+          NEXT_PUBLIC_API_URL: http://localhost:8080/api
+          NEXT_PUBLIC_WS_URL: ws://localhost:8080
 
       - name: Upload Playwright report
         if: always()
@@ -198,3 +265,11 @@ jobs:
           name: playwright-report
           path: apps/web/playwright-report/
           retention-days: 30
+
+      - name: Stop backend server
+        if: always()
+        run: |
+          if [ -f /tmp/backend.pid ]; then
+            kill $(cat /tmp/backend.pid) || true
+          fi
+        shell: bash
