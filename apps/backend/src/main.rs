@@ -134,9 +134,10 @@ async fn main() -> anyhow::Result<()> {
     // The worker accepts a shutdown signal so it can flush pending events before exit.
     let (outbox_shutdown_tx, outbox_shutdown_rx) = watch::channel(false);
     let registry_for_outbox = registry.clone();
+    let pool_for_outbox = lazy_pool.clone();
 
     tokio::spawn(async move {
-        match lazy_pool.pool().await {
+        match pool_for_outbox.pool().await {
             Ok(pool) => {
                 crate::services::outbox::run_outbox_worker(
                     pool,
@@ -159,6 +160,20 @@ async fn main() -> anyhow::Result<()> {
     });
 
     tracing::info!("App state created in {:?}", startup_time.elapsed());
+
+    // Wait for database to be ready before starting the server.
+    // This prevents 503 errors from being served to clients/health checks during startup.
+    // The DB init task was already spawned above; we just wait for it to complete.
+    tracing::info!("Waiting for database to be ready before accepting requests...");
+    match lazy_pool.pool().await {
+        Ok(_) => {
+            tracing::info!("Database is ready (total startup: {:?})", startup_time.elapsed());
+        }
+        Err(e) => {
+            tracing::error!("Failed to initialize database: {}", e);
+            return Err(e.into());
+        }
+    }
 
     // Rate limiting configuration
     let general_governor_conf = Arc::new(
