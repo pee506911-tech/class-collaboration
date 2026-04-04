@@ -7,7 +7,7 @@ type SaveSlideUpdateArgs = {
     sessionId: string;
     slideId: string;
     content: Slide['content'];
-    baseSlides: Slide[];
+    getBaseSlides: () => Slide[];
     resolveOptimisticId: (id: string) => string | null | undefined;
     setBaseSlides: Dispatch<SetStateAction<Slide[]>>;
     saveSlide?: typeof updateSlideApi;
@@ -29,14 +29,14 @@ export async function saveSlideUpdate({
     sessionId,
     slideId,
     content,
-    baseSlides,
+    getBaseSlides,
     resolveOptimisticId,
     setBaseSlides,
     saveSlide = updateSlideApi,
     refreshSlides,
 }: SaveSlideUpdateArgs): Promise<SaveSlideUpdateResult> {
     const resolvedSlideId = resolveOptimisticId(slideId) ?? slideId;
-    const existingSlide = baseSlides.find((slide) => slide.id === resolvedSlideId);
+    const existingSlide = getBaseSlides().find((slide) => slide.id === resolvedSlideId);
     if (!existingSlide) {
         return { status: 'noop' };
     }
@@ -56,7 +56,14 @@ export async function saveSlideUpdate({
         );
         setBaseSlides((prevSlides) =>
             prevSlides.map((slide) =>
-                slide.id === resolvedSlideId ? savedSlide : slide,
+                slide.id === resolvedSlideId
+                    ? {
+                        ...slide,
+                        ...savedSlide,
+                        orderIndex: slide.orderIndex,
+                        isHidden: slide.isHidden,
+                    }
+                    : slide,
             ),
         );
         return { status: 'saved', slide: savedSlide };
@@ -70,7 +77,14 @@ export async function saveSlideUpdate({
 
         setBaseSlides((prevSlides) =>
             prevSlides.map((slide) =>
-                slide.id === resolvedSlideId ? existingSlide : slide,
+                slide.id === resolvedSlideId
+                    ? {
+                        ...slide,
+                        type: existingSlide.type,
+                        content: existingSlide.content,
+                        version: existingSlide.version,
+                    }
+                    : slide,
             ),
         );
         throw error;

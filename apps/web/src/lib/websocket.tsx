@@ -8,6 +8,7 @@ import { createClientRequestId, httpFetch, HttpRequestError, type HttpErrorKind 
 import { safeLocalStorageGet, safeLocalStorageSet } from '@/lib/storage';
 import { fetchWsToken } from './ws-auth';
 import { createReconnect } from './ws-reconnect';
+import { trimTrailingSlash } from './url';
 
 // Cross-tab connection sharing using BroadcastChannel
 // Only one tab (the "leader") maintains the actual WebSocket connection
@@ -415,7 +416,7 @@ export function WebSocketProvider({
             }
 
             // Create WebSocket connection
-            const wsUrl = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8080';
+            const wsUrl = trimTrailingSlash(process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8080');
             const wsEndpoint = `${wsUrl}/api/ws?token=${encodeURIComponent(token)}`;
             console.log(`[WS] Connecting to ${wsEndpoint}`);
             ws = new WebSocket(wsEndpoint);

@@ -13,6 +13,7 @@
  */
 
 import { safeLocalStorageGet } from './storage';
+import { trimTrailingSlash } from './url';
 
 export interface WsTokenResponse {
     token: string;
@@ -40,7 +41,7 @@ export async function fetchWsToken({
     participantId,
     apiUrl,
 }: FetchWsTokenOptions): Promise<string> {
-    const apiBase = apiUrl || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
+    const apiBase = trimTrailingSlash(apiUrl || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api');
 
     const params = new URLSearchParams({
         sessionId,
@@ -52,6 +53,10 @@ export async function fetchWsToken({
     }
 
     const url = `${apiBase}/auth/ws-token?${params.toString()}`;
+
+    if (shouldPreferBearerAuth(apiBase)) {
+        return fetchWithBearerToken(url);
+    }
 
     // Try 1: Cookie-based auth (works for same-origin or properly configured cross-origin)
     const cookieResponse = await fetch(url, {
@@ -106,4 +111,22 @@ async function fetchWithBearerToken(url: string): Promise<string> {
     }
 
     return extractToken(response);
+}
+
+function shouldPreferBearerAuth(apiBase: string): boolean {
+    if (typeof window === 'undefined') {
+        return false;
+    }
+
+    const token = safeLocalStorageGet('token');
+    if (!token) {
+        return false;
+    }
+
+    try {
+        const apiOrigin = new URL(apiBase).origin;
+        return apiOrigin !== window.location.origin;
+    } catch {
+        return false;
+    }
 }

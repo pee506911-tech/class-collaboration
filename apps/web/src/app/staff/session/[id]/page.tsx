@@ -2,7 +2,7 @@
 
 export const runtime = 'edge';
 
-import { useEffect, useState } from 'react';
+import { Dispatch, SetStateAction, useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Slide, Session } from 'shared';
 import { getSlides, createSlide, deleteSlide, reorderSlides, getSession, updateSession, updateSlideVisibility, goLiveSession, stopSession, ApiRequestError } from '@/lib/api';
@@ -66,7 +66,7 @@ function toSlide(slide: EditorSlide): Slide {
     return rest;
 }
 
-function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSession }: { baseSlides: Slide[], setBaseSlides: React.Dispatch<React.SetStateAction<Slide[]>>, loadSlides: () => Promise<void>, session: Session | null, loadSession: () => void }) {
+function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSession }: { baseSlides: Slide[], setBaseSlides: Dispatch<SetStateAction<Slide[]>>, loadSlides: () => Promise<void>, session: Session | null, loadSession: () => void }) {
     const { sendMessage, state, activeParticipants, updateState, initialStateLoaded } = useWebSocket();
     const params = useParams();
     const id = params?.id as string;
@@ -81,6 +81,24 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
     const [isReordering, setIsReordering] = useState(false);
     const [isTogglingVisibility, setIsTogglingVisibility] = useState(false);
     const [isSavingSettings, setIsSavingSettings] = useState(false);
+
+    const baseSlidesRef = useRef(baseSlides);
+
+    useEffect(() => {
+        baseSlidesRef.current = baseSlides;
+    }, [baseSlides]);
+
+    const setBaseSlidesSynced = useCallback((updater: SetStateAction<Slide[]>) => {
+        if (typeof updater === 'function') {
+            const nextSlides = (updater as (prevState: Slide[]) => Slide[])(baseSlidesRef.current);
+            baseSlidesRef.current = nextSlides;
+            setBaseSlides(nextSlides);
+            return;
+        }
+
+        baseSlidesRef.current = updater;
+        setBaseSlides(updater);
+    }, [setBaseSlides]);
 
     // SEPARATE PREVIEW STATE: This is for editor preview only, independent of student view
     const [previewSlideId, setPreviewSlideId] = useState<string | null>(null);
@@ -98,7 +116,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
     } = useOptimisticSlideQueue({
         sessionId: id,
         baseSlides,
-        setBaseSlides,
+        setBaseSlides: setBaseSlidesSynced,
         refreshBaseSlides: loadSlides,
         onDeleteRollback: setPreviewSlideId,
     });
@@ -212,9 +230,9 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                 sessionId: id,
                 slideId,
                 content,
-                baseSlides,
+                getBaseSlides: () => baseSlidesRef.current,
                 resolveOptimisticId,
-                setBaseSlides,
+                setBaseSlides: setBaseSlidesSynced,
                 refreshSlides: loadSlides,
             });
         } catch (e) {
@@ -256,7 +274,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
         if ((slide as EditorSlide).optimistic?.isPending) return;
 
         const resolvedSlideId = resolveOptimisticId(slide.id) ?? slide.id;
-        setBaseSlides((prevSlides) => prevSlides.map((entry) => entry.id === resolvedSlideId ? { ...entry, isHidden: !slide.isHidden } : entry));
+        setBaseSlidesSynced((prevSlides) => prevSlides.map((entry) => entry.id === resolvedSlideId ? { ...entry, isHidden: !slide.isHidden } : entry));
 
         setIsTogglingVisibility(true);
         try {
@@ -264,7 +282,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
             toast.success(slide.isHidden ? 'Slide is now visible' : 'Slide is now hidden');
         } catch (e) {
             toast.error('Failed to update visibility');
-            setBaseSlides((prevSlides) => prevSlides.map((entry) => entry.id === resolvedSlideId ? { ...entry, isHidden: slide.isHidden } : entry));
+            setBaseSlidesSynced((prevSlides) => prevSlides.map((entry) => entry.id === resolvedSlideId ? { ...entry, isHidden: slide.isHidden } : entry));
         } finally {
             setIsTogglingVisibility(false);
         }
@@ -314,7 +332,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
         newSlides.splice(destinationIndex, 0, reorderedItem);
         const reindexedSlides = reindexSlides(newSlides);
 
-        setBaseSlides(reindexedSlides);
+        setBaseSlidesSynced(reindexedSlides);
 
         setIsReordering(true);
         try {
@@ -322,7 +340,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
             toast.success('Slide order updated');
         } catch (e) {
             toast.error('Failed to save slide order');
-            setBaseSlides(previousBaseSlides);
+            setBaseSlidesSynced(previousBaseSlides);
         } finally {
             setIsReordering(false);
         }
@@ -362,7 +380,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                             </div>
                         </div>
                         <div className="text-[10px] text-slate-500 leading-tight pl-5">
-                            Use <span className="font-semibold">Mobile Clicker</span> to control what's live for students
+                            Use <span className="font-semibold">Mobile Clicker</span> to control what&apos;s live for students
                         </div>
                     </div>
                 </div>

@@ -121,4 +121,22 @@ describe('httpFetch with Authorization header', () => {
         const headers = callArgs.headers as Headers;
         expect(headers.has('Authorization')).toBe(false);
     });
+
+    it('still sends request even when localStorage token is expired', async () => {
+        // Old users might have expired tokens - we still send it
+        // Backend will return 401, and callers should handle it
+        mockStorage.set('token', 'expired-token-old');
+        mockFetch.mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({ success: true, data: {} }),
+            headers: { get: () => null },
+        });
+
+        await httpFetch('https://api.example.com/test');
+
+        const callArgs = mockFetch.mock.calls[0][1];
+        const headers = callArgs.headers as Headers;
+        // Token is sent even if expired - backend will validate
+        expect(headers.get('Authorization')).toBe('Bearer expired-token-old');
+    });
 });

@@ -227,6 +227,63 @@ describe('fetchWsToken', () => {
         );
     });
 
+    it('prefers Bearer auth first for cross-origin API bases when a token is available', async () => {
+        mockStorage.set('token', 'auth-token-123');
+        mockFetch.mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({ token: 'bearer-ws-token' }),
+        });
+
+        const originalLocation = window.location;
+        Object.defineProperty(window, 'location', {
+            value: new URL('https://class-collaboration.pages.dev'),
+            configurable: true,
+        });
+
+        try {
+            const token = await fetchWsToken({
+                sessionId: 'session-123',
+                role: 'staff',
+                apiUrl: 'https://class-collaboration-production.up.railway.app/api/',
+            });
+
+            expect(token).toBe('bearer-ws-token');
+            expect(mockFetch).toHaveBeenCalledTimes(1);
+            expect(mockFetch).toHaveBeenCalledWith(
+                'https://class-collaboration-production.up.railway.app/api/auth/ws-token?sessionId=session-123&role=staff',
+                expect.objectContaining({
+                    headers: {
+                        'Accept': 'application/json',
+                        'Authorization': 'Bearer auth-token-123',
+                    },
+                })
+            );
+        } finally {
+            Object.defineProperty(window, 'location', {
+                value: originalLocation,
+                configurable: true,
+            });
+        }
+    });
+
+    it('normalizes trailing slashes in API base URLs', async () => {
+        mockFetch.mockResolvedValueOnce({
+            ok: true,
+            json: async () => ({ token: 'test-jwt-token' }),
+        });
+
+        await fetchWsToken({
+            sessionId: 'session-123',
+            role: 'student',
+            apiUrl: 'http://localhost:8080/api/',
+        });
+
+        expect(mockFetch).toHaveBeenCalledWith(
+            'http://localhost:8080/api/auth/ws-token?sessionId=session-123&role=student',
+            expect.any(Object)
+        );
+    });
+
     it('throws clear error when both cookie and Bearer token auth fail', async () => {
         // Both attempts fail
         mockFetch.mockResolvedValueOnce({

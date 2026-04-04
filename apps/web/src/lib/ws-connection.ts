@@ -11,6 +11,7 @@
 
 import { fetchWsToken } from './ws-auth';
 import { createReconnect } from './ws-reconnect';
+import { trimTrailingSlash } from './url';
 
 export interface WsConnection {
     isConnected: boolean;
@@ -40,8 +41,8 @@ export function createWsConnection(options: WsConnectionOptions): WsConnection {
         onStateChange,
     } = options;
 
-    const apiBase = options.apiUrl || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
-    const wsBase = options.wsUrl || process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8080';
+    const apiBase = trimTrailingSlash(options.apiUrl || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api');
+    const wsBase = trimTrailingSlash(options.wsUrl || process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8080');
 
     let ws: WebSocket | null = null;
     let messageHandler: ((name: string, data: any) => void) | null = null;
