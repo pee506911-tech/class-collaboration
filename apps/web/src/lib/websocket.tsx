@@ -134,6 +134,7 @@ export function WebSocketProvider({
     const bcRef = useRef<BroadcastChannel | null>(null);
     const isMountedRef = useRef<boolean>(true);
     const isRefreshingRef = useRef<boolean>(false); // Track if auto-refresh is in progress
+    const initialStateLoadedRef = useRef<boolean>(false); // Track if initial state fetched
 
     // Message buffer for failover gap
     const messageBufferRef = useRef<Array<{ name: string; data: any; timestamp: number }>>([]);
@@ -156,7 +157,9 @@ export function WebSocketProvider({
     // This prevents the flash of incorrect UI state
     useEffect(() => {
         if (!sessionId || initialStateLoaded) return;
-        
+
+        const controller = new AbortController();
+
         const fetchInitialStateEarly = async () => {
             try {
                 const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
@@ -165,6 +168,7 @@ export function WebSocketProvider({
                     idempotent: true,
                     timeoutMs: 10_000,
                     throwOnHttpError: false,
+                    signal: controller.signal,
                 });
                 if (res.ok) {
                     const data = await res.json();
@@ -177,14 +181,23 @@ export function WebSocketProvider({
                     setInitialStateError(`HTTP ${res.status}`);
                 }
             } catch (e) {
+                if (e instanceof DOMException && e.name === 'AbortError') {
+                    return; // Component unmounted, skip error state
+                }
                 console.error('Failed to fetch initial state early:', e);
                 setInitialStateError(e instanceof Error ? e.message : 'Failed to fetch initial state');
             } finally {
+                initialStateLoadedRef.current = true; // Set ref to prevent double-fetch
                 setInitialStateLoaded(true);
             }
         };
-        
+
         fetchInitialStateEarly();
+
+        // Cleanup: abort fetch on unmount
+        return () => {
+            controller.abort();
+        };
     }, [sessionId, initialStateLoaded]);
 
     // participantId is now initialized synchronously in useRef above
@@ -283,13 +296,22 @@ export function WebSocketProvider({
         let currentLeaderSince = 0;
         let currentLeaderTabId = '';
 
+        const fetchAbortController = new AbortController();
+
         const fetchInitialState = async () => {
+            // Guard against double-fetch: skip if initial state was already loaded
+            // by the fetchInitialStateEarly effect (see lines ~156-192)
+            if (initialStateLoadedRef.current) {
+                return;
+            }
+
             try {
                 const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
                 setInitialStateError(null);
                 const { response: res } = await httpFetch(`${apiBase}/sessions/${sessionId}/state`, {
                     idempotent: true,
                     throwOnHttpError: false,
+                    signal: fetchAbortController.signal,
                 });
                 if (res.ok && isMountedRef.current) {
                     const data = await res.json();
@@ -302,6 +324,9 @@ export function WebSocketProvider({
                     setInitialStateError(`HTTP ${res.status}`);
                 }
             } catch (e) {
+                if (e instanceof DOMException && e.name === 'AbortError') {
+                    return; // Component unmounted, skip error state
+                }
                 console.error('Failed to fetch initial state:', e);
                 if (isMountedRef.current) {
                     setInitialStateError(e instanceof Error ? e.message : 'Failed to fetch initial state');
@@ -310,13 +335,14 @@ export function WebSocketProvider({
 
             if (role === 'student') {
                 const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
-                
+
                 // Fetch previous votes to restore state after app reopen
                 try {
                     console.log('[DEBUG] Fetching my-votes for participantId:', participantIdRef.current);
                     const { response: votesRes } = await httpFetch(`${apiBase}/sessions/${sessionId}/my-votes?participantId=${encodeURIComponent(participantIdRef.current)}`, {
                         idempotent: true,
                         throwOnHttpError: false,
+                        signal: fetchAbortController.signal,
                     });
                     console.log('[DEBUG] my-votes response status:', votesRes.status);
                     if (votesRes.ok && isMountedRef.current) {
@@ -689,6 +715,7 @@ export function WebSocketProvider({
 
         return () => {
             isMountedRef.current = false;
+            fetchAbortController.abort(); // Cancel any pending fetches
 
             if (isLeaderRef.current && bc) {
 

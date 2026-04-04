@@ -86,6 +86,7 @@ export const SlideSchema = z.object({
     content: z.any(), // We keep this loose for now to avoid complex union parsing on the boundary, but UI will cast it
     orderIndex: z.number(),
     isHidden: z.boolean().optional(),
+    version: z.number(),
 });
 
 export const SessionStatusSchema = z.enum(['draft', 'published', 'archived']);

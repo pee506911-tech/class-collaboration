@@ -295,14 +295,14 @@ impl SessionRepository for SqlxSessionRepository {
         let pool = self.get_pool().await?;
         let slides = if crate::tidb_ru::should_sample() {
             let mut conn = pool.acquire().await?;
-            let slides = query_as::<_, Slide>("SELECT id, session_id, type, content, order_index, is_hidden FROM slides WHERE session_id = ? AND is_hidden = FALSE ORDER BY order_index, id")
+            let slides = query_as::<_, Slide>("SELECT id, session_id, type, content, order_index, is_hidden, version FROM slides WHERE session_id = ? AND is_hidden = FALSE ORDER BY order_index, id")
                 .bind(session_id)
                 .fetch_all(&mut *conn)
                 .await?;
             crate::tidb_ru::log_last_query_info("slides.by_session_visible", &mut *conn).await;
             slides
         } else {
-            query_as::<_, Slide>("SELECT id, session_id, type, content, order_index, is_hidden FROM slides WHERE session_id = ? AND is_hidden = FALSE ORDER BY order_index, id")
+            query_as::<_, Slide>("SELECT id, session_id, type, content, order_index, is_hidden, version FROM slides WHERE session_id = ? AND is_hidden = FALSE ORDER BY order_index, id")
                 .bind(session_id)
                 .fetch_all(&pool)
                 .await?
@@ -349,7 +349,7 @@ impl SessionRepository for SqlxSessionRepository {
         let counts = if crate::tidb_ru::should_sample() {
             let mut conn = pool.acquire().await?;
             let counts = sqlx::query_as(
-                "SELECT slide_id, option_id, COUNT(*) as count FROM votes WHERE session_id = ? GROUP BY slide_id, option_id",
+                "SELECT slide_id, option_id, vote_count as count FROM vote_counts WHERE session_id = ? AND vote_count > 0",
             )
             .bind(session_id)
             .fetch_all(&mut *conn)
@@ -358,7 +358,7 @@ impl SessionRepository for SqlxSessionRepository {
             counts
         } else {
             sqlx::query_as(
-                "SELECT slide_id, option_id, COUNT(*) as count FROM votes WHERE session_id = ? GROUP BY slide_id, option_id",
+                "SELECT slide_id, option_id, vote_count as count FROM vote_counts WHERE session_id = ? AND vote_count > 0",
             )
             .bind(session_id)
             .fetch_all(&pool)

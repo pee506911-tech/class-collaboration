@@ -5,6 +5,7 @@ use axum::{
     Extension, Router,
 };
 use std::sync::Arc;
+use tokio::sync::watch;
 use tower::buffer::BufferLayer;
 use tower::limit::ConcurrencyLimitLayer;
 use tower::{BoxError, ServiceBuilder};
@@ -16,8 +17,12 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
+mod config_from_env_test;
+mod config_test;
+mod contract_test;
 mod db;
 mod error;
+mod error_test;
 mod handlers;
 mod middleware;
 mod models;
@@ -30,6 +35,22 @@ use db::{DbPoolSettings, LazyDbPool};
 use repositories::session::SessionRepository;
 use repositories::sqlx_session::SqlxSessionRepository;
 use services::session::{SessionService, SessionStateCache};
+
+/// Listen for SIGTERM or SIGINT and return when one arrives.
+/// Render sends SIGTERM on redeploy/scale. Ctrl+C sends SIGINT locally.
+async fn shutdown_signal() {
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+
+    tokio::select! {
+        _ = sigterm.recv() => {
+            tracing::info!("SIGTERM received — initiating graceful shutdown");
+        }
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("SIGINT received — initiating graceful shutdown");
+        }
+    }
+}
 
 /// Application state shared across all handlers
 #[derive(Clone)]
@@ -98,9 +119,31 @@ async fn main() -> anyhow::Result<()> {
     let session_service = Arc::new(SessionService::new(session_repository, state_cache));
 
     let app_state = AppState {
-        db_pool: lazy_pool,
+        db_pool: lazy_pool.clone(),
         session_service,
     };
+
+    // Spawn the outbox worker in the background once the DB pool is ready.
+    // The worker accepts a shutdown signal so it can flush pending events before exit.
+    let (outbox_shutdown_tx, outbox_shutdown_rx) = watch::channel(false);
+
+    tokio::spawn(async move {
+        match lazy_pool.pool().await {
+            Ok(pool) => {
+                crate::services::outbox::run_outbox_worker(pool, outbox_shutdown_rx).await;
+            }
+            Err(e) => {
+                tracing::error!("Failed to get DB pool for outbox worker: {}", e);
+            }
+        }
+    });
+
+    // Spawn a task that relays the process shutdown signal to the outbox worker.
+    let outbox_tx = outbox_shutdown_tx.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = outbox_tx.send(true);
+    });
 
     tracing::info!("App state created in {:?}", startup_time.elapsed());
 
@@ -257,6 +300,10 @@ async fn main() -> anyhow::Result<()> {
             get(handlers::slide::get_slides).post(handlers::slide::create_slide),
         )
         .route(
+            "/api/sessions/:id/slides/batch",
+            post(handlers::slide::create_slides_batch),
+        )
+        .route(
             "/api/sessions/:session_id/slides/:slide_id",
             axum::routing::put(handlers::slide::update_slide).delete(handlers::slide::delete_slide),
         )
@@ -321,10 +368,17 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+    tracing::info!(
+        "Server listening on {} (startup: {:?})",
+        addr,
+        startup_time.elapsed()
+    );
+
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await?;
 
     Ok(())

@@ -138,7 +138,7 @@ pub async fn get_session_stats(
     Path(id): Path<String>,
     Query(params): Query<StatsQueryParams>,
 ) -> Result<Json<SessionStats>> {
-    let pool = app_state.db_pool.pool().await?;
+    let pool = app_state.db_pool.pool_fast_fail().await?;
 
     // Verify session exists and user owns it
     let creator_id: String = sqlx::query_scalar("SELECT creator_id FROM sessions WHERE id = ?")
@@ -159,14 +159,14 @@ pub async fn get_session_stats(
 
     // Run independent reads in parallel to reduce tail latency
     let slides_fut = query_as::<_, Slide>(
-        "SELECT id, session_id, type, content, order_index, is_hidden FROM slides WHERE session_id = ? ORDER BY order_index, id",
+        "SELECT id, session_id, type, content, order_index, is_hidden, version FROM slides WHERE session_id = ? ORDER BY order_index, id",
     )
     .bind(&id)
     .fetch_all(&pool);
 
     let vote_counts_fut = async {
         sqlx::query_as::<_, VoteCount>(
-            "SELECT slide_id, option_id, COUNT(*) as count FROM votes WHERE session_id = ? GROUP BY slide_id, option_id"
+            "SELECT slide_id, option_id, vote_count as count FROM vote_counts WHERE session_id = ? AND vote_count > 0"
         )
         .bind(&id)
         .fetch_all(&pool)
@@ -328,7 +328,7 @@ pub async fn get_public_session_stats(
     Path(id): Path<String>,
     Query(params): Query<StatsQueryParams>,
 ) -> Result<Json<SessionStats>> {
-    let pool = app_state.db_pool.pool().await?;
+    let pool = app_state.db_pool.pool_fast_fail().await?;
 
     // Verify session exists
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)")
@@ -347,14 +347,14 @@ pub async fn get_public_session_stats(
         .unwrap_or(DEFAULT_PARTICIPANT_LIMIT);
 
     let slides_fut = query_as::<_, Slide>(
-        "SELECT id, session_id, type, content, order_index, is_hidden FROM slides WHERE session_id = ? AND is_hidden = FALSE ORDER BY order_index, id",
+        "SELECT id, session_id, type, content, order_index, is_hidden, version FROM slides WHERE session_id = ? AND is_hidden = FALSE ORDER BY order_index, id",
     )
     .bind(&id)
     .fetch_all(&pool);
 
     let vote_counts_fut = async {
         sqlx::query_as::<_, VoteCount>(
-            "SELECT slide_id, option_id, COUNT(*) as count FROM votes WHERE session_id = ? GROUP BY slide_id, option_id"
+            "SELECT slide_id, option_id, vote_count as count FROM vote_counts WHERE session_id = ? AND vote_count > 0"
         )
         .bind(&id)
         .fetch_all(&pool)

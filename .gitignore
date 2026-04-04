@@ -12,6 +12,7 @@ dist/
 
 # Misc
 .DS_Store
+Thumbs.db
 *.pem
 
 # Debug
@@ -19,6 +20,22 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+lerna-debug.log*
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS
+.DS_Store
+.AppleDouble
+.LSOverride
 
 # Environment Variables
 .env
@@ -37,6 +54,13 @@ pnpm-debug.log*
 .next/
 out/
 
+# Rust
+/target
+**/*.rs.bk
+*.rlib
+*.prof*
+Cargo.lock
+
 # Go
 # Binaries for programs and plugins
 *.exe
@@ -51,5 +75,17 @@ main
 
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
+
+# Load testing
+loadtest/artifacts/
+loadtest/*.log
+
+# Docker
+docker-compose.override.yml
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
 
 # User specified

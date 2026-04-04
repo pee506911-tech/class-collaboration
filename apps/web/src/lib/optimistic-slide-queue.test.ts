@@ -21,6 +21,7 @@ function makeSlide(id: string, orderIndex: number): Slide {
         content: { title: id, body: `${id} body` },
         orderIndex,
         isHidden: false,
+        version: 0,
     };
 }
 

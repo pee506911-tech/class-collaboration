@@ -49,7 +49,7 @@ pub async fn register(
     State(app_state): State<crate::AppState>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<Value>> {
-    let pool = app_state.db_pool.pool().await?;
+    let pool = app_state.db_pool.pool_fast_fail().await?;
 
     // Input validation
     if payload.email.len() > MAX_EMAIL_LENGTH {
@@ -109,7 +109,7 @@ pub async fn login(
     jar: CookieJar,
     Json(payload): Json<LoginRequest>,
 ) -> Result<(CookieJar, Json<AuthResponse>)> {
-    let pool = app_state.db_pool.pool().await?;
+    let pool = app_state.db_pool.pool_fast_fail().await?;
 
     let user: User = query_as(
         "SELECT id, email, password_hash, name, role, created_at FROM users WHERE email = ?",

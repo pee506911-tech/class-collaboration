@@ -304,6 +304,8 @@ export default function Dashboard() {
 }
 
 function SessionGrid({ sessions, onDuplicate, onArchive, isArchived }: { sessions: Session[], onDuplicate: (id: string, title: string) => void, onArchive: (id: string, title: string) => void, isArchived: boolean }) {
+  const router = useRouter();
+  
   if (sessions.length === 0) {
     return (
       <div className="bg-white rounded-2xl border border-dashed border-slate-300">
@@ -356,7 +358,11 @@ function SessionGrid({ sessions, onDuplicate, onArchive, isArchived }: { session
             </div>
           </CardContent>
           <CardFooter className="pt-0 pb-6 px-6">
-            <Link href={`/staff/session/${session.id}`} className="w-full">
+            <Link 
+              href={`/staff/session/${session.id}`} 
+              className="w-full"
+              onMouseEnter={() => router.prefetch(`/staff/session/${session.id}`)}
+            >
               <Button className="w-full bg-white border-2 border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-blue-400 hover:text-blue-600 group-hover:border-blue-500 group-hover:bg-blue-600 group-hover:text-white transition-all shadow-sm">
                 {isArchived ? 'View Session' : 'Open Editor'} <Play className="ml-2 w-3.5 h-3.5 opacity-70 group-hover:opacity-100" />
               </Button>

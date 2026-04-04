@@ -1,23 +1,35 @@
 use axum::{
     extract::{Path, State},
+    http::HeaderValue,
+    response::IntoResponse,
     Json,
 };
 use serde::Deserialize;
-use sqlx::query_as;
+use sqlx::{MySql, query_as};
 
-use crate::error::{AppError, Result};
+use crate::error::Result;
 use crate::models::response::ApiResponse;
-use crate::models::session::{PublicSessionResponse, Session, SessionState};
-use crate::services::ably::publish_state_update;
+use crate::models::session::{PublicSessionResponse, Session};
+use crate::services::outbox::{self, OutboxEventType};
+
+/// Standard Cache-Control header for read-only session endpoints
+/// Allows CDN edge caching with 10-second TTL and 5-minute stale-if-error fallback
+fn cache_control_read() -> HeaderValue {
+    HeaderValue::from_static("public, s-maxage=10, stale-if-error=300")
+}
 
 /// Get session by share token (public endpoint)
 /// Returns session with slides, questions, and stats
 pub async fn get_session_by_share_token(
     State(app_state): State<crate::AppState>,
     Path(token): Path<String>,
-) -> Result<Json<ApiResponse<PublicSessionResponse>>> {
+) -> Result<impl IntoResponse> {
     let response = app_state.session_service.get_public_session(&token).await?;
-    Ok(Json(ApiResponse::success(response)))
+    
+    Ok((
+        [("Cache-Control", cache_control_read())],
+        Json(ApiResponse::success(response)),
+    ))
 }
 
 /// Get session state (for students/projector real-time sync)
@@ -25,12 +37,16 @@ pub async fn get_session_by_share_token(
 pub async fn get_session_state(
     State(app_state): State<crate::AppState>,
     Path(session_id): Path<String>,
-) -> Result<Json<SessionState>> {
+) -> Result<impl IntoResponse> {
     let state = app_state
         .session_service
         .get_session_state(&session_id)
         .await?;
-    Ok(Json(state))
+    
+    Ok((
+        [("Cache-Control", cache_control_read())],
+        Json(state),
+    ))
 }
 
 // ============ Public Clicker Endpoints ============
@@ -63,7 +79,9 @@ pub async fn public_set_current_slide(
     Path(session_id): Path<String>,
     Json(payload): Json<PublicSetSlideRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>> {
-    let pool = app_state.db_pool.pool().await?;
+    let pool = app_state.db_pool.pool_fast_fail().await?;
+
+    let mut tx = pool.begin().await?;
 
     let update_result = sqlx::query(
         "UPDATE sessions SET current_slide_id = ?, state_version = state_version + 1 WHERE id = ? AND NOT (current_slide_id <=> ?)"
@@ -71,13 +89,17 @@ pub async fn public_set_current_slide(
         .bind(&payload.slide_id)
         .bind(&session_id)
         .bind(&payload.slide_id)
-        .execute(&pool)
+        .execute(&mut *tx)
         .await?;
 
-    let session = fetch_session(&pool, &session_id).await?;
+    let session = fetch_session(&mut *tx, &session_id).await?;
     if update_result.rows_affected() > 0 {
-        publish_session_state(session_id.clone(), &session);
+        let state_payload = build_state_payload(&session);
+        outbox::enqueue_event(&mut tx, &session_id, OutboxEventType::StateUpdate, &state_payload)
+            .await?;
     }
+
+    tx.commit().await?;
 
     Ok(Json(ApiResponse::success(
         serde_json::json!({ "message": "Slide updated" }),
@@ -90,7 +112,9 @@ pub async fn public_set_results_visibility(
     Path(session_id): Path<String>,
     Json(payload): Json<PublicSetResultsRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>> {
-    let pool = app_state.db_pool.pool().await?;
+    let pool = app_state.db_pool.pool_fast_fail().await?;
+
+    let mut tx = pool.begin().await?;
 
     let update_result = sqlx::query(
         "UPDATE sessions SET is_results_visible = ?, state_version = state_version + 1 WHERE id = ? AND is_results_visible <> ?"
@@ -98,13 +122,17 @@ pub async fn public_set_results_visibility(
         .bind(payload.visible)
         .bind(&session_id)
         .bind(payload.visible)
-        .execute(&pool)
+        .execute(&mut *tx)
         .await?;
 
-    let session = fetch_session(&pool, &session_id).await?;
+    let session = fetch_session(&mut *tx, &session_id).await?;
     if update_result.rows_affected() > 0 {
-        publish_session_state(session_id.clone(), &session);
+        let state_payload = build_state_payload(&session);
+        outbox::enqueue_event(&mut tx, &session_id, OutboxEventType::StateUpdate, &state_payload)
+            .await?;
     }
+
+    tx.commit().await?;
 
     Ok(Json(ApiResponse::success(
         serde_json::json!({ "message": "Results visibility updated" }),
@@ -120,20 +148,16 @@ fn build_state_payload(session: &Session) -> StateUpdatePayload {
     }
 }
 
-fn publish_session_state(session_id: String, session: &Session) {
-    let state_payload = build_state_payload(session);
-    tokio::spawn(async move {
-        publish_state_update(&session_id, &state_payload).await;
-    });
-}
-
-async fn fetch_session(pool: &crate::db::DbPool, session_id: &str) -> Result<Session> {
+async fn fetch_session<'c, E>(executor: E, session_id: &str) -> Result<Session>
+where
+    E: sqlx::Executor<'c, Database = MySql>,
+{
     let session = query_as::<_, Session>(
             "SELECT id, creator_id, title, status, share_token, current_slide_id, is_results_visible, is_presentation_active, state_version, allow_questions, require_name, created_at, updated_at FROM sessions WHERE id = ?",
         )
         .bind(session_id)
-        .fetch_optional(pool)
+        .fetch_one(executor)
         .await?;
 
-    session.ok_or_else(|| AppError::NotFound("Session not found".to_string()))
+    Ok(session)
 }

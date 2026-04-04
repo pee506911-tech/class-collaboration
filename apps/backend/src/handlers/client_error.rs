@@ -109,3 +109,57 @@ pub async fn report_client_error(Json(payload): Json<ClientErrorReport>) -> Stat
 
     StatusCode::NO_CONTENT
 }
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_chars;
+
+    /// When max_chars is 0, the result is always an empty string.
+    #[test]
+    fn truncate_zero_returns_empty_string() {
+        assert_eq!(truncate_chars("hello", 0), "");
+    }
+
+    /// When the input is shorter than max_chars, it is returned unchanged
+    /// and no ellipsis is appended.
+    #[test]
+    fn truncate_shorter_than_limit_returns_unchanged() {
+        assert_eq!(truncate_chars("hi", 10), "hi");
+    }
+
+    /// When the input is exactly max_chars long, it is returned unchanged
+    /// with no ellipsis (nothing was truncated).
+    #[test]
+    fn truncate_exact_boundary_returns_unchanged() {
+        assert_eq!(truncate_chars("hello", 5), "hello");
+    }
+
+    /// When the input exceeds max_chars by one character, the output is
+    /// the first max_chars characters plus an ellipsis.
+    #[test]
+    fn truncate_exceeds_by_one_adds_ellipsis() {
+        assert_eq!(truncate_chars("hello!", 5), "hello…");
+    }
+
+    /// Truncation is character-aware, not byte-aware. Multi-byte Unicode
+    /// characters should not be split mid-character.
+    #[test]
+    fn truncate_handles_multibyte_unicode() {
+        // "日本語" — each character is 3 bytes in UTF-8
+        assert_eq!(truncate_chars("日本語", 2), "日本…");
+        assert_eq!(truncate_chars("日本語", 3), "日本語");
+    }
+
+    /// Emoji characters are single code points and should be handled correctly.
+    #[test]
+    fn truncate_handles_emoji() {
+        assert_eq!(truncate_chars("🔥🚀💡", 2), "🔥🚀…");
+        assert_eq!(truncate_chars("🔥🚀💡", 3), "🔥🚀💡");
+    }
+
+    /// Empty input with non-zero max returns empty string.
+    #[test]
+    fn truncate_empty_input() {
+        assert_eq!(truncate_chars("", 10), "");
+    }
+}

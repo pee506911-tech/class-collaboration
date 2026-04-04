@@ -3,3 +3,4 @@ pub mod session;
 pub mod slide;
 pub mod student;
 pub mod user;
+mod serde_test;

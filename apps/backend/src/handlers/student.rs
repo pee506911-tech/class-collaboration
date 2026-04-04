@@ -1,6 +1,7 @@
 use axum::{
     extract::{Path, State},
-    http::HeaderMap,
+    http::{HeaderMap, HeaderName, HeaderValue},
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -13,7 +14,6 @@ use crate::error::{AppError, Result};
 use crate::models::response::ApiResponse;
 use crate::models::student::Participant;
 use crate::models::student::Question;
-use crate::services::ably::{publish_qa_update, publish_vote_update};
 
 const MAX_QUESTION_LENGTH: usize = 1000;
 const MAX_NAME_LENGTH: usize = 100;
@@ -53,6 +53,25 @@ fn is_app_error_deadlock(e: &AppError) -> bool {
     match e {
         AppError::Database(sqlx_err) => is_deadlock_error(sqlx_err),
         _ => false,
+    }
+}
+
+/// Returns the response with an `X-Realtime-Degraded: true` header appended
+/// when the Ably circuit breaker is open. The vote/question is safely persisted
+/// in the DB and will be delivered via the outbox once the circuit recovers —
+/// this header tells the frontend to show a "results may be delayed" indicator.
+fn with_degraded_header<T: serde::Serialize>(body: ApiResponse<T>) -> Response {
+    if crate::services::ably::is_degraded() {
+        (
+            [(
+                HeaderName::from_static("x-realtime-degraded"),
+                HeaderValue::from_static("true"),
+            )],
+            Json(body),
+        )
+            .into_response()
+    } else {
+        Json(body).into_response()
     }
 }
 
@@ -121,28 +140,32 @@ async fn get_votes_for_participant_by_slide_ids(
     Ok(votes)
 }
 
-/// Helper function: Atomically increment vote_sequence and fetch vote counts.
-/// Returns (sequence, HashMap<option_id, count>)
-async fn next_vote_sequence_and_counts(
+async fn increment_vote_count(
     tx: &mut Transaction<'_, MySql>,
     session_id: &str,
     slide_id: &str,
-) -> Result<(u64, HashMap<String, i32>)> {
-    // Increment the sequence
-    sqlx::query("UPDATE sessions SET vote_sequence = vote_sequence + 1 WHERE id = ?")
-        .bind(session_id)
-        .execute(&mut **tx)
-        .await?;
+    option_id: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO vote_counts (session_id, slide_id, option_id, vote_count)
+         VALUES (?, ?, ?, 1)
+         ON DUPLICATE KEY UPDATE vote_count = vote_count + 1",
+    )
+    .bind(session_id)
+    .bind(slide_id)
+    .bind(option_id)
+    .execute(&mut **tx)
+    .await?;
 
-    // Read the new sequence value
-    let sequence: u64 = sqlx::query_scalar("SELECT vote_sequence FROM sessions WHERE id = ?")
-        .bind(session_id)
-        .fetch_one(&mut **tx)
-        .await?;
+    Ok(())
+}
 
-    // Read the vote counts snapshot
+async fn current_vote_counts(
+    tx: &mut Transaction<'_, MySql>,
+    slide_id: &str,
+) -> Result<HashMap<String, i32>> {
     let vote_counts: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT option_id, COUNT(*) as count FROM votes WHERE slide_id = ? GROUP BY option_id",
+        "SELECT option_id, vote_count as count FROM vote_counts WHERE slide_id = ? AND vote_count > 0",
     )
     .bind(slide_id)
     .fetch_all(&mut **tx)
@@ -153,7 +176,23 @@ async fn next_vote_sequence_and_counts(
         .map(|(option_id, count)| (option_id, count as i32))
         .collect();
 
-    Ok((sequence, results))
+    Ok(results)
+}
+
+/// Helper function: Atomically increment vote_sequence and fetch the new value.
+async fn next_vote_sequence(tx: &mut Transaction<'_, MySql>, session_id: &str) -> Result<u64> {
+    sqlx::query(
+        "UPDATE sessions SET vote_sequence = LAST_INSERT_ID(vote_sequence + 1) WHERE id = ?",
+    )
+    .bind(session_id)
+    .execute(&mut **tx)
+    .await?;
+
+    let sequence: u64 = sqlx::query_scalar("SELECT LAST_INSERT_ID()")
+        .fetch_one(&mut **tx)
+        .await?;
+
+    Ok(sequence)
 }
 
 /// Helper function: Atomically increment qa_sequence and fetch questions.
@@ -200,8 +239,8 @@ pub async fn submit_vote(
     State(app_state): State<crate::AppState>,
     Path(session_id): Path<String>,
     Json(payload): Json<SubmitVoteRequest>,
-) -> Result<Json<ApiResponse<serde_json::Value>>> {
-    let pool = app_state.db_pool.pool().await?;
+) -> Result<Response> {
+    let pool = app_state.db_pool.pool_fast_fail().await?;
 
     // Validate participant_id is not empty
     if payload.participant_id.trim().is_empty() {
@@ -274,61 +313,20 @@ pub async fn submit_vote(
         }
     };
 
-    let option_ids = if let Some(ids) = payload.option_ids {
+    // Resolve option IDs from the request payload (supports both option_id and option_ids)
+    let raw_option_ids = if let Some(ids) = payload.option_ids {
         ids
     } else if let Some(id) = payload.option_id {
         vec![id]
     } else {
         return Err(AppError::Input("No option selected".to_string()));
     };
-    let option_ids = dedupe_option_ids(option_ids);
 
-    if option_ids.is_empty() {
-        return Err(AppError::Input("No option selected".to_string()));
-    }
-    if option_ids.len() > MAX_OPTION_IDS {
-        return Err(AppError::Input("Too many options selected".to_string()));
-    }
-    for opt_id in &option_ids {
-        if opt_id.len() > 36 || opt_id.contains(|c: char| !c.is_alphanumeric() && c != '-') {
-            return Err(AppError::Input("Invalid option ID format".to_string()));
-        }
-    }
-
-    // Validate option IDs against slide content
-    if let Some(options) = slide_content.get("options").and_then(|o| o.as_array()) {
-        let valid_option_ids: HashSet<&str> = options
-            .iter()
-            .filter_map(|opt| opt.get("id").and_then(|id| id.as_str()))
-            .collect();
-
-        for opt_id in &option_ids {
-            if !valid_option_ids.contains(opt_id.as_str()) {
-                return Err(AppError::Input(format!(
-                    "Invalid option ID: {} is not a valid option for this slide",
-                    opt_id
-                )));
-            }
-        }
-    }
-
-    // Parse slide settings from content
-    let limit_submissions = slide_content
-        .get("limitSubmissions")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-
-    let allow_multiple_selection = slide_content
-        .get("allowMultipleSelection")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    // Enforce allowMultipleSelection for multiple-choice slides
-    if slide_type == "multiple-choice" && !allow_multiple_selection && option_ids.len() > 1 {
-        return Err(AppError::Input(
-            "This poll only allows selecting one option".to_string(),
-        ));
-    }
+    // Validate options against slide content and settings (pure function)
+    let (option_ids, limit_submissions) = match validate_vote_options(raw_option_ids, &slide_type, &slide_content) {
+        VoteValidationResult::Valid { option_ids, limit_submissions, .. } => (option_ids, limit_submissions),
+        VoteValidationResult::Invalid(msg) => return Err(AppError::Input(msg)),
+    };
 
     // Use a single transaction to atomically:
     // 1. Check limitSubmissions locking
@@ -338,7 +336,7 @@ pub async fn submit_vote(
     // This ensures the published payload matches the sequence number.
     // Retry on deadlock errors (MySQL 1213/40001)
     let mut retry_count = 0;
-    let (sequence, results) = loop {
+    let (_sequence, _results) = 'submission: loop {
         let mut tx = pool.begin().await?;
 
         // For limitSubmissions=true, atomically reserve a submission slot.
@@ -364,7 +362,7 @@ pub async fn submit_vote(
                         MAX_DEADLOCK_RETRIES
                     );
                     tokio::time::sleep(Duration::from_millis(50 * retry_count as u64)).await;
-                    continue;
+                    continue 'submission;
                 }
 
                 if is_mysql_duplicate_key(&e) {
@@ -381,33 +379,28 @@ pub async fn submit_vote(
             }
         }
 
-        // Create votes within the transaction using INSERT IGNORE
-        if !option_ids.is_empty() {
-            let mut query = sqlx::QueryBuilder::<sqlx::MySql>::new(
-                "INSERT IGNORE INTO votes (id, session_id, slide_id, participant_id, option_id) ",
-            );
+        let mut inserted_option_ids = Vec::new();
+        for option_id in &option_ids {
+            let insert_result = sqlx::query(
+                "INSERT IGNORE INTO votes (id, session_id, slide_id, participant_id, option_id)
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(&session_id)
+            .bind(&payload.slide_id)
+            .bind(&payload.participant_id)
+            .bind(option_id)
+            .execute(&mut *tx)
+            .await;
 
-            query.push_values(option_ids.iter(), |mut row, option_id| {
-                let vote_id = Uuid::new_v4().to_string();
-                row.push_bind(vote_id);
-                row.push_bind(&session_id);
-                row.push_bind(&payload.slide_id);
-                row.push_bind(&payload.participant_id);
-                row.push_bind(option_id);
-            });
-
-            match query.build().execute(&mut *tx).await {
+            match insert_result {
                 Ok(result) => {
-                    if should_skip_vote_snapshot(limit_submissions, result.rows_affected()) {
-                        let _ = tx.rollback().await;
-                        return Ok(Json(ApiResponse::success(
-                            serde_json::json!({ "message": "Vote submitted successfully" }),
-                        )));
+                    if result.rows_affected() > 0 {
+                        inserted_option_ids.push(option_id.clone());
                     }
                 }
                 Err(e) => {
                     let _ = tx.rollback().await;
-                    // Check for deadlock - retry if so
                     if is_deadlock_error(&e) && retry_count < MAX_DEADLOCK_RETRIES {
                         retry_count += 1;
                         tracing::warn!(
@@ -416,10 +409,9 @@ pub async fn submit_vote(
                             MAX_DEADLOCK_RETRIES
                         );
                         tokio::time::sleep(Duration::from_millis(50 * retry_count as u64)).await;
-                        continue;
+                        continue 'submission;
                     }
                     tracing::error!("Failed to insert votes: {:?}", e);
-                    // Check for duplicate-key error
                     if is_mysql_duplicate_key(&e) {
                         return Err(AppError::Input(
                             "You have already submitted a vote for this option".to_string(),
@@ -430,12 +422,67 @@ pub async fn submit_vote(
             }
         }
 
-        // Atomically increment sequence and fetch the post-mutation snapshot
-        match next_vote_sequence_and_counts(&mut tx, &session_id, &payload.slide_id).await {
-            Ok(result) => {
-                tx.commit().await?;
-                break result;
+        if should_skip_vote_snapshot(limit_submissions, inserted_option_ids.len() as u64) {
+            let _ = tx.rollback().await;
+            return Ok(with_degraded_header(ApiResponse::success(
+                serde_json::json!({ "message": "Vote submitted successfully" }),
+            )));
+        }
+
+        for option_id in &inserted_option_ids {
+            if let Err(e) =
+                increment_vote_count(&mut tx, &session_id, &payload.slide_id, option_id).await
+            {
+                let _ = tx.rollback().await;
+                if is_app_error_deadlock(&e) && retry_count < MAX_DEADLOCK_RETRIES {
+                    retry_count += 1;
+                    tracing::warn!(
+                        "Vote counter deadlock, retrying ({}/{})",
+                        retry_count,
+                        MAX_DEADLOCK_RETRIES
+                    );
+                    tokio::time::sleep(Duration::from_millis(50 * retry_count as u64)).await;
+                    continue 'submission;
+                }
+                return Err(e);
             }
+        }
+
+        match next_vote_sequence(&mut tx, &session_id).await {
+            Ok(sequence) => match current_vote_counts(&mut tx, &payload.slide_id).await {
+                Ok(results) => {
+                    // Enqueue outbox event before committing
+                    let vote_payload = serde_json::json!({
+                        "slideId": payload.slide_id,
+                        "results": &results,
+                        "sequence": sequence
+                    });
+                    crate::services::outbox::enqueue_event(
+                        &mut tx,
+                        &session_id,
+                        crate::services::outbox::OutboxEventType::VoteUpdate,
+                        &vote_payload,
+                    )
+                    .await?;
+
+                    tx.commit().await?;
+                    break (sequence, results);
+                }
+                Err(e) => {
+                    let _ = tx.rollback().await;
+                    if is_app_error_deadlock(&e) && retry_count < MAX_DEADLOCK_RETRIES {
+                        retry_count += 1;
+                        tracing::warn!(
+                            "Vote count snapshot deadlock, retrying ({}/{})",
+                            retry_count,
+                            MAX_DEADLOCK_RETRIES
+                        );
+                        tokio::time::sleep(Duration::from_millis(50 * retry_count as u64)).await;
+                        continue;
+                    }
+                    return Err(e);
+                }
+            },
             Err(e) => {
                 let _ = tx.rollback().await;
                 if is_app_error_deadlock(&e) && retry_count < MAX_DEADLOCK_RETRIES {
@@ -453,34 +500,375 @@ pub async fn submit_vote(
         }
     };
 
-    // Publish vote update with sequence number
-    let session_id_for_publish = session_id.clone();
-    let slide_id_for_publish = payload.slide_id.clone();
-    tokio::spawn(async move {
-        let published = publish_vote_update(
-            &session_id_for_publish,
-            &slide_id_for_publish,
-            &results,
-            sequence,
-        )
-        .await;
-        if !published {
-            tracing::warn!(
-                session_id = %session_id_for_publish,
-                slide_id = %slide_id_for_publish,
-                "Vote update committed but realtime publish failed - clients will converge via refresh"
-            );
-        }
-    });
-
-    Ok(Json(ApiResponse::success(
+    Ok(with_degraded_header(ApiResponse::success(
         serde_json::json!({ "message": "Vote submitted successfully" }),
     )))
 }
 
+// ============================================
+// Vote Submission Validation (pure functions — testable)
+// ============================================
+
+/// Result of validating option IDs against slide content and settings.
+#[derive(Debug)]
+pub enum VoteValidationResult {
+    /// Options are valid; proceed to insertion.
+    Valid {
+        option_ids: Vec<String>,
+        limit_submissions: bool,
+        #[allow(dead_code)]
+        allow_multiple_selection: bool,
+    },
+    /// Rejection with a user-facing error message.
+    Invalid(String),
+}
+
+/// Validate the resolved option IDs against slide content, format rules,
+/// and slide-level settings (limitSubmissions, allowMultipleSelection).
+///
+/// This is a pure function — no I/O, fully testable.
+pub fn validate_vote_options(
+    raw_option_ids: Vec<String>,
+    slide_type: &str,
+    slide_content: &serde_json::Value,
+) -> VoteValidationResult {
+    let option_ids = dedupe_option_ids(raw_option_ids);
+
+    if option_ids.is_empty() {
+        return VoteValidationResult::Invalid("No option selected".to_string());
+    }
+    if option_ids.len() > MAX_OPTION_IDS {
+        return VoteValidationResult::Invalid("Too many options selected".to_string());
+    }
+
+    // Validate option ID format (alphanumeric + hyphens, max 36 chars)
+    for opt_id in &option_ids {
+        if opt_id.len() > 36 || opt_id.contains(|c: char| !c.is_alphanumeric() && c != '-') {
+            return VoteValidationResult::Invalid("Invalid option ID format".to_string());
+        }
+    }
+
+    // Validate option IDs exist in slide content
+    if let Some(options) = slide_content.get("options").and_then(|o| o.as_array()) {
+        let valid_option_ids: HashSet<&str> = options
+            .iter()
+            .filter_map(|opt| opt.get("id").and_then(|id| id.as_str()))
+            .collect();
+
+        for opt_id in &option_ids {
+            if !valid_option_ids.contains(opt_id.as_str()) {
+                return VoteValidationResult::Invalid(format!(
+                    "Invalid option ID: {} is not a valid option for this slide",
+                    opt_id
+                ));
+            }
+        }
+    }
+
+    // Parse slide settings
+    let limit_submissions = slide_content
+        .get("limitSubmissions")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let allow_multiple_selection = slide_content
+        .get("allowMultipleSelection")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Enforce allowMultipleSelection for multiple-choice slides
+    if slide_type == "multiple-choice" && !allow_multiple_selection && option_ids.len() > 1 {
+        return VoteValidationResult::Invalid(
+            "This poll only allows selecting one option".to_string(),
+        );
+    }
+
+    VoteValidationResult::Valid {
+        option_ids,
+        limit_submissions,
+        allow_multiple_selection,
+    }
+}
+
+/// Resolves the raw request payload into a deduplicated list of option IDs.
+/// Returns None if no options were selected at all.
+#[allow(dead_code)]
+pub fn resolve_option_ids(
+    option_id: Option<String>,
+    option_ids: Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    if let Some(ids) = option_ids {
+        Some(dedupe_option_ids(ids))
+    } else {
+        option_id.map(|id| vec![id])
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{dedupe_option_ids, should_skip_vote_snapshot};
+    use super::{
+        dedupe_option_ids, resolve_option_ids, should_skip_vote_snapshot, validate_vote_options,
+        VoteValidationResult,
+    };
+    use serde_json::json;
+
+    fn poll_slide_content() -> serde_json::Value {
+        json!({
+            "question": "What is your favorite color?",
+            "options": [
+                {"id": "opt-red", "text": "Red"},
+                {"id": "opt-blue", "text": "Blue"},
+                {"id": "opt-green", "text": "Green"}
+            ],
+            "limitSubmissions": true
+        })
+    }
+
+    fn multi_select_poll_content() -> serde_json::Value {
+        json!({
+            "question": "Select all that apply",
+            "options": [
+                {"id": "opt-a", "text": "A"},
+                {"id": "opt-b", "text": "B"}
+            ],
+            "allowMultipleSelection": true,
+            "limitSubmissions": false
+        })
+    }
+
+    fn multiple_choice_content() -> serde_json::Value {
+        json!({
+            "question": "Pick one",
+            "options": [
+                {"id": "opt-1", "text": "One"},
+                {"id": "opt-2", "text": "Two"}
+            ],
+            "allowMultipleSelection": false,
+            "limitSubmissions": true
+        })
+    }
+
+    // --- resolve_option_ids tests ---
+
+    #[test]
+    fn resolve_option_ids_from_single_option_id() {
+        let result = resolve_option_ids(Some("opt-red".to_string()), None);
+        assert_eq!(result, Some(vec!["opt-red".to_string()]));
+    }
+
+    #[test]
+    fn resolve_option_ids_from_multiple_ids() {
+        let result = resolve_option_ids(
+            None,
+            Some(vec!["opt-red".to_string(), "opt-blue".to_string()]),
+        );
+        assert_eq!(
+            result,
+            Some(vec!["opt-red".to_string(), "opt-blue".to_string()])
+        );
+    }
+
+    #[test]
+    fn resolve_option_ids_deduplicates() {
+        let result = resolve_option_ids(
+            None,
+            Some(vec![
+                "opt-red".to_string(),
+                "opt-blue".to_string(),
+                "opt-red".to_string(),
+            ]),
+        );
+        assert_eq!(
+            result,
+            Some(vec!["opt-red".to_string(), "opt-blue".to_string()])
+        );
+    }
+
+    #[test]
+    fn resolve_option_ids_returns_none_when_both_none() {
+        let result = resolve_option_ids(None, None);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn resolve_option_ids_prioritizes_option_ids_over_option_id() {
+        // When both are present, option_ids takes precedence (matches handler behavior)
+        let result = resolve_option_ids(
+            Some("opt-ignored".to_string()),
+            Some(vec!["opt-used".to_string()]),
+        );
+        assert_eq!(result, Some(vec!["opt-used".to_string()]));
+    }
+
+    // --- validate_vote_options tests ---
+
+    #[test]
+    fn rejects_empty_options() {
+        let content = poll_slide_content();
+        match validate_vote_options(vec![], "poll", &content) {
+            VoteValidationResult::Invalid(msg) => {
+                assert_eq!(msg, "No option selected")
+            }
+            other => panic!("Expected Invalid, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_after_deduplication_if_all_same() {
+        // Even after dedup, if all option_ids were the same, we still get a single valid option.
+        // This test validates that dedup doesn't cause false rejection.
+        let content = poll_slide_content();
+        match validate_vote_options(
+            vec!["opt-red".to_string(), "opt-red".to_string()],
+            "poll",
+            &content,
+        ) {
+            VoteValidationResult::Valid { option_ids, .. } => {
+                // Dedup reduces to one valid option — should pass
+                assert_eq!(option_ids, vec!["opt-red".to_string()])
+            }
+            other => panic!("Expected Valid, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_too_many_options() {
+        let content = poll_slide_content();
+        let ids: Vec<String> = (0..11).map(|i| format!("opt-{}", i)).collect();
+        match validate_vote_options(ids, "poll", &content) {
+            VoteValidationResult::Invalid(msg) => {
+                assert_eq!(msg, "Too many options selected")
+            }
+            other => panic!("Expected Invalid, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_option_id_format() {
+        let content = poll_slide_content();
+
+        // Too long
+        match validate_vote_options(vec!["a".repeat(37)], "poll", &content) {
+            VoteValidationResult::Invalid(msg) => {
+                assert_eq!(msg, "Invalid option ID format")
+            }
+            other => panic!("Expected Invalid, got {:?}", other),
+        }
+
+        // Special characters
+        match validate_vote_options(vec!["opt<script>".to_string()], "poll", &content) {
+            VoteValidationResult::Invalid(msg) => {
+                assert_eq!(msg, "Invalid option ID format")
+            }
+            other => panic!("Expected Invalid, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn accepts_alphanumeric_with_hyphens() {
+        let content = json!({
+            "question": "Test",
+            "options": [
+                {"id": "opt-red-123-abc", "text": "Red"}
+            ],
+            "limitSubmissions": true
+        });
+        match validate_vote_options(vec!["opt-red-123-abc".to_string()], "poll", &content) {
+            VoteValidationResult::Valid { option_ids, .. } => {
+                assert_eq!(option_ids, vec!["opt-red-123-abc".to_string()])
+            }
+            other => panic!("Expected Valid, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_option_not_in_slide_content() {
+        let content = poll_slide_content();
+        match validate_vote_options(vec!["opt-purple".to_string()], "poll", &content) {
+            VoteValidationResult::Invalid(msg) => {
+                assert!(msg.contains("opt-purple"));
+                assert!(msg.contains("not a valid option"));
+            }
+            other => panic!("Expected Invalid, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn accepts_valid_single_option_in_poll() {
+        let content = poll_slide_content();
+        match validate_vote_options(vec!["opt-red".to_string()], "poll", &content) {
+            VoteValidationResult::Valid {
+                option_ids,
+                limit_submissions,
+                ..
+            } => {
+                assert_eq!(option_ids, vec!["opt-red".to_string()]);
+                assert!(limit_submissions); // default is true
+            }
+            other => panic!("Expected Valid, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn accepts_multiple_options_when_allowed() {
+        let content = multi_select_poll_content();
+        match validate_vote_options(
+            vec!["opt-a".to_string(), "opt-b".to_string()],
+            "poll",
+            &content,
+        ) {
+            VoteValidationResult::Valid {
+                option_ids,
+                limit_submissions,
+                allow_multiple_selection,
+            } => {
+                assert_eq!(option_ids, vec!["opt-a".to_string(), "opt-b".to_string()]);
+                assert!(!limit_submissions);
+                assert!(allow_multiple_selection);
+            }
+            other => panic!("Expected Valid, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_multiple_options_in_single_choice_multiple_choice_slide() {
+        let content = multiple_choice_content();
+        match validate_vote_options(
+            vec!["opt-1".to_string(), "opt-2".to_string()],
+            "multiple-choice",
+            &content,
+        ) {
+            VoteValidationResult::Invalid(msg) => {
+                assert_eq!(msg, "This poll only allows selecting one option")
+            }
+            other => panic!("Expected Invalid, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn accepts_single_option_in_multiple_choice_slide() {
+        let content = multiple_choice_content();
+        match validate_vote_options(vec!["opt-1".to_string()], "multiple-choice", &content) {
+            VoteValidationResult::Valid { option_ids, .. } => {
+                assert_eq!(option_ids, vec!["opt-1".to_string()])
+            }
+            other => panic!("Expected Valid, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn limit_submissions_defaults_to_true_when_not_in_content() {
+        let content = json!({
+            "question": "Test",
+            "options": [{"id": "opt-x", "text": "X"}]
+        });
+        match validate_vote_options(vec!["opt-x".to_string()], "poll", &content) {
+            VoteValidationResult::Valid { limit_submissions, .. } => {
+                assert!(limit_submissions)
+            }
+            other => panic!("Expected Valid, got {:?}", other),
+        }
+    }
 
     #[test]
     fn dedupe_option_ids_preserves_first_occurrence_order() {
@@ -495,10 +883,66 @@ mod tests {
     }
 
     #[test]
+    fn dedupe_option_ids_all_unique() {
+        let input = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(dedupe_option_ids(input.clone()), input);
+    }
+
+    #[test]
+    fn dedupe_option_ids_all_same() {
+        let input = vec!["x".to_string(), "x".to_string(), "x".to_string()];
+        assert_eq!(dedupe_option_ids(input), vec!["x".to_string()]);
+    }
+
+    #[test]
     fn should_skip_vote_snapshot_only_for_duplicate_non_limited_submissions() {
         assert!(should_skip_vote_snapshot(false, 0));
         assert!(!should_skip_vote_snapshot(true, 0));
         assert!(!should_skip_vote_snapshot(false, 1));
+        assert!(!should_skip_vote_snapshot(true, 1));
+        assert!(!should_skip_vote_snapshot(false, 2));
+    }
+
+    // --- Additional edge cases for boundary conditions ---
+
+    #[test]
+    fn validate_vote_options_accepts_exactly_max_option_ids() {
+        // MAX_OPTION_IDS = 10; exactly 10 valid options should pass
+        let options: Vec<_> = (0..10).map(|i| json!({"id": format!("opt-{}", i)})).collect();
+        let content = json!({ "options": options, "limitSubmissions": true });
+        let ids: Vec<String> = (0..10).map(|i| format!("opt-{}", i)).collect();
+        match validate_vote_options(ids, "poll", &content) {
+            VoteValidationResult::Valid { option_ids, .. } => {
+                assert_eq!(option_ids.len(), 10);
+            }
+            other => panic!("Expected Valid for exactly 10 options, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_vote_options_accepts_option_id_exactly_36_chars() {
+        // 36 chars (UUID length) should be accepted
+        let valid_id = "a".repeat(36);
+        let content = json!({
+            "options": [{"id": &valid_id}]
+        });
+        match validate_vote_options(vec![valid_id.clone()], "poll", &content) {
+            VoteValidationResult::Valid { option_ids, .. } => {
+                assert_eq!(option_ids, vec![valid_id]);
+            }
+            other => panic!("Expected Valid for 36-char option ID, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_vote_options_handles_slide_with_no_options_array() {
+        // Some slides may not have an options array in content
+        let content = json!({ "question": "Open question" });
+        match validate_vote_options(vec!["any-id".to_string()], "poll", &content) {
+            // When there's no options array, validation skips option existence check
+            VoteValidationResult::Valid { .. } => {}
+            other => panic!("Expected Valid when no options array, got {:?}", other),
+        }
     }
 }
 
@@ -544,8 +988,8 @@ pub async fn submit_question(
     Path(session_id): Path<String>,
     headers: HeaderMap,
     Json(payload): Json<SubmitQuestionRequest>,
-) -> Result<Json<ApiResponse<QuestionResponse>>> {
-    let pool = app_state.db_pool.pool().await?;
+) -> Result<Response> {
+    let pool = app_state.db_pool.pool_fast_fail().await?;
 
     let content = payload.content.trim();
     if content.is_empty() {
@@ -603,7 +1047,7 @@ pub async fn submit_question(
         .await?;
 
         if let Some(question) = existing {
-            return Ok(Json(ApiResponse::success(question.into())));
+            return Ok(with_degraded_header(ApiResponse::<QuestionResponse>::success(question.into())));
         }
 
         // Use a single transaction to atomically:
@@ -632,6 +1076,22 @@ pub async fn submit_question(
                 // Insert succeeded - increment sequence and fetch snapshot
                 let (sequence, all_questions) =
                     next_qa_sequence_and_questions(&mut tx, &session_id).await?;
+
+                // Enqueue outbox event before committing
+                let qa_payload = serde_json::json!({
+                    "payload": {
+                        "questions": &all_questions
+                    },
+                    "sequence": sequence
+                });
+                crate::services::outbox::enqueue_event(
+                    &mut tx,
+                    &session_id,
+                    crate::services::outbox::OutboxEventType::QaUpdate,
+                    &qa_payload,
+                )
+                .await?;
+
                 tx.commit().await?;
 
                 let question = all_questions
@@ -642,19 +1102,7 @@ pub async fn submit_question(
                         AppError::Internal("Question not found after insert".to_string())
                     })?;
 
-                let session_id_for_publish = session_id.clone();
-                tokio::spawn(async move {
-                    let published =
-                        publish_qa_update(&session_id_for_publish, &all_questions, sequence).await;
-                    if !published {
-                        tracing::warn!(
-                            session_id = %session_id_for_publish,
-                            "Question committed but realtime publish failed - clients will converge via refresh"
-                        );
-                    }
-                });
-
-                return Ok(Json(ApiResponse::success(question.into())));
+                return Ok(with_degraded_header(ApiResponse::<QuestionResponse>::success(question.into())));
             }
             Err(e) => {
                 let is_duplicate = is_mysql_duplicate_key(&e);
@@ -681,7 +1129,7 @@ pub async fn submit_question(
 
                         if let Some(question) = existing {
                             let _ = fetch_tx.rollback().await;
-                            return Ok(Json(ApiResponse::success(question.into())));
+                            return Ok(with_degraded_header(ApiResponse::<QuestionResponse>::success(question.into())));
                         }
 
                         // Still not found, wait and retry
@@ -729,6 +1177,21 @@ pub async fn submit_question(
     // Atomically increment sequence and fetch the post-mutation snapshot
     let (sequence, all_questions) = next_qa_sequence_and_questions(&mut tx, &session_id).await?;
 
+    // Enqueue outbox event before committing
+    let qa_payload = serde_json::json!({
+        "payload": {
+            "questions": &all_questions
+        },
+        "sequence": sequence
+    });
+    crate::services::outbox::enqueue_event(
+        &mut tx,
+        &session_id,
+        crate::services::outbox::OutboxEventType::QaUpdate,
+        &qa_payload,
+    )
+    .await?;
+
     tx.commit().await?;
 
     let question = all_questions
@@ -737,18 +1200,7 @@ pub async fn submit_question(
         .cloned()
         .ok_or_else(|| AppError::Internal("Question not found after insert".to_string()))?;
 
-    let session_id_for_publish = session_id.clone();
-    tokio::spawn(async move {
-        let published = publish_qa_update(&session_id_for_publish, &all_questions, sequence).await;
-        if !published {
-            tracing::warn!(
-                session_id = %session_id_for_publish,
-                "Question committed but realtime publish failed - clients will converge via refresh"
-            );
-        }
-    });
-
-    Ok(Json(ApiResponse::success(question.into())))
+    Ok(with_degraded_header(ApiResponse::<QuestionResponse>::success(question.into())))
 }
 
 #[derive(Deserialize)]
@@ -763,7 +1215,7 @@ pub async fn upvote_question(
     Path((session_id, question_id)): Path<(String, String)>,
     body: Option<Json<UpvoteQuestionRequest>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>> {
-    let pool = app_state.db_pool.pool().await?;
+    let pool = app_state.db_pool.pool_fast_fail().await?;
 
     let question = Question::find_by_id(&pool, &question_id).await?;
     let Some(question) = question else {
@@ -837,21 +1289,24 @@ pub async fn upvote_question(
         (sequence, questions)
     };
 
-    tx.commit().await?;
-
+    // Enqueue outbox event for new upvotes (before commit)
     if !already_upvoted {
-        let session_id_for_publish = session_id.clone();
-        tokio::spawn(async move {
-            let published =
-                publish_qa_update(&session_id_for_publish, &all_questions, sequence).await;
-            if !published {
-                tracing::warn!(
-                    session_id = %session_id_for_publish,
-                    "Question upvote committed but realtime publish failed - clients will converge via refresh"
-                );
-            }
+        let qa_payload = serde_json::json!({
+            "payload": {
+                "questions": &all_questions
+            },
+            "sequence": sequence
         });
+        crate::services::outbox::enqueue_event(
+            &mut tx,
+            &session_id,
+            crate::services::outbox::OutboxEventType::QaUpdate,
+            &qa_payload,
+        )
+        .await?;
     }
+
+    tx.commit().await?;
 
     Ok(Json(ApiResponse::success(
         serde_json::json!({ "message": "Question upvoted", "upvotes": new_upvotes, "alreadyUpvoted": already_upvoted }),
@@ -871,7 +1326,7 @@ pub async fn register_participant(
     Path(session_id): Path<String>,
     Json(payload): Json<RegisterParticipantRequest>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>> {
-    let pool = app_state.db_pool.pool().await?;
+    let pool = app_state.db_pool.pool_fast_fail().await?;
 
     let name = payload.name.trim();
 
@@ -942,7 +1397,7 @@ pub async fn get_my_votes(
     Path(session_id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<GetMyVotesQuery>,
 ) -> Result<Json<ApiResponse<MyVotesResponse>>> {
-    let pool = app_state.db_pool.pool().await?;
+    let pool = app_state.db_pool.pool_fast_fail().await?;
 
     tracing::info!(
         "get_my_votes called for session {} with participantId {}",
@@ -968,4 +1423,60 @@ pub async fn get_my_votes(
     Ok(Json(ApiResponse::success(MyVotesResponse {
         votes: group_votes_by_slide(votes),
     })))
+}
+
+#[cfg(test)]
+mod student_helper_tests {
+    use super::{group_votes_by_slide, with_degraded_header, ApiResponse};
+    use axum::http::{HeaderName, HeaderValue};
+    use axum::response::Response;
+
+    // --- group_votes_by_slide tests ---
+
+    /// Groups (slide_id, option_id) tuples into a HashMap keyed by slide_id.
+    #[test]
+    fn group_votes_by_slide_groups_multiple_options_per_slide() {
+        let votes = vec![
+            ("slide-1".to_string(), "opt-a".to_string()),
+            ("slide-1".to_string(), "opt-b".to_string()),
+            ("slide-2".to_string(), "opt-c".to_string()),
+        ];
+        let grouped = group_votes_by_slide(votes);
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped["slide-1"], vec!["opt-a", "opt-b"]);
+        assert_eq!(grouped["slide-2"], vec!["opt-c"]);
+    }
+
+    /// Empty input produces an empty map.
+    #[test]
+    fn group_votes_by_slide_empty_input() {
+        let grouped = group_votes_by_slide(vec![]);
+        assert!(grouped.is_empty());
+    }
+
+    /// A single vote for a single slide produces a single-entry map.
+    #[test]
+    fn group_votes_by_slide_single_vote() {
+        let votes = vec![("slide-x".to_string(), "opt-y".to_string())];
+        let grouped = group_votes_by_slide(votes);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped["slide-x"], vec!["opt-y"]);
+    }
+
+    // --- with_degraded_header tests ---
+
+    /// When the Ably circuit breaker is NOT open, the response has no
+    /// `X-Realtime-Degraded` header.
+    #[test]
+    fn with_degraded_header_omits_header_when_not_degraded() {
+        let body = ApiResponse::success("ok");
+        let response = with_degraded_header(body);
+        assert!(response.headers().get("x-realtime-degraded").is_none());
+    }
+
+    // Note: with_degraded_header when degraded=true requires setting the circuit
+    // breaker to open state, which uses a static global. Testing that path
+    // requires serializing access to the global circuit breaker state, which
+    // is better done in an integration test or via dependency injection.
+    // The degraded path is tested indirectly via the existing concurrency tests.
 }

@@ -3,6 +3,8 @@ use serde::Serialize;
 use std::env;
 use std::time::Duration;
 
+use crate::services::circuit_breaker::CircuitBreaker;
+
 // Shared HTTP client for connection pooling (reuses connections)
 static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
@@ -12,6 +14,17 @@ static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
         .build()
         .expect("Failed to create HTTP client")
 });
+
+// Circuit breaker for Ably: 5 consecutive failures → trip, 30s recovery timeout
+static CIRCUIT_BREAKER: Lazy<CircuitBreaker> = Lazy::new(|| {
+    CircuitBreaker::new(5, 30)
+});
+
+/// Returns true if the Ably circuit breaker is open and realtime delivery is degraded.
+/// This is a side-effect-free read — it does not trigger state transitions.
+pub fn is_degraded() -> bool {
+    CIRCUIT_BREAKER.is_open()
+}
 
 /// Get the Ably REST URL from environment or use default
 fn get_ably_base_url() -> String {
@@ -24,6 +37,16 @@ pub async fn publish_to_channel<T: Serialize>(
     event_name: &str,
     data: &T,
 ) -> Result<bool, String> {
+    // Check circuit breaker before making the request
+    if !CIRCUIT_BREAKER.allow_request() {
+        tracing::warn!(
+            state = CIRCUIT_BREAKER.state_name(),
+            "Ably circuit breaker OPEN — skipping publish to {}",
+            channel
+        );
+        return Ok(false);
+    }
+
     let ably_api_key = match env::var("ABLY_API_KEY") {
         Ok(key) => key,
         Err(_) => {
@@ -64,6 +87,7 @@ pub async fn publish_to_channel<T: Serialize>(
     {
         Ok(response) => {
             if response.status().is_success() {
+                CIRCUIT_BREAKER.record_success();
                 tracing::info!(
                     "Successfully published {} to channel {}",
                     event_name,
@@ -71,6 +95,7 @@ pub async fn publish_to_channel<T: Serialize>(
                 );
                 Ok(true) // Successfully published
             } else {
+                CIRCUIT_BREAKER.record_failure();
                 let status = response.status();
                 let body = response.text().await.unwrap_or_default();
                 tracing::error!(
@@ -84,6 +109,7 @@ pub async fn publish_to_channel<T: Serialize>(
             }
         }
         Err(e) => {
+            CIRCUIT_BREAKER.record_failure();
             tracing::error!(
                 event_name = %event_name,
                 channel = %channel,
@@ -173,6 +199,37 @@ pub async fn publish_slides_update(session_id: &str, slides: &impl Serialize) ->
         Err(e) => {
             tracing::error!("Failed to publish slides update: {}", e);
             false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Tests that `get_ably_base_url()` returns the default when no env var is set
+    /// and respects the `ABLY_REST_URL` override. Both behaviors are verified in one
+    /// serial test to avoid env var pollution between parallel tests.
+    #[test]
+    fn get_ably_base_url_default_and_override() {
+        let original = std::env::var("ABLY_REST_URL").ok();
+
+        // Verify default
+        std::env::remove_var("ABLY_REST_URL");
+        assert_eq!(get_ably_base_url(), "https://rest.ably.io");
+
+        // Verify override
+        std::env::set_var("ABLY_REST_URL", "https://custom-ably-proxy.local");
+        assert_eq!(get_ably_base_url(), "https://custom-ably-proxy.local");
+
+        // Verify trailing slash is preserved (trimming happens at call site)
+        std::env::set_var("ABLY_REST_URL", "https://custom.local/");
+        assert_eq!(get_ably_base_url(), "https://custom.local/");
+
+        // Restore original
+        match original {
+            Some(val) => std::env::set_var("ABLY_REST_URL", val),
+            None => std::env::remove_var("ABLY_REST_URL"),
         }
     }
 }

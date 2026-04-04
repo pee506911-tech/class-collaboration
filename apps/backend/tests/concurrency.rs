@@ -51,6 +51,20 @@ async fn cleanup_test_database(pool: &Pool<MySql>) {
         .await
         .expect("Failed to clean votes");
 
+    let _ = sqlx::query("DELETE FROM vote_counts WHERE session_id IS NOT NULL")
+        .execute(pool)
+        .await;
+
+    sqlx::query("DELETE FROM slide_update_requests WHERE session_id IS NOT NULL")
+        .execute(pool)
+        .await
+        .expect("Failed to clean slide update requests");
+
+    sqlx::query("DELETE FROM slide_delete_requests WHERE session_id IS NOT NULL")
+        .execute(pool)
+        .await
+        .expect("Failed to clean slide delete requests");
+
     sqlx::query("DELETE FROM questions WHERE session_id IS NOT NULL")
         .execute(pool)
         .await
@@ -228,6 +242,17 @@ impl ConcurrencyTestFixture {
         count
     }
 
+    /// Get materialized vote counts for a slide from the read model
+    async fn get_vote_counts_read_model(&self) -> Vec<(String, i64)> {
+        sqlx::query_as(
+            "SELECT option_id, vote_count FROM vote_counts WHERE slide_id = ? ORDER BY option_id",
+        )
+        .bind(&self.slide_id)
+        .fetch_all(&*self.pool)
+        .await
+        .expect("Failed to fetch vote_counts read model")
+    }
+
     /// Get votes by participant
     async fn get_participant_votes(&self, participant_id: &str) -> Vec<(String, String)> {
         let votes: Vec<(String, String)> =
@@ -273,6 +298,38 @@ impl ConcurrencyTestFixture {
             .expect("Failed to get QA sequence");
 
         sequence
+    }
+
+    /// Get current session state_version
+    async fn get_session_state_version(&self) -> i64 {
+        let version: i64 = sqlx::query_scalar("SELECT state_version FROM sessions WHERE id = ?")
+            .bind(&self.session_id)
+            .fetch_one(&*self.pool)
+            .await
+            .expect("Failed to get session state_version");
+
+        version
+    }
+
+    /// Update a slide via direct DB write (for tests that need to manipulate slide content
+    /// without going through the API)
+    async fn update_slide(&self, slide_id: &str, content: Value) {
+        sqlx::query(
+            "UPDATE slides SET content = ?, version = version + 1 WHERE id = ? AND session_id = ?",
+        )
+        .bind(sqlx::types::Json(&content))
+        .bind(slide_id)
+        .bind(&self.session_id)
+        .execute(&*self.pool)
+        .await
+        .expect("Failed to update slide");
+
+        // Also bump session state_version to match the production handler behavior
+        sqlx::query("UPDATE sessions SET state_version = state_version + 1 WHERE id = ?")
+            .bind(&self.session_id)
+            .execute(&*self.pool)
+            .await
+            .expect("Failed to bump state_version");
     }
 }
 
@@ -419,16 +476,26 @@ impl SlideMutationFixture {
         &self,
         slide_id: &str,
         content: Value,
+        base_version: Option<i64>,
+        request_id: Option<&str>,
     ) -> reqwest::Result<reqwest::Response> {
-        self.client
+        let mut request = self
+            .client
             .put(format!(
                 "{}/api/sessions/{}/slides/{}",
                 self.server_url, self.session_id, slide_id
             ))
             .header("Authorization", bearer(&self.auth_token))
-            .json(&json!({ "content": content }))
-            .send()
-            .await
+            .json(&json!({
+                "content": content,
+                "baseVersion": base_version,
+            }));
+
+        if let Some(request_id) = request_id {
+            request = request.header("X-Client-Request-Id", request_id);
+        }
+
+        request.send().await
     }
 
     async fn reorder_slides(&self, slide_ids: Vec<String>) -> reqwest::Result<reqwest::Response> {
@@ -463,6 +530,175 @@ impl SlideMutationFixture {
                 .expect("Failed to fetch slide content");
 
         content.0
+    }
+
+    async fn get_slide_version(&self, slide_id: &str) -> i64 {
+        sqlx::query_scalar("SELECT version FROM slides WHERE id = ? AND session_id = ?")
+            .bind(slide_id)
+            .bind(&self.session_id)
+            .fetch_one(&*self.pool)
+            .await
+            .expect("Failed to fetch slide version")
+    }
+
+    async fn get_session_state_version(&self) -> i64 {
+        sqlx::query_scalar("SELECT state_version FROM sessions WHERE id = ?")
+            .bind(&self.session_id)
+            .fetch_one(&*self.pool)
+            .await
+            .expect("Failed to fetch session state_version")
+    }
+
+    /// Create a new fixture with a poll slide instead of static slides
+    async fn new_with_poll() -> Self {
+        let database_url = get_database_url();
+        let server_url = get_server_url();
+        let pool = Arc::new(
+            Pool::<MySql>::connect(&database_url)
+                .await
+                .expect("Failed to connect to test database"),
+        );
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("Failed to create HTTP client");
+
+        cleanup_test_database(&pool).await;
+
+        let unique = uuid::Uuid::new_v4().to_string();
+        let email = format!("poll-race-{unique}@example.com");
+        let password = format!("Race-{}!Aa1", &unique[..8]);
+        let name = "Poll Race";
+
+        let register_response = client
+            .post(format!("{}/api/auth/register", server_url))
+            .json(&json!({
+                "email": email,
+                "password": password,
+                "name": name,
+                "role": "staff",
+            }))
+            .send()
+            .await
+            .expect("register request failed");
+        assert!(
+            register_response.status().is_success(),
+            "register request failed: {}",
+            register_response.text().await.unwrap_or_default()
+        );
+
+        let login_response = client
+            .post(format!("{}/api/auth/login", server_url))
+            .json(&json!({
+                "email": email,
+                "password": password,
+            }))
+            .send()
+            .await
+            .expect("login request failed");
+        let login_body: Value = login_response
+            .json()
+            .await
+            .expect("login response body should be JSON");
+        let auth_token = login_body
+            .get("token")
+            .and_then(Value::as_str)
+            .expect("login token missing")
+            .to_string();
+
+        let create_session_response = client
+            .post(format!("{}/api/sessions", server_url))
+            .header("Authorization", bearer(&auth_token))
+            .json(&json!({
+                "title": format!("Poll race {unique}"),
+                "allowQuestions": false,
+                "requireName": false,
+            }))
+            .send()
+            .await
+            .expect("create session request failed");
+        assert!(
+            create_session_response.status().is_success(),
+            "create session request failed: {}",
+            create_session_response.text().await.unwrap_or_default()
+        );
+        let create_session_body: Value = create_session_response
+            .json()
+            .await
+            .expect("create session response body should be JSON");
+        let session_id = create_session_body
+            .get("data")
+            .and_then(|data| data.get("id"))
+            .and_then(Value::as_str)
+            .expect("session id missing")
+            .to_string();
+
+        let slide_id = uuid::Uuid::new_v4().to_string();
+        let other_slide_id = uuid::Uuid::new_v4().to_string();
+        let poll_content = json!({
+            "question": "What is your favorite color?",
+            "options": [
+                {"id": "opt-red", "text": "Red"},
+                {"id": "opt-blue", "text": "Blue"},
+                {"id": "opt-green", "text": "Green"},
+                {"id": "opt-yellow", "text": "Yellow"}
+            ],
+            "limitSubmissions": true,
+            "allowMultipleSelection": false
+        });
+        let other_slide_content = json!({
+            "title": "Other slide",
+            "body": "Other body"
+        });
+
+        sqlx::query(
+            "INSERT INTO slides (id, session_id, type, content, order_index)
+             VALUES (?, ?, 'poll', ?, 0)",
+        )
+        .bind(&slide_id)
+        .bind(&session_id)
+        .bind(&poll_content)
+        .execute(&*pool)
+        .await
+        .expect("Failed to create poll slide");
+
+        sqlx::query(
+            "INSERT INTO slides (id, session_id, type, content, order_index)
+             VALUES (?, ?, 'static', ?, 1024)",
+        )
+        .bind(&other_slide_id)
+        .bind(&session_id)
+        .bind(&other_slide_content)
+        .execute(&*pool)
+        .await
+        .expect("Failed to create other slide");
+
+        Self {
+            pool,
+            client,
+            server_url,
+            auth_token,
+            session_id,
+            slide_id,
+            other_slide_id,
+        }
+    }
+
+    /// Submit a vote via the API (for SlideMutationFixture-based tests)
+    async fn submit_vote_api(
+        &self,
+        participant_id: &str,
+        option_id: &str,
+    ) -> reqwest::Result<reqwest::Response> {
+        let url = format!("{}/api/sessions/{}/vote", self.server_url, self.session_id);
+        let payload = json!({
+            "slideId": self.slide_id,
+            "optionId": option_id,
+            "participantId": participant_id
+        });
+
+        self.client.post(&url).json(&payload).send().await
     }
 }
 
@@ -1105,13 +1341,13 @@ async fn t09_question_idempotency_with_request_id() {
 // T-10: Slide Autosave/Reorder Serialization Test
 // ============================================
 
-/// T-10: Verify that slide content autosave waits for an in-flight reorder lock
-/// and that both writes succeed once the session lock is released.
+/// T-10: Verify that slide content autosave is not blocked by an in-flight reorder lock,
+/// while reorder itself still waits for the session lock.
 ///
 /// Test: Hold the session row lock, then start one content update and one reorder
 /// request in parallel.
-/// Assertion: Both requests remain blocked until the lock is released, then both
-/// succeed and the final slide order/content are correct.
+/// Assertion: The content update completes without waiting on the session lock,
+/// the reorder remains blocked, then succeeds after the lock is released.
 #[tokio::test]
 #[ignore = "requires MySQL + a running backend server (set DATABASE_URL and TEST_SERVER_URL)"]
 async fn t10_slide_autosave_and_reorder_are_serialized() {
@@ -1173,8 +1409,8 @@ async fn t10_slide_autosave_and_reorder_are_serialized() {
 
     sleep(Duration::from_millis(400)).await;
     assert!(
-        !update_handle.is_finished(),
-        "slide update should wait for the session lock"
+        update_handle.is_finished(),
+        "slide update should no longer wait for the session lock"
     );
     assert!(
         !reorder_handle.is_finished(),
@@ -1215,6 +1451,376 @@ async fn t10_slide_autosave_and_reorder_are_serialized() {
     let updated_slide_content = fixture.get_slide_content(&fixture.slide_id).await;
     assert_eq!(
         updated_slide_content, update_content,
-        "slide content should persist after the serialized autosave"
+        "slide content should persist without waiting on the reorder lock"
+    );
+}
+
+/// T-11: Verify that the vote_counts read model stays in sync with durable votes.
+#[tokio::test]
+#[ignore = "requires MySQL + a running backend server (set DATABASE_URL and TEST_SERVER_URL)"]
+async fn t11_vote_counts_read_model_tracks_submissions() {
+    let fixture = ConcurrencyTestFixture::new().await;
+
+    let response = fixture
+        .submit_vote_api("vote-counts-participant", "opt-red")
+        .await
+        .expect("vote request failed");
+    assert!(response.status().is_success(), "vote request failed");
+
+    let durable_vote_count = fixture.get_vote_count().await;
+    let read_model_counts = fixture.get_vote_counts_read_model().await;
+
+    assert_eq!(durable_vote_count, 1, "expected one durable vote row");
+    assert_eq!(
+        read_model_counts,
+        vec![("opt-red".to_string(), 1)],
+        "vote_counts read model should match the durable vote write"
+    );
+}
+
+/// T-12: Verify that concurrent stale slide saves conflict instead of silently overwriting.
+#[tokio::test]
+#[ignore = "requires MySQL + a running backend server (set DATABASE_URL and TEST_SERVER_URL)"]
+async fn t12_concurrent_slide_saves_conflict_on_stale_version() {
+    let fixture = SlideMutationFixture::new().await;
+    let initial_version = fixture.get_slide_version(&fixture.slide_id).await;
+
+    let first = fixture
+        .update_slide(
+            &fixture.slide_id,
+            json!({ "title": "Writer one", "body": "First update" }),
+            Some(initial_version),
+            None,
+        )
+        .await
+        .expect("first update request failed");
+    let second = fixture
+        .update_slide(
+            &fixture.slide_id,
+            json!({ "title": "Writer two", "body": "Second update" }),
+            Some(initial_version),
+            None,
+        )
+        .await
+        .expect("second update request failed");
+
+    let statuses = [first.status(), second.status()];
+    let success_count = statuses.iter().filter(|status| status.is_success()).count();
+    let conflict_count = statuses
+        .iter()
+        .filter(|status| **status == reqwest::StatusCode::CONFLICT)
+        .count();
+
+    assert_eq!(success_count, 1, "exactly one stale save should succeed");
+    assert_eq!(conflict_count, 1, "exactly one stale save should conflict");
+    assert_eq!(
+        fixture.get_slide_version(&fixture.slide_id).await,
+        initial_version + 1,
+        "slide version should increment exactly once"
+    );
+}
+
+/// T-13: Verify that a retried slide update replays the original success even after
+/// a later update has already advanced the slide version.
+#[tokio::test]
+#[ignore = "requires MySQL + a running backend server (set DATABASE_URL and TEST_SERVER_URL)"]
+async fn t13_slide_update_idempotency_replays_committed_result() {
+    let fixture = SlideMutationFixture::new().await;
+    let initial_version = fixture.get_slide_version(&fixture.slide_id).await;
+
+    let request_id = "update-request-replay-1";
+    let first_content = json!({
+        "title": "Writer one",
+        "body": "First update"
+    });
+    let second_content = json!({
+        "title": "Writer two",
+        "body": "Second update"
+    });
+
+    let first = fixture
+        .update_slide(
+            &fixture.slide_id,
+            first_content.clone(),
+            Some(initial_version),
+            Some(request_id),
+        )
+        .await
+        .expect("first update request failed");
+    assert!(
+        first.status().is_success(),
+        "first update should succeed"
+    );
+    let first_body: Value = first
+        .json()
+        .await
+        .expect("first update response should be JSON");
+    assert_eq!(
+        first_body["data"]["version"].as_i64(),
+        Some(initial_version + 1),
+        "first update should advance the slide version once"
+    );
+
+    let second = fixture
+        .update_slide(
+            &fixture.slide_id,
+            second_content.clone(),
+            Some(initial_version + 1),
+            Some("update-request-replay-2"),
+        )
+        .await
+        .expect("second update request failed");
+    assert!(
+        second.status().is_success(),
+        "second update should also succeed"
+    );
+    let second_body: Value = second
+        .json()
+        .await
+        .expect("second update response should be JSON");
+    assert_eq!(
+        second_body["data"]["version"].as_i64(),
+        Some(initial_version + 2),
+        "second update should advance the slide version again"
+    );
+
+    let retry = fixture
+        .update_slide(
+            &fixture.slide_id,
+            first_content,
+            Some(initial_version),
+            Some(request_id),
+        )
+        .await
+        .expect("retry update request failed");
+    assert!(
+        retry.status().is_success(),
+        "retry should replay the committed success instead of conflicting"
+    );
+    let retry_body: Value = retry
+        .json()
+        .await
+        .expect("retry update response should be JSON");
+    assert_eq!(
+        retry_body, first_body,
+        "retry should replay the original response body"
+    );
+
+    assert_eq!(
+        fixture.get_slide_version(&fixture.slide_id).await,
+        initial_version + 2,
+        "the current slide version should still reflect the later update"
+    );
+    assert_eq!(
+        fixture.get_slide_content(&fixture.slide_id).await,
+        second_content,
+        "the later update should still win the stored slide state"
+    );
+}
+
+// ============================================
+// T-14: Slide Update Enqueues Outbox Event
+// ============================================
+
+/// T-14: Verify that a single slide update enqueues a SLIDES_UPDATE outbox event
+/// and bumps the session state_version.
+///
+/// This is the regression test for RACE-1: previously, single-slide updates
+/// committed to MySQL but never produced an outbox event, so students never
+/// received real-time notification of content changes.
+///
+/// Test: Update a slide via API, then query the outbox_events table.
+/// Assertion: Exactly one pending SLIDES_UPDATE event exists for the session,
+///            and state_version has incremented by 1.
+#[tokio::test]
+#[ignore = "requires MySQL + a running backend server (set DATABASE_URL and TEST_SERVER_URL)"]
+async fn t14_slide_update_enqueues_outbox_event() {
+    let fixture = SlideMutationFixture::new().await;
+    let initial_version = fixture.get_slide_version(&fixture.slide_id).await;
+
+    let new_content = json!({
+        "title": "Updated title for outbox test",
+        "body": "Updated body"
+    });
+
+    let response = fixture
+        .update_slide(
+            &fixture.slide_id,
+            new_content.clone(),
+            Some(initial_version),
+            Some("t14-outbox-test-request"),
+        )
+        .await
+        .expect("update request failed");
+
+    assert!(
+        response.status().is_success(),
+        "update should succeed: {}",
+        response.text().await.unwrap_or_default()
+    );
+
+    // Verify outbox event was created
+    let outbox_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM outbox_events
+         WHERE session_id = ? AND event_type = 'SLIDES_UPDATE' AND status = 'pending'"
+    )
+    .bind(&fixture.session_id)
+    .fetch_one(&*fixture.pool)
+    .await
+    .expect("failed to query outbox_events");
+
+    assert_eq!(
+        outbox_count, 1,
+        "exactly one pending SLIDES_UPDATE outbox event should exist after slide update"
+    );
+
+    // Verify the outbox payload contains the updated slide
+    let outbox_payload: sqlx::types::Json<Value> = sqlx::query_scalar(
+        "SELECT payload FROM outbox_events
+         WHERE session_id = ? AND event_type = 'SLIDES_UPDATE' AND status = 'pending'
+         ORDER BY created_at DESC LIMIT 1"
+    )
+    .bind(&fixture.session_id)
+    .fetch_one(&*fixture.pool)
+    .await
+    .expect("failed to fetch outbox payload");
+
+    let slides = outbox_payload
+        .0
+        .get("slides")
+        .and_then(Value::as_array)
+        .expect("outbox payload should have 'slides' array");
+
+    assert!(
+        !slides.is_empty(),
+        "outbox slides array should not be empty"
+    );
+
+    let updated_slide = &slides[0];
+    assert_eq!(
+        updated_slide.get("id").and_then(Value::as_str),
+        Some(fixture.slide_id.as_str()),
+        "outbox event should reference the updated slide id"
+    );
+}
+
+// ============================================
+// T-15: Vote Rejects Deleted Option
+// ============================================
+
+/// T-15: Verify that submitting a vote for an option that no longer exists
+/// in the slide content returns a 400 error.
+///
+/// This is the regression test for RACE-4: if a teacher removes a poll option
+/// while a student is voting for it, the vote should be rejected rather than
+/// stored for a ghost option.
+///
+/// Test: Create a poll with options [A, B, C], remove option C via slide update,
+///       then submit a vote for option C.
+/// Assertion: Vote submission returns 400 Bad Request.
+#[tokio::test]
+#[ignore = "requires MySQL + a running backend server (set DATABASE_URL and TEST_SERVER_URL)"]
+async fn t15_vote_rejects_deleted_option() {
+    let fixture = SlideMutationFixture::new_with_poll().await;
+
+    // Vote for an option that exists first to confirm normal voting works
+    let valid_vote = fixture
+        .submit_vote_api("test-participant-1", "opt-red")
+        .await
+        .expect("vote request failed");
+    assert!(
+        valid_vote.status().is_success(),
+        "voting for a valid option should succeed: {}",
+        valid_vote.text().await.unwrap_or_default()
+    );
+
+    // Now update the slide to remove opt-yellow via the API
+    let slide_content = json!({
+        "question": "What is your favorite color?",
+        "options": [
+            {"id": "opt-red", "text": "Red"},
+            {"id": "opt-blue", "text": "Blue"},
+            {"id": "opt-green", "text": "Green"}
+            // opt-yellow removed
+        ],
+        "limitSubmissions": true,
+        "allowMultipleSelection": false
+    });
+
+    let initial_version = fixture.get_slide_version(&fixture.slide_id).await;
+    let update_response = fixture
+        .update_slide(&fixture.slide_id, slide_content, Some(initial_version), None)
+        .await
+        .expect("slide update request failed");
+    assert!(
+        update_response.status().is_success(),
+        "slide update should succeed: {}",
+        update_response.text().await.unwrap_or_default()
+    );
+
+    // Now try to vote for the removed option (opt-yellow)
+    // Use a different participant to avoid limitSubmissions lock
+    let invalid_vote = fixture
+        .submit_vote_api("test-participant-2", "opt-yellow")
+        .await
+        .expect("vote request failed");
+
+    assert!(
+        !invalid_vote.status().is_success(),
+        "voting for a deleted option should return an error status"
+    );
+    assert_eq!(
+        invalid_vote.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "voting for a deleted option should return 400"
+    );
+}
+
+// ============================================
+// T-16: Vote Accepts Valid Option After Content Change
+// ============================================
+
+/// T-16: Verify that voting for a remaining option still works after
+/// other options have been removed from the slide.
+///
+/// Test: Remove one option from a poll, then vote for a remaining option.
+/// Assertion: Vote succeeds.
+#[tokio::test]
+#[ignore = "requires MySQL + a running backend server (set DATABASE_URL and TEST_SERVER_URL)"]
+async fn t16_vote_accepts_valid_option_after_content_change() {
+    let fixture = SlideMutationFixture::new_with_poll().await;
+
+    // Update the slide to remove opt-yellow via the API
+    let slide_content = json!({
+        "question": "What is your favorite color?",
+        "options": [
+            {"id": "opt-red", "text": "Red"},
+            {"id": "opt-blue", "text": "Blue"},
+            {"id": "opt-green", "text": "Green"}
+        ],
+        "limitSubmissions": true,
+        "allowMultipleSelection": false
+    });
+
+    let initial_version = fixture.get_slide_version(&fixture.slide_id).await;
+    let update_response = fixture
+        .update_slide(&fixture.slide_id, slide_content, Some(initial_version), None)
+        .await
+        .expect("slide update request failed");
+    assert!(
+        update_response.status().is_success(),
+        "slide update should succeed: {}",
+        update_response.text().await.unwrap_or_default()
+    );
+
+    // Vote for a remaining option — should succeed
+    let vote = fixture
+        .submit_vote_api("test-participant-valid", "opt-red")
+        .await
+        .expect("vote request failed");
+    assert!(
+        vote.status().is_success(),
+        "voting for a remaining option should succeed: {}",
+        vote.text().await.unwrap_or_default()
     );
 }

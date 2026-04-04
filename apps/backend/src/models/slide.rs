@@ -17,6 +17,7 @@ pub struct Slide {
     #[serde(rename = "isHidden")]
     #[sqlx(rename = "is_hidden")]
     pub is_hidden: bool,
+    pub version: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,15 +30,31 @@ pub struct CreateSlideRequest {
     pub client_request_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateSlideRequest {
     #[serde(rename = "type")]
     pub slide_type: Option<String>,
     pub content: Option<serde_json::Value>,
+    pub base_version: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReorderSlidesRequest {
     pub slide_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSlidesBatchRequest {
+    pub slides: Vec<CreateSlideRequest>,
+    pub client_request_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSlidesBatchResponse {
+    pub slides: Vec<Slide>,
+    pub state_version: i64,
 }

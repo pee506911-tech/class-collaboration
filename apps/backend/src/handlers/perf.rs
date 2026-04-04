@@ -45,7 +45,7 @@ pub async fn cleanup_session(
 ) -> Result<Json<ApiResponse<PerfCleanupResponse>>> {
     verify_perf_access(&headers, &config)?;
 
-    let pool = app_state.db_pool.pool().await?;
+    let pool = app_state.db_pool.pool_fast_fail().await?;
     let cleanup = cleanup_perf_session(
         &pool,
         &session_id,

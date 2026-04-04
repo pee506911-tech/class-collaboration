@@ -128,6 +128,9 @@ test('participant id survives a browser reload with localStorage', async ({ brow
       PARTICIPANT_KEY
     );
 
+    // Guard: ensure we didn't redirect away from the student session page
+    expect(page.url()).toContain(`/student/session/${SHARE_TOKEN}`);
+
     const secondId = await page.evaluate((key) => window.localStorage.getItem(key), PARTICIPANT_KEY);
     expect(secondId).toBe(firstId);
   } finally {
@@ -153,6 +156,9 @@ test('legacy participantId storage coexists with the new student-scoped id', asy
       (key) => Boolean(window.localStorage.getItem(key)),
       PARTICIPANT_KEY
     );
+
+    // Guard: ensure we didn't redirect away
+    expect(page.url()).toContain(`/student/session/${SHARE_TOKEN}`);
 
     const reloadedLegacyId = await page.evaluate(() => window.localStorage.getItem('participantId'));
     const reloadedStudentId = await page.evaluate((key) => window.localStorage.getItem(key), PARTICIPANT_KEY);

@@ -5,7 +5,7 @@ export const runtime = 'edge';
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Slide, Session } from 'shared';
-import { getSlides, createSlide, updateSlide, deleteSlide, reorderSlides, getSession, updateSession, updateSlideVisibility, goLiveSession, stopSession } from '@/lib/api';
+import { getSlides, createSlide, deleteSlide, reorderSlides, getSession, updateSession, updateSlideVisibility, goLiveSession, stopSession } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Plus, Layout, BarChart2, HelpCircle, Play, X, CheckSquare, Smartphone, GripVertical, Share2, ArrowLeft, Settings, Edit2, MessageSquare, Users, Eye, EyeOff, Square, Copy, ExternalLink } from 'lucide-react';
 import Link from 'next/link';
@@ -22,6 +22,7 @@ import { EditorSlide, normalizeSlides } from '@/lib/optimistic-slide-queue';
 import { useOptimisticSlideQueue } from '@/lib/use-optimistic-slide-queue';
 import { safeLocalStorageGet } from '@/lib/storage';
 import { formatRequestId, mapHttpErrorToUiMessage } from '@/lib/http-error-ui';
+import { saveSlideUpdate, SlideVersionConflictError } from '@/lib/slide-update';
 
 function reindexSlides(slides: Slide[]): Slide[] {
     return slides.map((slide, index) => ({ ...slide, orderIndex: index }));
@@ -206,22 +207,23 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
     };
 
     async function handleUpdateSlide(slideId: string, content: Slide['content']) {
-        const resolvedSlideId = resolveOptimisticId(slideId) ?? slideId;
-        const existingSlide = baseSlides.find((slide) => slide.id === resolvedSlideId);
-        if (!existingSlide) {
-            return;
-        }
-
-        setBaseSlides((prevSlides) => prevSlides.map((slide) =>
-            slide.id === resolvedSlideId ? { ...slide, content } : slide
-        ));
-
         try {
-            await updateSlide(id, resolvedSlideId, content);
+            await saveSlideUpdate({
+                sessionId: id,
+                slideId,
+                content,
+                baseSlides,
+                resolveOptimisticId,
+                setBaseSlides,
+                refreshSlides: loadSlides,
+            });
         } catch (e) {
-            setBaseSlides((prevSlides) => prevSlides.map((slide) =>
-                slide.id === resolvedSlideId ? { ...slide, content: existingSlide.content } : slide
-            ));
+            if (e instanceof SlideVersionConflictError) {
+                toast.error('Slide changed elsewhere', {
+                    description: e.message,
+                });
+                throw e;
+            }
             toast.error('Failed to update slide');
             throw new Error('Failed to update slide');
         }
@@ -387,13 +389,18 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                                 {...provided.draggableProps}
                                                 // PREVIEW SELECTION: Click selects for EDITOR PREVIEW (not student view)
                                                 onClick={() => handleSelectSlide(slide.id)}
+                                                style={{
+                                                    ...provided.draggableProps.style,
+                                                    // Performance optimization: skip rendering off-screen slides
+                                                    contentVisibility: 'auto',
+                                                    containIntrinsicSize: '80px', // Estimated slide item height
+                                                }}
                                                 className={`group relative p-3 rounded-xl cursor-pointer transition-all duration-200 border ${previewSlideId === slide.id
                                                     ? 'bg-white border-blue-600 shadow-md ring-1 ring-blue-600/20 z-10'
                                                     : state?.currentSlideId === slide.id
                                                         ? 'bg-green-50 border-green-600 shadow-sm ring-1 ring-green-600/20'
                                                         : 'bg-white border-slate-200 hover:border-blue-300 hover:shadow-sm'
                                                     } ${slide.optimistic?.isPending ? 'opacity-90' : ''} ${snapshot.isDragging ? 'shadow-xl ring-2 ring-blue-600 rotate-2 z-50' : ''}`}
-                                                style={provided.draggableProps.style}
                                                 title={
                                                     slide.optimistic?.isPending
                                                         ? slide.optimistic.syncState === 'retrying'

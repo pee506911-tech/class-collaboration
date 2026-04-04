@@ -228,6 +228,12 @@ impl SessionService {
         Ok(())
     }
 
+    /// Invalidate the session state cache after a mutation.
+    /// This ensures read-after-write consistency: the next GET will fetch fresh data.
+    pub async fn invalidate_session_cache(&self, session_id: &str) {
+        self.state_cache.invalidate(session_id).await;
+    }
+
     /// Get public session data by share token
     pub async fn get_public_session(
         &self,
@@ -413,6 +419,15 @@ impl SessionStateCache {
         }
         None
     }
+
+    /// Invalidate cached state for a session after a mutation.
+    /// Ensures read-after-write consistency: the next GET will fetch fresh data from DB.
+    /// This is critical for correctness - without it, HTTP API may return stale data
+    /// that disagrees with what Ably just pushed to clients.
+    pub async fn invalidate(&self, session_id: &str) {
+        let mut states = self.states.write().await;
+        states.remove(session_id);
+    }
 }
 
 #[cfg(test)]
@@ -528,6 +543,7 @@ mod tests {
             })),
             order_index,
             is_hidden: false,
+            version: 0,
         }
     }
 
@@ -582,6 +598,78 @@ mod tests {
     async fn configure_repo(repo: &MockSessionRepository, f: impl FnOnce(&mut MockState)) {
         let mut state = repo.state.lock().await;
         f(&mut state);
+    }
+
+    /// **Feature: performance-audit, Finding 4: Session State Cache Not Invalidated on Writes**
+    /// **Validates: Phase 1.3 - Write-through cache invalidation**
+    ///
+    /// Property: After calling invalidate() on a session_id, the next get_or_build() call
+    /// SHALL rebuild the state from the database, not serve the cached version.
+    #[tokio::test]
+    async fn cache_invalidates_on_write() {
+        let repo = MockSessionRepository::default();
+        let cache = SessionStateCache::new(Duration::from_secs(60), 8);
+
+        // First build - populate cache
+        configure_repo(&repo, |state| {
+            state.state_header_result = Some(Some(SessionStateHeader {
+                current_slide_id: Some("slide-v1".to_string()),
+                is_presentation_active: false,
+                is_results_visible: false,
+                state_version: 1,
+                vote_sequence: 0,
+                qa_sequence: 0,
+            }));
+            state.slides_result = Some(vec![]);
+            state.questions_result = Some(vec![]);
+            state.vote_counts_result = Some(vec![]);
+        })
+        .await;
+
+        let service = SessionService::new(Arc::new(repo.clone()), cache.clone());
+        let state_v1 = service
+            .get_session_state("session-1")
+            .await
+            .expect("should succeed");
+        assert_eq!(state_v1.current_slide_id, Some("slide-v1".to_string()));
+
+        // Invalidate the cache (simulating a mutation)
+        cache.invalidate("session-1").await;
+
+        // Configure different data for second fetch
+        configure_repo(&repo, |state| {
+            state.state_header_result = Some(Some(SessionStateHeader {
+                current_slide_id: Some("slide-v2".to_string()),
+                is_presentation_active: true,
+                is_results_visible: true,
+                state_version: 2,
+                vote_sequence: 1,
+                qa_sequence: 1,
+            }));
+            state.slides_result = Some(vec![]);
+            state.questions_result = Some(vec![]);
+            state.vote_counts_result = Some(vec![]);
+        })
+        .await;
+
+        // Second fetch should rebuild from DB, not serve cached data
+        let state_v2 = service
+            .get_session_state("session-1")
+            .await
+            .expect("should succeed");
+        assert_eq!(state_v2.current_slide_id, Some("slide-v2".to_string()));
+        assert_eq!(state_v2.is_presentation_active, true);
+    }
+
+    #[tokio::test]
+    async fn cache_invalidation_is_idempotent() {
+        let cache = SessionStateCache::new(Duration::from_secs(60), 8);
+
+        // Invalidate non-existent key (should not panic)
+        cache.invalidate("non-existent").await;
+
+        // Invalidate again (should be safe)
+        cache.invalidate("non-existent").await;
     }
 
     #[async_trait::async_trait]
@@ -1052,5 +1140,283 @@ mod tests {
         assert_eq!(first.state_version, 1);
         assert_eq!(second.state_version, 2);
         assert_eq!(build_calls.load(Ordering::SeqCst), 2);
+    }
+
+    // --- delete_session tests ---
+
+    #[tokio::test]
+    async fn delete_session_succeeds_for_owner() {
+        let repo = MockSessionRepository::default();
+        configure_repo(&repo, |state| {
+            state.verify_ownership_result = Some(true);
+            state.delete_result = Some(1);
+        })
+        .await;
+        let service = build_service(&repo, Duration::from_secs(60));
+
+        let result = service.delete_session("session-1", "user-1").await;
+        assert!(result.is_ok());
+
+        let state = repo.snapshot().await;
+        assert_eq!(
+            state.verify_ownership_calls,
+            vec![("session-1".to_string(), "user-1".to_string())]
+        );
+        assert_eq!(state.delete_calls, vec!["session-1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn delete_session_rejects_non_owner() {
+        let repo = MockSessionRepository::default();
+        configure_repo(&repo, |state| {
+            state.verify_ownership_result = Some(false);
+        })
+        .await;
+        let service = build_service(&repo, Duration::from_secs(60));
+
+        let result = service.delete_session("session-1", "intruder").await;
+        assert!(matches!(result, Err(AppError::Auth(msg)) if msg.contains("Unauthorized")));
+
+        let state = repo.snapshot().await;
+        assert_eq!(state.delete_calls.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn delete_session_returns_not_found_when_no_rows_deleted() {
+        let repo = MockSessionRepository::default();
+        configure_repo(&repo, |state| {
+            state.verify_ownership_result = Some(true);
+            state.delete_result = Some(0);
+        })
+        .await;
+        let service = build_service(&repo, Duration::from_secs(60));
+
+        let result = service.delete_session("session-1", "user-1").await;
+        assert!(matches!(result, Err(AppError::NotFound(msg)) if msg.contains("Session not found")));
+    }
+
+    // --- archive_session tests ---
+
+    #[tokio::test]
+    async fn archive_session_succeeds_for_owner() {
+        let repo = MockSessionRepository::default();
+        configure_repo(&repo, |state| {
+            state.verify_ownership_result = Some(true);
+            state.update_result = Some(build_session(
+                "session-1",
+                "user-1",
+                "My Session",
+                true,
+                false,
+            ));
+        })
+        .await;
+        let service = build_service(&repo, Duration::from_secs(60));
+
+        let result = service.archive_session("session-1", "user-1").await;
+        assert!(result.is_ok());
+
+        let state = repo.snapshot().await;
+        assert_eq!(
+            state.verify_ownership_calls,
+            vec![("session-1".to_string(), "user-1".to_string())]
+        );
+        assert_eq!(state.update_calls.len(), 1);
+        assert_eq!(state.update_calls[0].1.status, Some("archived".to_string()));
+        assert_eq!(state.update_calls[0].1.title, None);
+    }
+
+    #[tokio::test]
+    async fn archive_session_rejects_non_owner() {
+        let repo = MockSessionRepository::default();
+        configure_repo(&repo, |state| {
+            state.verify_ownership_result = Some(false);
+        })
+        .await;
+        let service = build_service(&repo, Duration::from_secs(60));
+
+        let result = service.archive_session("session-1", "intruder").await;
+        assert!(matches!(result, Err(AppError::Auth(msg)) if msg.contains("Unauthorized")));
+
+        let state = repo.snapshot().await;
+        assert!(state.update_calls.is_empty());
+    }
+
+    // --- restore_session tests ---
+
+    #[tokio::test]
+    async fn restore_session_succeeds_for_owner() {
+        let repo = MockSessionRepository::default();
+        configure_repo(&repo, |state| {
+            state.verify_ownership_result = Some(true);
+            state.update_result = Some(build_session(
+                "session-1",
+                "user-1",
+                "My Session",
+                true,
+                false,
+            ));
+        })
+        .await;
+        let service = build_service(&repo, Duration::from_secs(60));
+
+        let result = service.restore_session("session-1", "user-1").await;
+        assert!(result.is_ok());
+
+        let state = repo.snapshot().await;
+        assert_eq!(
+            state.verify_ownership_calls,
+            vec![("session-1".to_string(), "user-1".to_string())]
+        );
+        assert_eq!(state.update_calls.len(), 1);
+        assert_eq!(state.update_calls[0].1.status, Some("draft".to_string()));
+        assert_eq!(state.update_calls[0].1.title, None);
+    }
+
+    #[tokio::test]
+    async fn restore_session_rejects_non_owner() {
+        let repo = MockSessionRepository::default();
+        configure_repo(&repo, |state| {
+            state.verify_ownership_result = Some(false);
+        })
+        .await;
+        let service = build_service(&repo, Duration::from_secs(60));
+
+        let result = service.restore_session("session-1", "intruder").await;
+        assert!(matches!(result, Err(AppError::Auth(msg)) if msg.contains("Unauthorized")));
+
+        let state = repo.snapshot().await;
+        assert!(state.update_calls.is_empty());
+    }
+
+    // --- get_session tests ---
+
+    #[tokio::test]
+    async fn get_session_succeeds_for_owner() {
+        let repo = MockSessionRepository::default();
+        let session = build_session("session-1", "user-1", "My Session", true, false);
+        configure_repo(&repo, |state| {
+            state.find_by_id_result = Some(Some(session));
+        })
+        .await;
+        let service = build_service(&repo, Duration::from_secs(60));
+
+        let result = service.get_session("session-1", "user-1").await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().id, "session-1");
+
+        let state = repo.snapshot().await;
+        assert_eq!(state.find_by_id_calls, vec!["session-1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn get_session_returns_not_found_when_session_missing() {
+        let repo = MockSessionRepository::default();
+        configure_repo(&repo, |state| {
+            state.find_by_id_result = Some(None);
+        })
+        .await;
+        let service = build_service(&repo, Duration::from_secs(60));
+
+        let result = service.get_session("session-1", "user-1").await;
+        assert!(matches!(result, Err(AppError::NotFound(msg)) if msg.contains("Session not found")));
+    }
+
+    #[tokio::test]
+    async fn get_session_returns_unauthorized_for_non_owner() {
+        let repo = MockSessionRepository::default();
+        let session = build_session("session-1", "other-user", "My Session", true, false);
+        configure_repo(&repo, |state| {
+            state.find_by_id_result = Some(Some(session));
+        })
+        .await;
+        let service = build_service(&repo, Duration::from_secs(60));
+
+        let result = service.get_session("session-1", "intruder").await;
+        assert!(matches!(result, Err(AppError::Auth(msg)) if msg.contains("Unauthorized")));
+    }
+
+    // --- get_user_sessions tests ---
+
+    #[tokio::test]
+    async fn get_user_sessions_returns_empty_vec_when_no_sessions() {
+        let repo = MockSessionRepository::default();
+        configure_repo(&repo, |state| {
+            state.find_by_creator_result = Some(vec![]);
+        })
+        .await;
+        let service = build_service(&repo, Duration::from_secs(60));
+
+        let result = service.get_user_sessions("user-1").await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+
+        let state = repo.snapshot().await;
+        assert_eq!(state.find_by_creator_calls, vec!["user-1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn get_user_sessions_returns_multiple_sessions() {
+        let repo = MockSessionRepository::default();
+        let sessions = vec![
+            build_session("session-1", "user-1", "Session A", true, false),
+            build_session("session-2", "user-1", "Session B", false, true),
+        ];
+        configure_repo(&repo, |state| {
+            state.find_by_creator_result = Some(sessions);
+        })
+        .await;
+        let service = build_service(&repo, Duration::from_secs(60));
+
+        let result = service.get_user_sessions("user-1").await;
+        assert!(result.is_ok());
+        let sessions = result.unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].title, "Session A");
+        assert_eq!(sessions[1].title, "Session B");
+    }
+
+    // --- get_user_sessions_with_slide_count tests ---
+
+    #[tokio::test]
+    async fn get_user_sessions_with_slide_count_returns_empty_when_no_sessions() {
+        let repo = MockSessionRepository::default();
+        configure_repo(&repo, |state| {
+            state.find_by_creator_with_slide_count_result = Some(vec![]);
+        })
+        .await;
+        let service = build_service(&repo, Duration::from_secs(60));
+
+        let result = service.get_user_sessions_with_slide_count("user-1").await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+
+        let state = repo.snapshot().await;
+        assert_eq!(
+            state.find_by_creator_with_slide_count_calls,
+            vec!["user-1".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn get_user_sessions_with_slide_count_aggregates_correctly() {
+        let repo = MockSessionRepository::default();
+        let session_a = build_session("session-1", "user-1", "Session A", true, false);
+        let session_b = build_session("session-2", "user-1", "Session B", false, true);
+        configure_repo(&repo, |state| {
+            state.find_by_creator_with_slide_count_result =
+                Some(vec![(session_a, 3), (session_b, 0)]);
+        })
+        .await;
+        let service = build_service(&repo, Duration::from_secs(60));
+
+        let result = service.get_user_sessions_with_slide_count("user-1").await;
+        assert!(result.is_ok());
+        let with_counts = result.unwrap();
+        assert_eq!(with_counts.len(), 2);
+        assert_eq!(with_counts[0].session.title, "Session A");
+        assert_eq!(with_counts[0].slide_count, 3);
+        assert_eq!(with_counts[1].session.title, "Session B");
+        assert_eq!(with_counts[1].slide_count, 0);
     }
 }

@@ -37,9 +37,17 @@ export function mapHttpErrorToUiMessage(
   }
 
   if (kind === "http") {
-    if (status === 404) {
+    if (status === 409) {
       return {
-        title: "Not found",
+        title: "Slide changed elsewhere",
+        description: failure.message || "This slide was updated in another tab or device. We've refreshed to the latest version.",
+        retryable: false,
+      };
+    }
+
+    if (status === 404) {
+        return {
+          title: "Not found",
         description: "The requested resource was not found.",
         retryable: false,
       };
@@ -80,4 +88,3 @@ export function formatRequestId(requestId: string | null | undefined): string | 
   if (!id) return null;
   return id;
 }
-

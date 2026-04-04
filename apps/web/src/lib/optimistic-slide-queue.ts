@@ -186,6 +186,7 @@ export function deriveOptimisticSlides(baseSlides: Slide[], state: StructuralQue
             content: op.payload.content,
             orderIndex: insertIndex,
             isHidden: false,
+            version: 0,
             optimistic: {
                 opId: op.opId,
                 syncState: op.status === 'retrying' ? 'retrying' : 'syncing',

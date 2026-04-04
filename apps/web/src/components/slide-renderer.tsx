@@ -136,19 +136,27 @@ function PollSlide({ slide, role, isPreview }: SlideProps) {
     const handleSubmit = async () => {
         if (!selectedOption || hasSubmitted || isSubmitting) return;
 
+        // Optimistic update: mark as submitted immediately
+        const previousState = { hasSubmitted, selectedOption };
+        if (content.limitSubmissions !== false) {
+            safeLocalStorageSet(`voted_${voteKeyPrefix}_${slide.id}`, 'true');
+            safeLocalStorageSet(`voted_option_${voteKeyPrefix}_${slide.id}`, selectedOption);
+            setHasSubmitted(true);
+        }
+        
         setIsSubmitting(true);
         const payload = { slideId: slide.id, optionId: selectedOption };
         const result = await sendMessage('SUBMIT_VOTE', payload);
         setIsSubmitting(false);
 
         if (result.ok) {
-            if (content.limitSubmissions !== false) {
-                safeLocalStorageSet(`voted_${voteKeyPrefix}_${slide.id}`, 'true');
-                safeLocalStorageSet(`voted_option_${voteKeyPrefix}_${slide.id}`, payload.optionId);
-                setSelectedOption(payload.optionId);
-                setHasSubmitted(true);
-            }
             return;
+        }
+
+        // Rollback on failure
+        if (content.limitSubmissions !== false) {
+            setHasSubmitted(previousState.hasSubmitted);
+            setSelectedOption(previousState.selectedOption);
         }
 
         toast.error('Vote not sent', {
@@ -164,7 +172,6 @@ function PollSlide({ slide, role, isPreview }: SlideProps) {
                             if (content.limitSubmissions !== false) {
                                 safeLocalStorageSet(`voted_${voteKeyPrefix}_${slide.id}`, 'true');
                                 safeLocalStorageSet(`voted_option_${voteKeyPrefix}_${slide.id}`, payload.optionId);
-                                setSelectedOption(payload.optionId);
                                 setHasSubmitted(true);
                             }
                         } else {
@@ -308,6 +315,8 @@ function QuizSlide({ slide, role, isPreview }: SlideProps) {
         if (selectedOption || pendingOption) return;
 
         const payload = { slideId: slide.id, answer: optionId, timeRemaining: timeLeft };
+        
+        // Optimistic update: show selection immediately
         setPendingOption(optionId);
         const result = await sendMessage('SUBMIT_ANSWER', payload);
         setPendingOption(null);
@@ -536,20 +545,29 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
     const handleSubmit = async () => {
         if (selectedOptions.length === 0 || submitted || isSubmitting) return;
 
-        setIsSubmitting(true);
+        // Optimistic update: mark as submitted immediately
+        const previousState = { submitted: false, selectedOptions: [...selectedOptions] };
         const optionIds = [...selectedOptions];
+        
+        if (content.limitSubmissions !== false) {
+            safeLocalStorageSet(`voted_${voteKeyPrefix}_${slide.id}`, 'true');
+            safeLocalStorageSet(`voted_options_${voteKeyPrefix}_${slide.id}`, JSON.stringify(optionIds));
+            setSubmitted(true);
+        }
+        
+        setIsSubmitting(true);
         const payload = { slideId: slide.id, optionIds };
         const result = await sendMessage('SUBMIT_VOTE', payload);
         setIsSubmitting(false);
 
         if (result.ok) {
-            if (content.limitSubmissions !== false) {
-                safeLocalStorageSet(`voted_${voteKeyPrefix}_${slide.id}`, 'true');
-                safeLocalStorageSet(`voted_options_${voteKeyPrefix}_${slide.id}`, JSON.stringify(optionIds));
-            }
-            setSelectedOptions(optionIds);
-            setSubmitted(true);
             return;
+        }
+
+        // Rollback on failure
+        if (content.limitSubmissions !== false) {
+            setSubmitted(previousState.submitted);
+            setSelectedOptions(previousState.selectedOptions);
         }
 
         toast.error('Vote not sent', {
@@ -565,9 +583,8 @@ function MultipleChoiceSlide({ slide, role, isPreview }: SlideProps) {
                             if (content.limitSubmissions !== false) {
                                 safeLocalStorageSet(`voted_${voteKeyPrefix}_${slide.id}`, 'true');
                                 safeLocalStorageSet(`voted_options_${voteKeyPrefix}_${slide.id}`, JSON.stringify(optionIds));
+                                setSubmitted(true);
                             }
-                            setSelectedOptions(optionIds);
-                            setSubmitted(true);
                         } else {
                             toast.error('Still failed to send vote', { description: toRequestFailureDescription(retryResult) });
                         }

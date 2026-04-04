@@ -17,6 +17,7 @@ import { safeLocalStorageGet, safeLocalStorageSet, safeSessionStorageGet, safeSe
 import { toast } from 'sonner';
 import { formatRequestId, mapHttpErrorToUiMessage } from '@/lib/http-error-ui';
 import { getPublicSessionByToken, isValidJoinCode, normalizeJoinCode, readPreloadedPublicSession, writePreloadedPublicSession } from '@/lib/public-session';
+import { useDebouncedValue } from '@/lib/use-debounced-slide-refetch';
 
 function StudentSlideView({ slideId, slides, sessionId }: { slideId: string; slides: Slide[]; sessionId: string }) {
     const [slide, setSlide] = useState<Slide | null>(null);
@@ -41,24 +42,22 @@ function ConnectedStudentView({ session, shareToken }: { session: Session & { sl
     const [isRefreshingState, setIsRefreshingState] = useState(false);
     const [refreshFailure, setRefreshFailure] = useState<{ description: string; requestId?: string } | null>(null);
 
+    // Debounced refetch to prevent thundering herd when teacher edits rapidly
+    const refetchSlides = useCallback(() => {
+        getPublicSessionByToken(shareToken, { timeoutMs: 10_000 })
+            .then((result) => {
+                if (!result.ok) {
+                    console.error('Failed to update slides:', result);
+                    return;
+                }
+                if (result.data?.slides) {
+                    setSlides(result.data.slides);
+                }
+            })
+            .catch((err) => console.error('Failed to update slides:', err));
+    }, [shareToken]);
 
-
-    // Refetch slides when notified of updates
-    useEffect(() => {
-        if (lastSlideUpdate > 0) {
-            getPublicSessionByToken(shareToken, { timeoutMs: 10_000 })
-                .then((result) => {
-                    if (!result.ok) {
-                        console.error('Failed to update slides:', result);
-                        return;
-                    }
-                    if (result.data?.slides) {
-                        setSlides(result.data.slides);
-                    }
-                })
-                .catch((err) => console.error('Failed to update slides:', err));
-        }
-    }, [lastSlideUpdate, shareToken]);
+    useDebouncedValue(lastSlideUpdate, 200, refetchSlides);
 
     const handleGlobalSubmit = async (e: React.FormEvent) => {
         e.preventDefault();

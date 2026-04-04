@@ -1,5 +1,5 @@
 use axum::{
-    http::StatusCode,
+    http::{HeaderName, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -23,6 +23,12 @@ pub enum AppError {
     #[error("Internal server error: {0}")]
     Internal(String),
 
+    #[error("Conflict: {message}")]
+    Conflict {
+        message: String,
+        data: Option<serde_json::Value>,
+    },
+
     #[error("Hash error: {0}")]
     Hash(#[from] bcrypt::BcryptError),
 
@@ -31,51 +37,77 @@ pub enum AppError {
 
     #[error("Migration error: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
+
+    #[error("Service unavailable: {0}")]
+    ServiceUnavailable(String),
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
+        let (status, message, data) = match self {
             AppError::Database(e) => {
                 tracing::error!("Database error: {:?}", e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Database error".to_string(),
+                    None,
                 )
             }
-            AppError::Auth(msg) => (StatusCode::UNAUTHORIZED, msg),
-            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            AppError::Input(msg) => (StatusCode::BAD_REQUEST, msg),
+            AppError::Auth(msg) => (StatusCode::UNAUTHORIZED, msg, None),
+            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg, None),
+            AppError::Input(msg) => (StatusCode::BAD_REQUEST, msg, None),
             AppError::Internal(msg) => {
                 tracing::error!("Internal error: {}", msg);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Internal server error".to_string(),
+                    None,
                 )
             }
+            AppError::Conflict { message, data } => (StatusCode::CONFLICT, message, data),
             AppError::Hash(e) => {
                 tracing::error!("Hash error: {:?}", e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Internal server error".to_string(),
+                    None,
                 )
             }
             AppError::Jwt(e) => {
                 tracing::error!("JWT error: {:?}", e);
-                (StatusCode::UNAUTHORIZED, "Invalid token".to_string())
+                (StatusCode::UNAUTHORIZED, "Invalid token".to_string(), None)
             }
             AppError::Migration(e) => {
                 tracing::error!("Migration error: {:?}", e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Database migration failed".to_string(),
+                    None,
                 )
+            }
+            AppError::ServiceUnavailable(msg) => {
+                tracing::warn!("Service unavailable: {}", msg);
+                let body = Json(json!({
+                    "success": false,
+                    "error": msg,
+                    "data": null
+                }));
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(
+                        HeaderName::from_static("retry-after"),
+                        HeaderValue::from_static("5"),
+                    )],
+                    body,
+                )
+                    .into_response();
             }
         };
 
         let body = Json(json!({
             "success": false,
-            "error": message
+            "error": message,
+            "data": data
         }));
 
         (status, body).into_response()

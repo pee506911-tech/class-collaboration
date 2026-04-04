@@ -1,11 +1,18 @@
-   Compiling backend-rust v0.1.0 (/Users/rd-cream/Downloads/classcolab/class-collaboration/apps/backend)
+warning: unused import: `PublicSessionResponse`
+  --> src/handlers/public.rs:12:30
+   |
+12 | use crate::models::session::{PublicSessionResponse, Session};
+   |                              ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
 warning: struct `DbQuestion` is never constructed
   --> src/handlers/stats.rs:91:8
    |
 91 | struct DbQuestion {
    |        ^^^^^^^^^^
    |
-   = note: `#[warn(dead_code)]` on by default
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
 warning: field `role` is never read
   --> src/middleware/auth.rs:24:9
@@ -62,16 +69,29 @@ warning: associated function `new` is never used
 49 |     pub fn new(pool: Pool<MySql>) -> Self {
    |            ^^^
 
-warning: function `publish_slides_update` is never used
-   --> src/services/ably.rs:165:14
-    |
-165 | pub async fn publish_slides_update(session_id: &str, slides: &impl Serialize) -> bool {
-    |              ^^^^^^^^^^^^^^^^^^^^^
+warning: associated function `new_with_millis` is never used
+  --> src/services/circuit_breaker.rs:46:12
+   |
+28 | impl CircuitBreaker {
+   | ------------------- associated function in this implementation
+...
+46 |     pub fn new_with_millis(failure_threshold: u32, recovery_timeout_ms: u64) -> Self {
+   |            ^^^^^^^^^^^^^^^
 
-warning: `backend-rust` (bin "backend-rust") generated 7 warnings
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.94s
+warning: fields `status` and `retry_count` are never read
+  --> src/services/outbox.rs:53:9
+   |
+48 | pub struct OutboxEvent {
+   |            ----------- fields in this struct
+...
+53 |     pub status: String,
+   |         ^^^^^^
+54 |     pub retry_count: i32,
+   |         ^^^^^^^^^^^
+   |
+   = note: `OutboxEvent` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: `backend-rust` (bin "backend-rust") generated 9 warnings (run `cargo fix --bin "backend-rust"` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.53s
      Running `target/debug/backend-rust`
-2026-04-03T12:22:44.432061Z  WARN backend_rust::handlers::ably: Empty or missing participant_id for session test-session-imt8jitk role student. Using fallback: student-test-session-imt8jitk. This may cause connection sharing issues!
-2026-04-03T12:23:05.383262Z ERROR backend_rust::services::ably: Ably publish failed event_name=VOTE_UPDATE channel=session:jfu40e4m status=500 Internal Server Error body={"error":"Internal server error (fault injection)","code":50000}
-2026-04-03T12:23:05.383528Z ERROR backend_rust::services::ably: Failed to publish vote update: Ably publish failed: 500 Internal Server Error
-2026-04-03T12:23:05.383557Z  WARN backend_rust::handlers::student: Vote update committed but realtime publish failed - clients will converge via refresh session_id=jfu40e4m slide_id=sxbl61c7
+2026-04-04T08:56:32.099766Z  WARN backend_rust::handlers::ably: Empty or missing participant_id for session test-session-0y51j26t role student. Using fallback: student-test-session-0y51j26t. This may cause connection sharing issues!

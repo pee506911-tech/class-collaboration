@@ -11,10 +11,6 @@ const RETRY_CONFIG = {
     maxDelay: 5000,
 };
 
-async function sleep(ms: number) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 export class ApiRequestError extends Error {
     status?: number;
     retryable: boolean;
@@ -110,7 +106,8 @@ function isRetryableStatus(status?: number): boolean {
         return true;
     }
 
-    return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+    // 409 conflicts should surface to the caller so the draft can rebase.
+    return status === 408 || status === 425 || status === 429 || status >= 500;
 }
 
 export type SharedSlide = Slide & {
@@ -302,14 +299,22 @@ export async function createSlide(
     return json.data;
 }
 
-export async function updateSlide(sessionId: string, slideId: string, content: unknown): Promise<Slide> {
+export async function updateSlide(
+    sessionId: string,
+    slideId: string,
+    content: unknown,
+    baseVersion?: number,
+): Promise<Slide> {
     let res: Response;
 
     try {
         res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides/${slideId}`, {
             method: 'PUT',
             headers: getHeaders(),
-            body: JSON.stringify({ content }),
+            body: JSON.stringify({
+                content,
+                ...(baseVersion !== undefined ? { baseVersion } : {}),
+            }),
         });
     } catch (error) {
         throw toApiRequestError(error, 'Failed to update slide');

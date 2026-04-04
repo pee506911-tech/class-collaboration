@@ -1,5 +1,6 @@
 pub mod ably;
 pub mod auth;
+mod auth_test;
 pub mod client_error;
 pub mod health;
 pub mod live;
@@ -7,5 +8,8 @@ pub mod perf;
 pub mod public;
 pub mod session;
 pub mod slide;
+mod slide_versioning_test;
 pub mod stats;
 pub mod student;
+mod vote_dedup_test;
+mod serde_test;

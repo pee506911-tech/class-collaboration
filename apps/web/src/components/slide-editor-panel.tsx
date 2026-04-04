@@ -1,11 +1,15 @@
 import { Slide } from 'shared';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { X, Plus, GripVertical, Trash2, Settings, Type, List, Clock, Trophy } from 'lucide-react';
+import { Plus, GripVertical, Trash2, Type, List, Trophy } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { addOption, removeOption, reorderOption, updateOptionText, markOptionCorrect } from '@/lib/slide-options';
+import { StaticSlideEditor } from '@/components/slide-editors/static-slide-editor';
+import { PollSlideEditor } from '@/components/slide-editors/poll-slide-editor';
+import { QuizSlideEditor } from '@/components/slide-editors/quiz-slide-editor';
+import { MultipleChoiceSlideEditor } from '@/components/slide-editors/multiple-choice-slide-editor';
 
 export type SlideEditorSyncStatus = { dirty: boolean; saving: boolean; lastError?: string | null };
 
@@ -28,6 +32,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
     const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
     const latestContentRef = useRef<any>(slide.content);
+    const lastSyncedVersionRef = useRef(slide.version);
     const pendingFlushRef = useRef(false);
     const inFlightRef = useRef(false);
 
@@ -143,10 +148,17 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
         scheduleDebouncedSave();
     }, [flushSave, recomputeDirty, scheduleDebouncedSave, setLastErrorState]);
 
-    // Sync local state when slide changes + flush best-effort in cleanup
+    // Reset local state only when switching to a different slide.
     useEffect(() => {
         setLocalContent(slide.content);
         latestContentRef.current = slide.content;
+        lastSyncedVersionRef.current = slide.version;
+        pendingFlushRef.current = false;
+        editSeqRef.current = 0;
+        ackedSeqRef.current = 0;
+        setDirtyState(false);
+        setSavingState(false);
+        setLastErrorState(null);
 
         if (debounceTimerRef.current) {
             clearTimeout(debounceTimerRef.current);
@@ -154,18 +166,34 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
         }
 
         return () => {
+            // Clear any pending debounce timer to prevent saves after unmount
             if (debounceTimerRef.current) {
                 clearTimeout(debounceTimerRef.current);
                 debounceTimerRef.current = null;
             }
-
-            if (editSeqRef.current !== ackedSeqRef.current) {
-                // Best-effort flush; do not await in cleanup
-                void flushSave(latestContentRef.current, false);
-            }
+            // Do NOT flush here — if the slide was deleted, a flush would
+            // attempt to save to a non-existent slide. The parent component
+            // is responsible for flushing before structural changes.
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [slide.id]);
+
+    // Rebase to the latest server snapshot only when there is no local draft in flight.
+    useEffect(() => {
+        if (slide.version === lastSyncedVersionRef.current) {
+            return;
+        }
+
+        lastSyncedVersionRef.current = slide.version;
+
+        if (dirtyRef.current || savingRef.current || inFlightRef.current || pendingFlushRef.current) {
+            return;
+        }
+
+        setLocalContent(slide.content);
+        latestContentRef.current = slide.content;
+        setLastErrorState(null);
+    }, [slide.content, slide.version, setLastErrorState]);
 
     useEffect(() => {
         onSyncStatusChange?.({ dirty, saving, lastError });
@@ -176,36 +204,33 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
     };
 
     const handleOptionChange = (id: string, text: string) => {
-        const localOptions = localContent.options || [];
-        const newOptions = localOptions.map((o: any) =>
-            o.id === id ? { ...o, text } : o
-        );
+        const newOptions = updateOptionText(localContent.options || [], id, text);
         updateField('options', newOptions);
     };
 
-    const addOption = () => {
-        const localOptions = localContent.options || [];
-        const newOption = { id: Math.random().toString(36).substr(2, 9), text: `Option ${localOptions.length + 1}` };
-        if (slide.type === 'quiz') {
-            (newOption as any).isCorrect = false;
-        }
-        const newOptions = [...localOptions, newOption];
+    const handleAddOption = () => {
+        const newOptions = addOption(localContent.options || [], slide.type as any);
         updateField('options', newOptions);
     };
 
-    const removeOption = (id: string) => {
-        const localOptions = localContent.options || [];
-        const newOptions = localOptions.filter((o: any) => o.id !== id);
+    const handleRemoveOption = (id: string) => {
+        const newOptions = removeOption(localContent.options || [], id);
+        updateField('options', newOptions);
+    };
+
+    const handleMarkOptionCorrect = (id: string) => {
+        const newOptions = markOptionCorrect(localContent.options || [], id);
         updateField('options', newOptions);
     };
 
     const onDragEnd = (result: DropResult) => {
         if (!result.destination) return;
-        const localOptions = localContent.options || [];
-        const items = Array.from(localOptions);
-        const [reorderedItem] = items.splice(result.source.index, 1);
-        items.splice(result.destination.index, 0, reorderedItem);
-        updateField('options', items);
+        const newOptions = reorderOption(
+            localContent.options || [],
+            result.source.index,
+            result.destination.index,
+        );
+        updateField('options', newOptions);
     };
 
     return (
@@ -234,31 +259,65 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
 
                 <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
                     <TabsContent value="content" className="space-y-6 mt-0">
-                        <div className="space-y-3">
-                            <label className="text-sm font-medium text-slate-700">
-                                {slide.type === 'static' ? 'Title' : 'Question'}
-                            </label>
-                            <Input
-                                value={localContent.question || localContent.title || ''}
-                                disabled={disabled}
-                                onChange={(e) => updateField(localContent.question !== undefined ? 'question' : 'title', e.target.value)}
-                                onBlur={() => { void flushSave(); }}
-                                placeholder="Enter your question or title"
-                                className="text-lg font-medium px-4 py-3 h-auto"
-                            />
-                        </div>
-
                         {slide.type === 'static' && (
-                            <div className="space-y-3">
-                                <label className="text-sm font-medium text-slate-700">Body Content</label>
-                                <textarea
-                                    value={localContent.body || ''}
-                                    disabled={disabled}
-                                    onChange={(e) => updateField('body', e.target.value)}
-                                    placeholder="Enter slide content (Markdown supported)"
-                                    className="w-full min-h-[300px] p-4 border rounded-lg text-sm leading-relaxed focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
-                                />
-                            </div>
+                            <StaticSlideEditor
+                                content={localContent}
+                                onChange={(next) => {
+                                    setLocalContent(next);
+                                    latestContentRef.current = next;
+                                    editSeqRef.current += 1;
+                                    setLastErrorState(null);
+                                    recomputeDirty();
+                                    scheduleDebouncedSave();
+                                }}
+                                onBlur={() => { void flushSave(); }}
+                                disabled={disabled}
+                            />
+                        )}
+
+                        {slide.type === 'poll' && (
+                            <PollSlideEditor
+                                content={localContent}
+                                onChange={(next) => {
+                                    setLocalContent(next);
+                                    latestContentRef.current = next;
+                                    editSeqRef.current += 1;
+                                    setLastErrorState(null);
+                                    recomputeDirty();
+                                    scheduleDebouncedSave();
+                                }}
+                                disabled={disabled}
+                            />
+                        )}
+
+                        {slide.type === 'quiz' && (
+                            <QuizSlideEditor
+                                content={localContent}
+                                onChange={(next) => {
+                                    setLocalContent(next);
+                                    latestContentRef.current = next;
+                                    editSeqRef.current += 1;
+                                    setLastErrorState(null);
+                                    recomputeDirty();
+                                    scheduleDebouncedSave();
+                                }}
+                                disabled={disabled}
+                            />
+                        )}
+
+                        {slide.type === 'multiple-choice' && (
+                            <MultipleChoiceSlideEditor
+                                content={localContent}
+                                onChange={(next) => {
+                                    setLocalContent(next);
+                                    latestContentRef.current = next;
+                                    editSeqRef.current += 1;
+                                    setLastErrorState(null);
+                                    recomputeDirty();
+                                    scheduleDebouncedSave();
+                                }}
+                                disabled={disabled}
+                            />
                         )}
 
                         {(slide.type === 'poll' || slide.type === 'multiple-choice' || slide.type === 'quiz') && (
@@ -298,19 +357,13 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
                                                                         variant="ghost"
                                                                         size="sm"
                                                                         disabled={disabled}
-                                                                        onClick={() => {
-                                                                            const newOptions = (localContent.options || []).map((o: any) => ({
-                                                                                ...o,
-                                                                                isCorrect: o.id === option.id
-                                                                            }));
-                                                                            updateField('options', newOptions);
-                                                                        }}
+                                                                        onClick={() => handleMarkOptionCorrect(option.id)}
                                                                         className={`h-7 px-2 text-xs ${option.isCorrect ? "bg-green-100 text-green-700 hover:bg-green-200" : "text-slate-400 hover:text-slate-600"}`}
                                                                     >
                                                                         {option.isCorrect ? "Correct Answer" : "Mark Correct"}
                                                                     </Button>
                                                                 )}
-                                                                <Button variant="ghost" size="icon" disabled={disabled} onClick={() => removeOption(option.id)} className="h-7 w-7 text-slate-300 hover:text-red-500 hover:bg-red-50">
+                                                                <Button variant="ghost" size="icon" disabled={disabled} onClick={() => handleRemoveOption(option.id)} className="h-7 w-7 text-slate-300 hover:text-red-500 hover:bg-red-50">
                                                                     <Trash2 className="w-4 h-4" />
                                                                 </Button>
                                                             </div>
@@ -323,7 +376,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
                                     </Droppable>
                                 </DragDropContext>
 
-                                <Button variant="outline" disabled={disabled} onClick={addOption} className="w-full border-dashed text-slate-500 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50">
+                                <Button variant="outline" disabled={disabled} onClick={handleAddOption} className="w-full border-dashed text-slate-500 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50">
                                     <Plus className="w-4 h-4 mr-2" /> Add Option
                                 </Button>
                             </div>
@@ -331,99 +384,9 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
                     </TabsContent>
 
                     <TabsContent value="settings" className="space-y-6 mt-0">
-                        {slide.type === 'quiz' && (
-                            <div className="space-y-4 bg-white p-4 rounded-lg border">
-                                <h3 className="font-medium flex items-center gap-2 text-slate-800">
-                                    <Clock className="w-4 h-4" /> Timer & Points
-                                </h3>
-                                <div className="grid grid-cols-2 gap-4">
-                                    <div className="space-y-2">
-                                        <label className="text-xs font-medium text-slate-500">Duration (seconds)</label>
-                                        <Input
-                                            type="number"
-                                            disabled={disabled}
-                                            value={localContent.timerDuration || 30}
-                                            onChange={(e) => updateField('timerDuration', parseInt(e.target.value, 10))}
-                                        />
-                                    </div>
-                                    <div className="space-y-2">
-                                        <label className="text-xs font-medium text-slate-500">Points</label>
-                                        <Input
-                                            type="number"
-                                            disabled={disabled}
-                                            value={localContent.points || 1000}
-                                            onChange={(e) => updateField('points', parseInt(e.target.value, 10))}
-                                        />
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-
-                        {(slide.type === 'poll' || slide.type === 'multiple-choice' || slide.type === 'quiz') && (
-                            <div className="space-y-4 bg-white p-4 rounded-lg border">
-                                <h3 className="font-medium flex items-center gap-2 text-slate-800">
-                                    <Settings className="w-4 h-4" /> Configuration
-                                </h3>
-
-                                {slide.type === 'poll' && (
-                                    <div className="space-y-3 pb-4 border-b border-slate-100">
-                                        <label className="text-sm text-slate-600">Chart Visualization</label>
-                                        <div className="flex gap-2">
-                                            <Button
-                                                variant={localContent.chartType === 'bar' ? 'default' : 'outline'}
-                                                disabled={disabled}
-                                                onClick={() => updateField('chartType', 'bar')}
-                                                size="sm"
-                                                className="flex-1"
-                                            >
-                                                Bar Chart
-                                            </Button>
-                                            <Button
-                                                variant={localContent.chartType === 'pie' ? 'default' : 'outline'}
-                                                disabled={disabled}
-                                                onClick={() => updateField('chartType', 'pie')}
-                                                size="sm"
-                                                className="flex-1"
-                                            >
-                                                Pie Chart
-                                            </Button>
-                                        </div>
-                                    </div>
-                                )}
-
-                                <div className="space-y-3">
-                                    {slide.type === 'multiple-choice' && (
-                                        <div className="flex items-center justify-between">
-                                            <div className="space-y-0.5">
-                                                <label className="text-sm font-medium text-slate-700">Allow Multiple Selection</label>
-                                                <p className="text-xs text-slate-500">Students can select more than one option.</p>
-                                            </div>
-                                            <input
-                                                type="checkbox"
-                                                className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                                                disabled={disabled}
-                                                checked={localContent.allowMultipleSelection || false}
-                                                onChange={(e) => updateField('allowMultipleSelection', e.target.checked)}
-                                            />
-                                        </div>
-                                    )}
-
-                                    <div className="flex items-center justify-between">
-                                        <div className="space-y-0.5">
-                                            <label className="text-sm font-medium text-slate-700">Limit to One Submission</label>
-                                            <p className="text-xs text-slate-500">Prevent students from changing their answer.</p>
-                                        </div>
-                                            <input
-                                                type="checkbox"
-                                                className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                                                disabled={disabled}
-                                                checked={localContent.limitSubmissions !== false}
-                                                onChange={(e) => updateField('limitSubmissions', e.target.checked)}
-                                            />
-                                        </div>
-                                    </div>
-                            </div>
-                        )}
+                        <div className="text-sm text-slate-500 p-4">
+                            <p>Settings for this slide type are included in the Content tab.</p>
+                        </div>
                     </TabsContent>
                 </div>
             </Tabs>

@@ -254,6 +254,14 @@ async fn prod_slide_and_student_handlers_still_work() {
             .and_then(Value::as_str)
             .expect("static slide id missing")
             .to_string();
+        let static_slide_version = static_slide
+            .get("version")
+            .and_then(Value::as_i64)
+            .expect("static slide version missing");
+        assert_eq!(
+            static_slide_version, 0,
+            "new slides should start at version 0"
+        );
 
         let noop_update_body = parse_json(
             client
@@ -264,7 +272,8 @@ async fn prod_slide_and_student_handlers_still_work() {
                 .header("Authorization", bearer(&token))
                 .json(&json!({
                     "type": "static",
-                    "content": static_content
+                    "content": static_content,
+                    "baseVersion": static_slide_version
                 }))
                 .send()
                 .await
@@ -282,6 +291,11 @@ async fn prod_slide_and_student_handlers_still_work() {
             Some("static")
         );
         assert_eq!(noop_slide.get("content"), Some(&static_content));
+        assert_eq!(
+            noop_slide.get("version").and_then(Value::as_i64),
+            Some(static_slide_version),
+            "no-op save should not increment version"
+        );
 
         let updated_static_content = json!({
             "title": "Static title updated",
@@ -295,7 +309,8 @@ async fn prod_slide_and_student_handlers_still_work() {
                 ))
                 .header("Authorization", bearer(&token))
                 .json(&json!({
-                    "content": updated_static_content
+                    "content": updated_static_content,
+                    "baseVersion": static_slide_version
                 }))
                 .send()
                 .await
@@ -308,6 +323,11 @@ async fn prod_slide_and_student_handlers_still_work() {
             updated_slide.get("content"),
             Some(&updated_static_content),
             "updated slide content should round-trip"
+        );
+        assert_eq!(
+            updated_slide.get("version").and_then(Value::as_i64),
+            Some(static_slide_version + 1),
+            "successful save should increment version"
         );
 
         let initial_state = parse_json(
