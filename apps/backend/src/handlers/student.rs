@@ -1,13 +1,13 @@
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, Response},
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
 use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
 use sqlx::{MySql, Transaction};
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 use uuid::Uuid;
 
 use crate::error::{AppError, Result};
@@ -20,6 +20,30 @@ const MAX_NAME_LENGTH: usize = 100;
 const MAX_OPTION_IDS: usize = 10;
 const MAX_DEADLOCK_RETRIES: u32 = 3;
 const MY_VOTES_SLIDE_ID_CHUNK_SIZE: usize = 128;
+
+fn decode_wal_response<T: DeserializeOwned>(value: serde_json::Value) -> Result<T> {
+    serde_json::from_value(value).map_err(|error| {
+        AppError::Internal(format!("Failed to decode WAL response payload: {error}"))
+    })
+}
+
+fn resolve_client_request_id(headers: &HeaderMap) -> Result<String> {
+    let client_request_id = headers
+        .get("x-client-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+
+    if let Some(client_request_id) = client_request_id {
+        if client_request_id.len() > 64 {
+            return Err(AppError::Input("Invalid X-Client-Request-Id".to_string()));
+        }
+        return Ok(client_request_id);
+    }
+
+    Ok(Uuid::new_v4().to_string())
+}
 
 fn is_mysql_duplicate_key(e: &sqlx::Error) -> bool {
     match e {
@@ -77,7 +101,7 @@ fn dedupe_option_ids(option_ids: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-fn should_skip_vote_snapshot(limit_submissions: bool, rows_affected: u64) -> bool {
+pub(crate) fn should_skip_vote_snapshot(limit_submissions: bool, rows_affected: u64) -> bool {
     !limit_submissions && rows_affected == 0
 }
 
@@ -125,7 +149,7 @@ async fn get_votes_for_participant_by_slide_ids(
     Ok(votes)
 }
 
-async fn increment_vote_count(
+pub(crate) async fn increment_vote_count(
     tx: &mut Transaction<'_, MySql>,
     session_id: &str,
     slide_id: &str,
@@ -145,7 +169,7 @@ async fn increment_vote_count(
     Ok(())
 }
 
-async fn current_vote_counts(
+pub(crate) async fn current_vote_counts(
     tx: &mut Transaction<'_, MySql>,
     slide_id: &str,
 ) -> Result<HashMap<String, i32>> {
@@ -165,7 +189,10 @@ async fn current_vote_counts(
 }
 
 /// Helper function: Atomically increment vote_sequence and fetch the new value.
-async fn next_vote_sequence(tx: &mut Transaction<'_, MySql>, session_id: &str) -> Result<u64> {
+pub(crate) async fn next_vote_sequence(
+    tx: &mut Transaction<'_, MySql>,
+    session_id: &str,
+) -> Result<u64> {
     sqlx::query(
         "UPDATE sessions SET vote_sequence = LAST_INSERT_ID(vote_sequence + 1) WHERE id = ?",
     )
@@ -182,7 +209,7 @@ async fn next_vote_sequence(tx: &mut Transaction<'_, MySql>, session_id: &str) -
 
 /// Helper function: Atomically increment qa_sequence and fetch questions.
 /// Returns (sequence, Vec<Question>)
-async fn next_qa_sequence_and_questions(
+pub(crate) async fn next_qa_sequence_and_questions(
     tx: &mut Transaction<'_, MySql>,
     session_id: &str,
 ) -> Result<(u64, Vec<Question>)> {
@@ -222,6 +249,7 @@ pub struct SubmitVoteRequest {
 /// Submit a vote for a poll/quiz slide
 pub async fn submit_vote(
     State(app_state): State<crate::AppState>,
+    headers: HeaderMap,
     Path(session_id): Path<String>,
     Json(payload): Json<SubmitVoteRequest>,
 ) -> Result<axum::response::Response> {
@@ -308,186 +336,51 @@ pub async fn submit_vote(
     };
 
     // Validate options against slide content and settings (pure function)
-    let (option_ids, limit_submissions) = match validate_vote_options(raw_option_ids, &slide_type, &slide_content) {
+    let (option_ids, _limit_submissions) = match validate_vote_options(raw_option_ids, &slide_type, &slide_content) {
         VoteValidationResult::Valid { option_ids, limit_submissions, .. } => (option_ids, limit_submissions),
         VoteValidationResult::Invalid(msg) => return Err(AppError::Input(msg)),
     };
 
-    // Use a single transaction to atomically:
-    // 1. Check limitSubmissions locking
-    // 2. Insert votes
-    // 3. Increment vote_sequence
-    // 4. Read the post-mutation snapshot (sequence + vote counts)
-    // This ensures the published payload matches the sequence number.
-    // Retry on deadlock errors (MySQL 1213/40001)
-    let mut retry_count = 0;
-    let (_sequence, _results) = 'submission: loop {
-        let mut tx = pool.begin().await?;
+    let client_request_id = resolve_client_request_id(&headers)?;
+    let response_payload = serde_json::json!({ "message": "Vote submitted successfully" });
 
-        // For limitSubmissions=true, atomically reserve a submission slot.
-        // This avoids gap-lock deadlocks that can happen with SELECT ... FOR UPDATE on the votes table.
-        if limit_submissions {
-            let reserve = sqlx::query(
-                "INSERT INTO vote_submissions (slide_id, participant_id, session_id) VALUES (?, ?, ?)",
-            )
-            .bind(&payload.slide_id)
-            .bind(&payload.participant_id)
-            .bind(&session_id)
-            .execute(&mut *tx)
-            .await;
+    if let Some(existing) = crate::services::wal::fetch_replay_response::<serde_json::Value>(
+        &pool,
+        &session_id,
+        crate::services::wal::WalOpType::SubmitVote,
+        &client_request_id,
+    )
+    .await?
+    {
+        return Ok((StatusCode::ACCEPTED, Json(ApiResponse::success(existing))).into_response());
+    }
 
-            if let Err(e) = reserve {
-                let _ = tx.rollback().await;
+    let append_result = app_state
+        .wal_store
+        .append_or_get_existing(crate::services::wal::AppendWalEntry {
+            op_type: crate::services::wal::WalOpType::SubmitVote,
+            session_id: session_id.clone(),
+            client_request_id,
+            resource_id: Some(payload.slide_id.clone()),
+            payload: serde_json::to_value(crate::services::wal::SubmitVoteWalPayload {
+                slide_id: payload.slide_id.clone(),
+                participant_id: payload.participant_id.clone(),
+                option_ids: option_ids.clone(),
+            })
+            .map_err(|error| AppError::Internal(format!("Failed to encode vote WAL payload: {error}")))?,
+            response_payload: response_payload.clone(),
+            priority: 2,
+        })
+        .await?;
 
-                if is_deadlock_error(&e) && retry_count < MAX_DEADLOCK_RETRIES {
-                    retry_count += 1;
-                    tracing::warn!(
-                        "Vote submission deadlock, retrying ({}/{})",
-                        retry_count,
-                        MAX_DEADLOCK_RETRIES
-                    );
-                    tokio::time::sleep(Duration::from_millis(50 * retry_count as u64)).await;
-                    continue 'submission;
-                }
-
-                if is_mysql_duplicate_key(&e) {
-                    return Err(AppError::Input(
-                        "You have already submitted a vote for this slide".to_string(),
-                    ));
-                }
-
-                tracing::error!("Failed to reserve vote submission slot: {:?}", e);
-                return Err(AppError::Internal(format!(
-                    "Failed to reserve vote submission slot: {}",
-                    e
-                )));
-            }
-        }
-
-        let mut inserted_option_ids = Vec::new();
-        for option_id in &option_ids {
-            let insert_result = sqlx::query(
-                "INSERT IGNORE INTO votes (id, session_id, slide_id, participant_id, option_id)
-                 VALUES (?, ?, ?, ?, ?)",
-            )
-            .bind(Uuid::new_v4().to_string())
-            .bind(&session_id)
-            .bind(&payload.slide_id)
-            .bind(&payload.participant_id)
-            .bind(option_id)
-            .execute(&mut *tx)
-            .await;
-
-            match insert_result {
-                Ok(result) => {
-                    if result.rows_affected() > 0 {
-                        inserted_option_ids.push(option_id.clone());
-                    }
-                }
-                Err(e) => {
-                    let _ = tx.rollback().await;
-                    if is_deadlock_error(&e) && retry_count < MAX_DEADLOCK_RETRIES {
-                        retry_count += 1;
-                        tracing::warn!(
-                            "Vote submission deadlock, retrying ({}/{})",
-                            retry_count,
-                            MAX_DEADLOCK_RETRIES
-                        );
-                        tokio::time::sleep(Duration::from_millis(50 * retry_count as u64)).await;
-                        continue 'submission;
-                    }
-                    tracing::error!("Failed to insert votes: {:?}", e);
-                    if is_mysql_duplicate_key(&e) {
-                        return Err(AppError::Input(
-                            "You have already submitted a vote for this option".to_string(),
-                        ));
-                    }
-                    return Err(AppError::Internal(format!("Failed to insert votes: {}", e)));
-                }
-            }
-        }
-
-        if should_skip_vote_snapshot(limit_submissions, inserted_option_ids.len() as u64) {
-            let _ = tx.rollback().await;
-            return Ok(with_degraded_header(ApiResponse::success(
-                serde_json::json!({ "message": "Vote submitted successfully" }),
-            )));
-        }
-
-        for option_id in &inserted_option_ids {
-            if let Err(e) =
-                increment_vote_count(&mut tx, &session_id, &payload.slide_id, option_id).await
-            {
-                let _ = tx.rollback().await;
-                if is_app_error_deadlock(&e) && retry_count < MAX_DEADLOCK_RETRIES {
-                    retry_count += 1;
-                    tracing::warn!(
-                        "Vote counter deadlock, retrying ({}/{})",
-                        retry_count,
-                        MAX_DEADLOCK_RETRIES
-                    );
-                    tokio::time::sleep(Duration::from_millis(50 * retry_count as u64)).await;
-                    continue 'submission;
-                }
-                return Err(e);
-            }
-        }
-
-        match next_vote_sequence(&mut tx, &session_id).await {
-            Ok(sequence) => match current_vote_counts(&mut tx, &payload.slide_id).await {
-                Ok(results) => {
-                    // Enqueue outbox event before committing
-                    let vote_payload = serde_json::json!({
-                        "slideId": payload.slide_id,
-                        "results": &results,
-                        "sequence": sequence
-                    });
-                    crate::services::outbox::enqueue_event(
-                        &mut tx,
-                        &session_id,
-                        crate::services::outbox::OutboxEventType::VoteUpdate,
-                        &vote_payload,
-                    )
-                    .await?;
-
-                    tx.commit().await?;
-                    break (sequence, results);
-                }
-                Err(e) => {
-                    let _ = tx.rollback().await;
-                    if is_app_error_deadlock(&e) && retry_count < MAX_DEADLOCK_RETRIES {
-                        retry_count += 1;
-                        tracing::warn!(
-                            "Vote count snapshot deadlock, retrying ({}/{})",
-                            retry_count,
-                            MAX_DEADLOCK_RETRIES
-                        );
-                        tokio::time::sleep(Duration::from_millis(50 * retry_count as u64)).await;
-                        continue;
-                    }
-                    return Err(e);
-                }
-            },
-            Err(e) => {
-                let _ = tx.rollback().await;
-                if is_app_error_deadlock(&e) && retry_count < MAX_DEADLOCK_RETRIES {
-                    retry_count += 1;
-                    tracing::warn!(
-                        "Vote sequence deadlock, retrying ({}/{})",
-                        retry_count,
-                        MAX_DEADLOCK_RETRIES
-                    );
-                    tokio::time::sleep(Duration::from_millis(50 * retry_count as u64)).await;
-                    continue;
-                }
-                return Err(e);
-            }
+    let response_payload = match append_result {
+        crate::services::wal::AppendWalResult::Appended => response_payload,
+        crate::services::wal::AppendWalResult::Existing { response_payload } => {
+            decode_wal_response::<serde_json::Value>(response_payload)?
         }
     };
 
-    Ok(with_degraded_header(ApiResponse::success(
-        serde_json::json!({ "message": "Vote submitted successfully" }),
-    )))
+    Ok((StatusCode::ACCEPTED, Json(ApiResponse::success(response_payload))).into_response())
 }
 
 // ============================================
@@ -939,7 +832,7 @@ pub struct SubmitQuestionRequest {
     slide_id: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuestionResponse {
     pub id: String,
@@ -1009,183 +902,57 @@ pub async fn submit_question(
         ));
     }
 
-    let client_request_id = headers
-        .get("x-client-request-id")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned);
-
-    if let Some(client_request_id) = client_request_id.as_deref() {
-        if client_request_id.len() > 64 {
-            return Err(AppError::Input("Invalid X-Client-Request-Id".to_string()));
-        }
-
-        let existing = sqlx::query_as::<_, Question>(
-            "SELECT id, session_id, slide_id, participant_id, content, upvotes, is_approved, created_at \
-             FROM questions WHERE session_id = ? AND participant_id = ? AND client_request_id = ? LIMIT 1",
-        )
-        .bind(&session_id)
-        .bind(&payload.participant_id)
-        .bind(client_request_id)
-        .fetch_optional(&pool)
-        .await?;
-
-        if let Some(question) = existing {
-            return Ok(with_degraded_header(ApiResponse::<QuestionResponse>::success(question.into())));
-        }
-
-        // Use a single transaction to atomically:
-        // 1. Insert the question
-        // 2. Increment qa_sequence
-        // 3. Read the post-mutation snapshot (sequence + questions)
-        // On duplicate-key (1062), rollback and return the existing question (idempotency)
-        let mut tx = pool.begin().await?;
-
-        let question_id = Uuid::new_v4().to_string();
-        let insert_result = sqlx::query(
-            "INSERT INTO questions (id, session_id, slide_id, participant_id, content, client_request_id) \
-             VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&question_id)
-        .bind(&session_id)
-        .bind(payload.slide_id.as_deref())
-        .bind(&payload.participant_id)
-        .bind(&sanitized_content)
-        .bind(client_request_id)
-        .execute(&mut *tx)
-        .await;
-
-        match insert_result {
-            Ok(_) => {
-                // Insert succeeded - increment sequence and fetch snapshot
-                let (sequence, all_questions) =
-                    next_qa_sequence_and_questions(&mut tx, &session_id).await?;
-
-                // Enqueue outbox event before committing
-                let qa_payload = serde_json::json!({
-                    "payload": {
-                        "questions": &all_questions
-                    },
-                    "sequence": sequence
-                });
-                crate::services::outbox::enqueue_event(
-                    &mut tx,
-                    &session_id,
-                    crate::services::outbox::OutboxEventType::QaUpdate,
-                    &qa_payload,
-                )
-                .await?;
-
-                tx.commit().await?;
-
-                let question = all_questions
-                    .iter()
-                    .find(|q| q.id == question_id)
-                    .cloned()
-                    .ok_or_else(|| {
-                        AppError::Internal("Question not found after insert".to_string())
-                    })?;
-
-                return Ok(with_degraded_header(ApiResponse::<QuestionResponse>::success(question.into())));
-            }
-            Err(e) => {
-                let is_duplicate = is_mysql_duplicate_key(&e);
-                let _ = tx.rollback().await;
-
-                if is_duplicate {
-                    // Duplicate-key: fetch the existing question and return it (idempotent).
-                    // Use a transaction with FOR UPDATE to wait for the concurrent insert to commit.
-                    let mut fetch_tx = pool.begin().await?;
-
-                    for attempt in 0..3 {
-                        // Use FOR UPDATE to wait for any concurrent insert to commit
-                        let existing = sqlx::query_as::<_, Question>(
-                            "SELECT id, session_id, slide_id, participant_id, content, upvotes, is_approved, created_at
-                             FROM questions
-                             WHERE session_id = ? AND participant_id = ? AND client_request_id = ?
-                             LIMIT 1 FOR UPDATE",
-                        )
-                        .bind(&session_id)
-                        .bind(&payload.participant_id)
-                        .bind(client_request_id)
-                        .fetch_optional(&mut *fetch_tx)
-                        .await?;
-
-                        if let Some(question) = existing {
-                            let _ = fetch_tx.rollback().await;
-                            return Ok(with_degraded_header(ApiResponse::<QuestionResponse>::success(question.into())));
-                        }
-
-                        // Still not found, wait and retry
-                        if attempt < 2 {
-                            tokio::time::sleep(Duration::from_millis(100 * (attempt + 1) as u64))
-                                .await;
-                        }
-                    }
-
-                    let _ = fetch_tx.rollback().await;
-                    // Still not found after retries - return the duplicate error
-                    return Err(AppError::Internal(format!(
-                        "Duplicate question request but existing not found after retries: {}",
-                        e
-                    )));
-                }
-
-                return Err(AppError::Internal(format!(
-                    "Failed to save question: {}",
-                    e
-                )));
-            }
-        }
+    let client_request_id = resolve_client_request_id(&headers)?;
+    if let Some(existing) = crate::services::wal::fetch_replay_response::<QuestionResponse>(
+        &pool,
+        &session_id,
+        crate::services::wal::WalOpType::SubmitQuestion,
+        &client_request_id,
+    )
+    .await?
+    {
+        return Ok((StatusCode::ACCEPTED, Json(ApiResponse::success(existing))).into_response());
     }
 
-    // Use a single transaction to atomically:
-    // 1. Insert the question
-    // 2. Increment qa_sequence
-    // 3. Read the post-mutation snapshot (sequence + questions)
-    let mut tx = pool.begin().await?;
+    let question = QuestionResponse {
+        id: Uuid::new_v4().to_string(),
+        session_id: session_id.clone(),
+        slide_id: payload.slide_id.clone(),
+        participant_id: payload.participant_id.clone(),
+        content: sanitized_content.clone(),
+        upvotes: 0,
+        is_approved: false,
+        created_at: None,
+    };
 
-    let question_id = Uuid::new_v4().to_string();
-    sqlx::query(
-        "INSERT INTO questions (id, session_id, slide_id, participant_id, content) \
-         VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind(&question_id)
-    .bind(&session_id)
-    .bind(payload.slide_id.as_deref())
-    .bind(&payload.participant_id)
-    .bind(&sanitized_content)
-    .execute(&mut *tx)
-    .await?;
+    let append_result = app_state
+        .wal_store
+        .append_or_get_existing(crate::services::wal::AppendWalEntry {
+            op_type: crate::services::wal::WalOpType::SubmitQuestion,
+            session_id: session_id.clone(),
+            client_request_id,
+            resource_id: Some(question.id.clone()),
+            payload: serde_json::to_value(crate::services::wal::SubmitQuestionWalPayload {
+                question_id: question.id.clone(),
+                participant_id: question.participant_id.clone(),
+                slide_id: question.slide_id.clone(),
+                content: question.content.clone(),
+            })
+            .map_err(|error| AppError::Internal(format!("Failed to encode question WAL payload: {error}")))?,
+            response_payload: serde_json::to_value(&question)
+                .map_err(|error| AppError::Internal(format!("Failed to encode queued question: {error}")))?,
+            priority: 2,
+        })
+        .await?;
 
-    // Atomically increment sequence and fetch the post-mutation snapshot
-    let (sequence, all_questions) = next_qa_sequence_and_questions(&mut tx, &session_id).await?;
+    let question = match append_result {
+        crate::services::wal::AppendWalResult::Appended => question,
+        crate::services::wal::AppendWalResult::Existing { response_payload } => {
+            decode_wal_response::<QuestionResponse>(response_payload)?
+        }
+    };
 
-    // Enqueue outbox event before committing
-    let qa_payload = serde_json::json!({
-        "payload": {
-            "questions": &all_questions
-        },
-        "sequence": sequence
-    });
-    crate::services::outbox::enqueue_event(
-        &mut tx,
-        &session_id,
-        crate::services::outbox::OutboxEventType::QaUpdate,
-        &qa_payload,
-    )
-    .await?;
-
-    tx.commit().await?;
-
-    let question = all_questions
-        .iter()
-        .find(|q| q.id == question_id)
-        .cloned()
-        .ok_or_else(|| AppError::Internal("Question not found after insert".to_string()))?;
-
-    Ok(with_degraded_header(ApiResponse::<QuestionResponse>::success(question.into())))
+    Ok((StatusCode::ACCEPTED, Json(ApiResponse::success(question))).into_response())
 }
 
 #[derive(Deserialize)]
@@ -1197,9 +964,10 @@ pub struct UpvoteQuestionRequest {
 /// Upvote a question
 pub async fn upvote_question(
     State(app_state): State<crate::AppState>,
+    headers: HeaderMap,
     Path((session_id, question_id)): Path<(String, String)>,
     body: Option<Json<UpvoteQuestionRequest>>,
-) -> Result<Json<ApiResponse<serde_json::Value>>> {
+) -> Result<impl IntoResponse> {
     let pool = app_state.db_pool.pool_fast_fail().await?;
 
     let question = Question::find_by_id(&pool, &question_id).await?;
@@ -1215,87 +983,50 @@ pub async fn upvote_question(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "anonymous".to_string());
-
-    // Use a single transaction to atomically:
-    // 1. Insert upvote (or detect duplicate)
-    // 2. Update upvotes count
-    // 3. Increment qa_sequence (if new upvote)
-    // 4. Read the post-mutation snapshot (sequence + questions)
-    let mut tx = pool.begin().await?;
-    let mut already_upvoted = false;
-
-    let insert_result =
-        sqlx::query("INSERT INTO question_upvotes (question_id, participant_id) VALUES (?, ?)")
-            .bind(&question_id)
-            .bind(&participant_id)
-            .execute(&mut *tx)
-            .await;
-
-    match insert_result {
-        Ok(_) => {
-            sqlx::query("UPDATE questions SET upvotes = upvotes + 1 WHERE id = ?")
-                .bind(&question_id)
-                .execute(&mut *tx)
-                .await?;
-        }
-        Err(e) => {
-            if is_mysql_duplicate_key(&e) {
-                already_upvoted = true;
-            } else {
-                return Err(AppError::Internal(format!(
-                    "Failed to upvote question: {}",
-                    e
-                )));
-            }
-        }
+    let client_request_id = resolve_client_request_id(&headers)?;
+    if let Some(existing) = crate::services::wal::fetch_replay_response::<serde_json::Value>(
+        &pool,
+        &session_id,
+        crate::services::wal::WalOpType::UpvoteQuestion,
+        &client_request_id,
+    )
+    .await?
+    {
+        return crate::services::wal::queued_success_response(&existing);
     }
 
-    let new_upvotes: i32 = sqlx::query_scalar("SELECT upvotes FROM questions WHERE id = ?")
-        .bind(&question_id)
-        .fetch_one(&mut *tx)
+    let response = serde_json::json!({
+        "message": "Question upvoted",
+        "upvotes": question.upvotes.saturating_add(1),
+        "alreadyUpvoted": false
+    });
+
+    let append_result = app_state
+        .wal_store
+        .append_or_get_existing(crate::services::wal::AppendWalEntry {
+            op_type: crate::services::wal::WalOpType::UpvoteQuestion,
+            session_id: session_id.clone(),
+            client_request_id,
+            resource_id: Some(question_id.clone()),
+            payload: serde_json::to_value(crate::services::wal::UpvoteQuestionWalPayload {
+                question_id: question_id.clone(),
+                participant_id,
+            })
+            .map_err(|error| AppError::Internal(format!("Failed to encode upvote WAL payload: {error}")))?,
+            response_payload: response.clone(),
+            priority: 2,
+        })
         .await?;
 
-    let (sequence, all_questions) = if !already_upvoted {
-        // Atomically increment sequence and fetch the post-mutation snapshot
-        next_qa_sequence_and_questions(&mut tx, &session_id).await?
-    } else {
-        // Already upvoted - just fetch current state without incrementing sequence
-        let sequence: u64 = sqlx::query_scalar("SELECT qa_sequence FROM sessions WHERE id = ?")
-            .bind(&session_id)
-            .fetch_one(&mut *tx)
-            .await?;
-        let questions: Vec<Question> = sqlx::query_as(
-            "SELECT id, session_id, slide_id, participant_id, content, upvotes, is_approved, created_at
-             FROM questions WHERE session_id = ? ORDER BY upvotes DESC, created_at DESC",
-        )
-        .bind(&session_id)
-        .fetch_all(&mut *tx)
-        .await?;
-        (sequence, questions)
-    };
-
-    // Enqueue outbox event for new upvotes (before commit)
-    if !already_upvoted {
-        let qa_payload = serde_json::json!({
-            "payload": {
-                "questions": &all_questions
-            },
-            "sequence": sequence
-        });
-        crate::services::outbox::enqueue_event(
-            &mut tx,
-            &session_id,
-            crate::services::outbox::OutboxEventType::QaUpdate,
-            &qa_payload,
-        )
-        .await?;
+    match append_result {
+        crate::services::wal::AppendWalResult::Appended => {
+            crate::services::wal::queued_success_response(&response)
+        }
+        crate::services::wal::AppendWalResult::Existing { response_payload } => {
+            let response = decode_wal_response::<serde_json::Value>(response_payload)?;
+            crate::services::wal::queued_success_response(&response)
+        }
     }
-
-    tx.commit().await?;
-
-    Ok(Json(ApiResponse::success(
-        serde_json::json!({ "message": "Question upvoted", "upvotes": new_upvotes, "alreadyUpvoted": already_upvoted }),
-    )))
 }
 
 #[derive(Deserialize)]
@@ -1413,8 +1144,6 @@ pub async fn get_my_votes(
 #[cfg(test)]
 mod student_helper_tests {
     use super::{group_votes_by_slide, with_degraded_header, ApiResponse};
-    use axum::http::{HeaderName, HeaderValue};
-    use axum::response::Response;
 
     // --- group_votes_by_slide tests ---
 

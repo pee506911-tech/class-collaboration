@@ -50,6 +50,34 @@ describe('updateSlide', () => {
         });
     });
 
+    it('accepts 202 queued responses as successful saves', async () => {
+        const fetchMock = vi.fn().mockResolvedValue(
+            mockJsonResponse(
+                {
+                    success: true,
+                    data: {
+                        id: 'slide-1',
+                        sessionId: 'session-1',
+                        type: 'static',
+                        content: { title: 'Queued', body: 'Queued body' },
+                        orderIndex: 0,
+                        isHidden: false,
+                        version: 2,
+                    },
+                },
+                { status: 202 },
+            ),
+        );
+        global.fetch = fetchMock as typeof fetch;
+
+        await expect(
+            updateSlide('session-1', 'slide-1', { title: 'Queued', body: 'Queued body' }, 1),
+        ).resolves.toMatchObject({
+            version: 2,
+            content: { title: 'Queued', body: 'Queued body' },
+        });
+    });
+
     it('surfaces a 409 conflict without retrying the stale save', async () => {
         const fetchMock = vi.fn().mockResolvedValue(
             mockJsonResponse(

@@ -59,6 +59,7 @@ pub struct AppState {
     pub db_pool: LazyDbPool,
     pub session_service: Arc<SessionService>,
     pub registry: Arc<ws::registry::InMemoryRegistry>,
+    pub wal_store: services::wal::WalStore,
 }
 
 #[tokio::main]
@@ -124,12 +125,6 @@ async fn main() -> anyhow::Result<()> {
     // event delivery to connected WebSocket clients.
     let registry = Arc::new(ws::registry::InMemoryRegistry::new());
 
-    let app_state = AppState {
-        db_pool: lazy_pool.clone(),
-        session_service,
-        registry: registry.clone(),
-    };
-
     // Spawn the outbox worker in the background once the DB pool is ready.
     // The worker accepts a shutdown signal so it can flush pending events before exit.
     let (outbox_shutdown_tx, outbox_shutdown_rx) = watch::channel(false);
@@ -174,6 +169,46 @@ async fn main() -> anyhow::Result<()> {
             return Err(e.into());
         }
     }
+
+    let wal_store = services::wal::WalStore::open_default().await?;
+    if let Some(path) = wal_store.db_path() {
+        tracing::info!("WAL store ready at {}", path.display());
+    }
+
+    let mysql_pool = lazy_pool.pool().await?;
+    services::wal::flush_all_pending(
+        &wal_store,
+        &mysql_pool,
+        &session_service,
+        std::time::Duration::from_secs(30),
+    )
+    .await?;
+
+    let app_state = AppState {
+        db_pool: lazy_pool.clone(),
+        session_service: session_service.clone(),
+        registry: registry.clone(),
+        wal_store: wal_store.clone(),
+    };
+
+    let (wal_shutdown_tx, wal_shutdown_rx) = watch::channel(false);
+    let wal_store_for_worker = wal_store.clone();
+    let session_service_for_worker = session_service.clone();
+    tokio::spawn(async move {
+        crate::services::wal::run_wal_worker(
+            wal_store_for_worker,
+            mysql_pool,
+            session_service_for_worker,
+            wal_shutdown_rx,
+        )
+        .await;
+    });
+
+    let wal_tx = wal_shutdown_tx.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = wal_tx.send(true);
+    });
 
     // Rate limiting configuration
     let general_governor_conf = Arc::new(
