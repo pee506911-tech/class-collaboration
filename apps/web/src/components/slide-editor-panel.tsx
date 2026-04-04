@@ -1,7 +1,7 @@
-import { Slide } from 'shared';
+import type { Slide } from 'shared';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Plus, GripVertical, Trash2, Type, List, Trophy } from 'lucide-react';
+import { Plus, GripVertical, Trash2, Type, List, Trophy, CheckCircle2, AlertCircle, LoaderCircle } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -13,9 +13,28 @@ import { MultipleChoiceSlideEditor } from '@/components/slide-editors/multiple-c
 
 export type SlideEditorSyncStatus = { dirty: boolean; saving: boolean; lastError?: string | null };
 
+type SaveMode = 'auto' | 'manual';
+type SlideOption = { id: string; text: string; isCorrect?: boolean };
+type SlideContentDraft = {
+    title?: string;
+    body?: string;
+    description?: string;
+    question?: string;
+    options?: SlideOption[];
+    chartType?: 'bar' | 'pie';
+    limitSubmissions?: boolean;
+    allowMultipleSelection?: boolean;
+    points?: number;
+    timerDuration?: number;
+};
+type AutoSaveFeedback = {
+    phase: 'idle' | 'saving' | 'success' | 'error';
+    message: string | null;
+};
+
 interface SlideEditorPanelProps {
     slide: Slide;
-    onUpdate: (content: any) => Promise<void>;
+    onUpdate: (content: SlideContentDraft) => Promise<void>;
     onSave: () => void;
     onSyncStatusChange?: (status: SlideEditorSyncStatus) => void;
     disabled?: boolean;
@@ -23,17 +42,21 @@ interface SlideEditorPanelProps {
 }
 
 export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, disabled = false, disabledReason }: SlideEditorPanelProps) {
-    const [localContent, setLocalContent] = useState<any>(slide.content);
+    const [localContent, setLocalContent] = useState<SlideContentDraft>(slide.content as SlideContentDraft);
     const [dirty, setDirty] = useState(false);
     const [saving, setSaving] = useState(false);
     const [lastError, setLastError] = useState<string | null>(null);
+    const [autoSaveFeedback, setAutoSaveFeedback] = useState<AutoSaveFeedback>({ phase: 'idle', message: null });
+    const [consecutiveFailures, setConsecutiveFailures] = useState(0);
 
     const isMountedRef = useRef(true);
     const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const autoSaveTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-    const latestContentRef = useRef<any>(slide.content);
+    const latestContentRef = useRef<SlideContentDraft>(slide.content as SlideContentDraft);
     const lastSyncedVersionRef = useRef(slide.version);
     const pendingFlushRef = useRef(false);
+    const pendingSaveModeRef = useRef<SaveMode>('auto');
     const inFlightRef = useRef(false);
 
     const editSeqRef = useRef(0);
@@ -42,6 +65,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
     const dirtyRef = useRef(false);
     const savingRef = useRef(false);
     const lastErrorRef = useRef<string | null>(null);
+    const consecutiveFailuresRef = useRef(0);
 
     const onUpdateRef = useRef(onUpdate);
     useEffect(() => {
@@ -52,6 +76,10 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
         isMountedRef.current = true;
         return () => {
             isMountedRef.current = false;
+            if (autoSaveTimerRef.current) {
+                clearTimeout(autoSaveTimerRef.current);
+                autoSaveTimerRef.current = null;
+            }
         };
     }, []);
 
@@ -70,6 +98,34 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
         if (isMountedRef.current) setLastError(next);
     }, []);
 
+    const setConsecutiveFailuresState = useCallback((next: number) => {
+        consecutiveFailuresRef.current = next;
+        if (isMountedRef.current) setConsecutiveFailures(next);
+    }, []);
+
+    const clearAutoSaveTimer = useCallback(() => {
+        if (autoSaveTimerRef.current) {
+            clearTimeout(autoSaveTimerRef.current);
+            autoSaveTimerRef.current = null;
+        }
+    }, []);
+
+    const showAutoSaveFeedback = useCallback((phase: AutoSaveFeedback['phase'], message: string | null = null, autoHideMs?: number) => {
+        clearAutoSaveTimer();
+        if (isMountedRef.current) {
+            setAutoSaveFeedback({ phase, message });
+        }
+
+        if (typeof autoHideMs === 'number') {
+            autoSaveTimerRef.current = setTimeout(() => {
+                if (isMountedRef.current) {
+                    setAutoSaveFeedback({ phase: 'idle', message: null });
+                }
+                autoSaveTimerRef.current = null;
+            }, autoHideMs);
+        }
+    }, [clearAutoSaveTimer]);
+
     const recomputeDirty = useCallback(() => {
         setDirtyState(editSeqRef.current !== ackedSeqRef.current);
     }, [setDirtyState]);
@@ -85,38 +141,62 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
 
                 const seqToSave = editSeqRef.current;
                 const contentToSave = latestContentRef.current;
+                const saveMode = pendingSaveModeRef.current;
+
+                if (saveMode === 'auto') {
+                    showAutoSaveFeedback('saving');
+                }
 
                 try {
                     await onUpdateRef.current(contentToSave);
                 } catch (err: unknown) {
                     const message = err instanceof Error ? err.message : 'Failed to save';
                     setLastErrorState(message || 'Failed to save');
+                    setConsecutiveFailuresState(consecutiveFailuresRef.current + 1);
+                    if (saveMode === 'auto') {
+                        showAutoSaveFeedback('error', message || 'Failed to save');
+                    }
                     recomputeDirty();
                     return;
                 }
 
                 ackedSeqRef.current = Math.max(ackedSeqRef.current, seqToSave);
+                setConsecutiveFailuresState(0);
+                if (saveMode === 'auto') {
+                    showAutoSaveFeedback('success', 'Draft saved', 2000);
+                } else {
+                    showAutoSaveFeedback('idle');
+                }
                 recomputeDirty();
             }
         } finally {
             setSavingState(false);
             inFlightRef.current = false;
         }
-    }, [recomputeDirty, setLastErrorState, setSavingState]);
+    }, [recomputeDirty, setConsecutiveFailuresState, setLastErrorState, setSavingState, showAutoSaveFeedback]);
 
-    const flushSave = useCallback(async (contentToSave = latestContentRef.current, showToast = false) => {
+    const flushSave = useCallback(async (
+        contentToSave = latestContentRef.current,
+        options: { showToast?: boolean; mode?: SaveMode } = {},
+    ) => {
+        const { showToast = false, mode = 'manual' } = options;
         if (debounceTimerRef.current) {
             clearTimeout(debounceTimerRef.current);
             debounceTimerRef.current = null;
         }
         latestContentRef.current = contentToSave;
+        setLastErrorState(null);
+        if (mode === 'manual') {
+            showAutoSaveFeedback('idle');
+        }
         pendingFlushRef.current = true;
+        pendingSaveModeRef.current = mode;
         await pump();
 
         if (showToast && !dirtyRef.current && !lastErrorRef.current) {
             onSave();
         }
-    }, [onSave, pump]);
+    }, [onSave, pump, setLastErrorState, showAutoSaveFeedback]);
 
     const scheduleDebouncedSave = useCallback(() => {
         if (debounceTimerRef.current) {
@@ -125,28 +205,36 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
 
         debounceTimerRef.current = setTimeout(() => {
             pendingFlushRef.current = true;
+            pendingSaveModeRef.current = 'auto';
             void pump();
         }, 500);
     }, [pump]);
 
-    const updateContent = useCallback((updater: (currentContent: any) => any, immediate = false) => {
-        const nextContent = updater(latestContentRef.current);
+    const stageDraft = useCallback((nextContent: SlideContentDraft) => {
         setLocalContent(nextContent);
         latestContentRef.current = nextContent;
+        editSeqRef.current += 1;
+        setLastErrorState(null);
+        showAutoSaveFeedback('idle');
+        recomputeDirty();
+    }, [recomputeDirty, setLastErrorState, showAutoSaveFeedback]);
+
+    const updateContent = useCallback((updater: (currentContent: SlideContentDraft) => SlideContentDraft, immediate = false) => {
+        const nextContent = updater(latestContentRef.current);
+        stageDraft(nextContent);
 
         if (immediate) {
-            editSeqRef.current += 1;
-            setLastErrorState(null);
-            recomputeDirty();
-            void flushSave(nextContent);
+            void flushSave(nextContent, { mode: 'auto' });
             return;
         }
 
-        editSeqRef.current += 1;
-        setLastErrorState(null);
-        recomputeDirty();
         scheduleDebouncedSave();
-    }, [flushSave, recomputeDirty, scheduleDebouncedSave, setLastErrorState]);
+    }, [flushSave, scheduleDebouncedSave, stageDraft]);
+
+    const handleContentEditorChange = useCallback((nextContent: SlideContentDraft) => {
+        stageDraft(nextContent);
+        scheduleDebouncedSave();
+    }, [scheduleDebouncedSave, stageDraft]);
 
     // Reset local state only when switching to a different slide.
     useEffect(() => {
@@ -159,6 +247,8 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
         setDirtyState(false);
         setSavingState(false);
         setLastErrorState(null);
+        setConsecutiveFailuresState(0);
+        showAutoSaveFeedback('idle');
 
         if (debounceTimerRef.current) {
             clearTimeout(debounceTimerRef.current);
@@ -171,12 +261,13 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
                 clearTimeout(debounceTimerRef.current);
                 debounceTimerRef.current = null;
             }
+            clearAutoSaveTimer();
             // Do NOT flush here — if the slide was deleted, a flush would
             // attempt to save to a non-existent slide. The parent component
             // is responsible for flushing before structural changes.
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [slide.id]);
+    }, [clearAutoSaveTimer, setConsecutiveFailuresState, setDirtyState, setLastErrorState, setSavingState, showAutoSaveFeedback, slide.id]);
 
     // Rebase to the latest server snapshot only when there is no local draft in flight.
     useEffect(() => {
@@ -199,7 +290,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
         onSyncStatusChange?.({ dirty, saving, lastError });
     }, [dirty, saving, lastError, onSyncStatusChange]);
 
-    const updateField = (field: string, value: any, immediate = false) => {
+    const updateField = <K extends keyof SlideContentDraft>(field: K, value: SlideContentDraft[K], immediate = false) => {
         updateContent((currentContent) => ({ ...currentContent, [field]: value }), immediate);
     };
 
@@ -209,7 +300,8 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
     };
 
     const handleAddOption = () => {
-        const newOptions = addOption(localContent.options || [], slide.type as any);
+        const optionSlideType = slide.type === 'quiz' ? 'quiz' : slide.type === 'multiple-choice' ? 'multiple-choice' : 'poll';
+        const newOptions = addOption(localContent.options || [], optionSlideType);
         updateField('options', newOptions);
     };
 
@@ -233,15 +325,82 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
         updateField('options', newOptions);
     };
 
+    const handleRetrySave = () => {
+        void flushSave(latestContentRef.current, { mode: 'manual' });
+    };
+
+    const handleDismissError = () => {
+        setLastErrorState(null);
+        if (autoSaveFeedback.phase === 'error') {
+            showAutoSaveFeedback('idle');
+        }
+    };
+
+    const handleCopyContent = async () => {
+        await navigator.clipboard.writeText(JSON.stringify(latestContentRef.current, null, 2));
+    };
+
+    const saveIndicator = lastError
+        ? {
+            label: 'Save failed',
+            tone: 'text-rose-700',
+            icon: <AlertCircle className="h-3.5 w-3.5" />,
+            dotClassName: 'bg-rose-500',
+            title: lastError,
+        }
+        : saving
+            ? {
+                label: 'Saving…',
+                tone: 'text-blue-700',
+                icon: <LoaderCircle className="h-3.5 w-3.5 animate-spin" />,
+                dotClassName: '',
+                title: undefined,
+            }
+            : dirty
+                ? {
+                    label: 'Unsaved changes',
+                    tone: 'text-amber-700',
+                    icon: null,
+                    dotClassName: 'bg-amber-500',
+                    title: undefined,
+                }
+                : {
+                    label: 'Saved',
+                    tone: 'text-slate-500',
+                    icon: <CheckCircle2 className="h-3.5 w-3.5" />,
+                    dotClassName: '',
+                    title: undefined,
+                };
+
     return (
         <div className="h-full flex flex-col bg-slate-50">
+            <div aria-live="polite" className="shrink-0">
+                <div className={`h-0.5 w-full transition-all duration-300 ${autoSaveFeedback.phase === 'idle' ? 'opacity-0' : 'opacity-100'} ${autoSaveFeedback.phase === 'saving' ? 'bg-blue-500 animate-pulse' : autoSaveFeedback.phase === 'success' ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+                {autoSaveFeedback.phase === 'error' && autoSaveFeedback.message && (
+                    <div className="border-b border-rose-200 bg-rose-50 px-4 py-2 text-xs text-rose-700">
+                        Auto-save paused. {autoSaveFeedback.message}
+                    </div>
+                )}
+            </div>
+
             <div className="p-4 border-b bg-white">
-                <h2 className="font-semibold text-lg flex items-center gap-2">
-                    {slide.type === 'poll' && <List className="w-5 h-5 text-blue-500" />}
-                    {slide.type === 'quiz' && <Trophy className="w-5 h-5 text-yellow-500" />}
-                    {slide.type === 'static' && <Type className="w-5 h-5 text-slate-500" />}
-                    Edit Slide
-                </h2>
+                <div className="flex items-start justify-between gap-3">
+                    <h2 className="font-semibold text-lg flex items-center gap-2">
+                        {slide.type === 'poll' && <List className="w-5 h-5 text-blue-500" />}
+                        {slide.type === 'quiz' && <Trophy className="w-5 h-5 text-yellow-500" />}
+                        {slide.type === 'static' && <Type className="w-5 h-5 text-slate-500" />}
+                        Edit Slide
+                    </h2>
+                    <div
+                        className={`flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] font-medium ${lastError ? 'border-rose-200 bg-rose-50' : saving ? 'border-blue-200 bg-blue-50' : dirty ? 'border-amber-200 bg-amber-50' : 'border-slate-200 bg-slate-50'} ${saveIndicator.tone}`}
+                        title={saveIndicator.title}
+                        tabIndex={lastError ? 0 : -1}
+                        aria-label={lastError ? `Save failed: ${lastError}` : saveIndicator.label}
+                    >
+                        {saveIndicator.icon ?? <span className={`h-2 w-2 rounded-full ${saveIndicator.dotClassName}`} />}
+                        <span>{saveIndicator.label}</span>
+                    </div>
+                </div>
                 {disabled && (
                     <p className="mt-2 text-xs text-amber-700">
                         {disabledReason || 'Editing is temporarily disabled while this slide is syncing.'}
@@ -262,15 +421,8 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
                         {slide.type === 'static' && (
                             <StaticSlideEditor
                                 content={localContent}
-                                onChange={(next) => {
-                                    setLocalContent(next);
-                                    latestContentRef.current = next;
-                                    editSeqRef.current += 1;
-                                    setLastErrorState(null);
-                                    recomputeDirty();
-                                    scheduleDebouncedSave();
-                                }}
-                                onBlur={() => { void flushSave(); }}
+                                onChange={handleContentEditorChange}
+                                onBlur={() => { void flushSave(undefined, { mode: 'auto' }); }}
                                 disabled={disabled}
                             />
                         )}
@@ -278,14 +430,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
                         {slide.type === 'poll' && (
                             <PollSlideEditor
                                 content={localContent}
-                                onChange={(next) => {
-                                    setLocalContent(next);
-                                    latestContentRef.current = next;
-                                    editSeqRef.current += 1;
-                                    setLastErrorState(null);
-                                    recomputeDirty();
-                                    scheduleDebouncedSave();
-                                }}
+                                onChange={handleContentEditorChange}
                                 disabled={disabled}
                             />
                         )}
@@ -293,14 +438,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
                         {slide.type === 'quiz' && (
                             <QuizSlideEditor
                                 content={localContent}
-                                onChange={(next) => {
-                                    setLocalContent(next);
-                                    latestContentRef.current = next;
-                                    editSeqRef.current += 1;
-                                    setLastErrorState(null);
-                                    recomputeDirty();
-                                    scheduleDebouncedSave();
-                                }}
+                                onChange={handleContentEditorChange}
                                 disabled={disabled}
                             />
                         )}
@@ -308,14 +446,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
                         {slide.type === 'multiple-choice' && (
                             <MultipleChoiceSlideEditor
                                 content={localContent}
-                                onChange={(next) => {
-                                    setLocalContent(next);
-                                    latestContentRef.current = next;
-                                    editSeqRef.current += 1;
-                                    setLastErrorState(null);
-                                    recomputeDirty();
-                                    scheduleDebouncedSave();
-                                }}
+                                onChange={handleContentEditorChange}
                                 disabled={disabled}
                             />
                         )}
@@ -331,7 +462,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
                                     <Droppable droppableId="options">
                                         {(provided) => (
                                             <div {...provided.droppableProps} ref={provided.innerRef} className="space-y-2">
-                                                {(localContent.options || []).map((option: any, index: number) => (
+                                                {(localContent.options || []).map((option: SlideOption, index: number) => (
                                                     <Draggable key={option.id} draggableId={option.id} index={index} isDragDisabled={disabled}>
                                                         {(provided, snapshot) => (
                                                             <div
@@ -393,12 +524,47 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
 
             <div className="p-4 border-t bg-white">
                 {lastError && (
-                    <p className="mb-2 text-xs text-rose-600">
-                        Last save failed: {lastError}
-                    </p>
+                    <div className={`mb-3 rounded-xl border px-3 py-3 ${consecutiveFailures >= 3 ? 'border-rose-300 bg-rose-50' : 'border-amber-200 bg-amber-50'}`}>
+                        <div className="flex items-start gap-2">
+                            <AlertCircle className={`mt-0.5 h-4 w-4 shrink-0 ${consecutiveFailures >= 3 ? 'text-rose-600' : 'text-amber-600'}`} />
+                            <div className="min-w-0">
+                                <p className={`text-sm font-semibold ${consecutiveFailures >= 3 ? 'text-rose-900' : 'text-amber-900'}`}>
+                                    {consecutiveFailures >= 3 ? 'Unable to save right now.' : 'Save failed.'}
+                                </p>
+                                <p className={`mt-1 text-xs ${consecutiveFailures >= 3 ? 'text-rose-700' : 'text-amber-800'}`}>
+                                    {consecutiveFailures >= 3
+                                        ? 'Check your connection and try again. Your latest draft is still in the editor.'
+                                        : lastError}
+                                </p>
+                            </div>
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                            <Button size="sm" onClick={handleRetrySave} disabled={saving || disabled} className="bg-slate-900 hover:bg-slate-800">
+                                Retry
+                            </Button>
+                            <Button size="sm" variant="outline" onClick={handleDismissError}>
+                                Dismiss
+                            </Button>
+                            {consecutiveFailures >= 3 && (
+                                <Button size="sm" variant="outline" onClick={() => { void handleCopyContent(); }}>
+                                    Copy Content
+                                </Button>
+                            )}
+                        </div>
+                    </div>
                 )}
-                <Button disabled={disabled} onClick={() => { void flushSave(latestContentRef.current, true); }} className="w-full bg-slate-900 hover:bg-slate-800">
-                    {disabled ? 'Waiting For Confirmation' : saving ? 'Saving…' : dirty ? 'Save Changes' : 'All Changes Saved'}
+                <Button
+                    disabled={disabled || saving || !dirty}
+                    onClick={() => { void flushSave(latestContentRef.current, { showToast: true, mode: 'manual' }); }}
+                    variant={dirty ? 'default' : 'outline'}
+                    className={`w-full ${dirty ? 'bg-slate-900 hover:bg-slate-800' : 'border-slate-200 bg-slate-50 text-slate-400 hover:bg-slate-50 hover:text-slate-400'}`}
+                >
+                    {saving ? (
+                        <>
+                            <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
+                            Saving…
+                        </>
+                    ) : dirty ? 'Save Now' : 'All Saved'}
                 </Button>
             </div>
         </div>

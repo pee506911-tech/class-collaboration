@@ -420,11 +420,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                                         : 'bg-white border-slate-200 hover:border-blue-300 hover:shadow-sm'
                                                     } ${slide.optimistic?.isPending ? 'opacity-90' : ''} ${snapshot.isDragging ? 'shadow-xl ring-2 ring-blue-600 rotate-2 z-50' : ''}`}
                                                 title={
-                                                    slide.optimistic?.isPending
-                                                        ? slide.optimistic.syncState === 'retrying'
-                                                            ? 'Sync retrying'
-                                                            : 'Syncing slide'
-                                                        : previewSlideId === slide.id
+                                                    previewSlideId === slide.id
                                                         ? "Selected for Preview"
                                                         : state?.currentSlideId === slide.id
                                                             ? "Active for Students (via Mobile Clicker)"
@@ -454,11 +450,6 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                                                 {slide.isHidden && (
                                                                     <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-slate-200 text-slate-500 flex items-center gap-1">
                                                                         <EyeOff className="w-3 h-3" /> HIDDEN
-                                                                    </span>
-                                                                )}
-                                                                {slide.optimistic?.syncState && (
-                                                                    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${slide.optimistic.syncState === 'retrying' ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'}`}>
-                                                                        {slide.optimistic.syncState === 'retrying' ? 'RETRYING' : 'SYNCING'}
                                                                     </span>
                                                                 )}
                                                             </div>
@@ -564,7 +555,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                     size="icon"
                                     onClick={() => setShowShareDialog(true)}
                                     disabled={!isShareEnabled}
-                                    title={isShareEnabled ? 'Share Session' : 'Syncing changes…'}
+                                    title={isShareEnabled ? 'Share Session' : 'Finish saving before sharing'}
                                 >
                                     <Share2 className="w-4 h-4 text-slate-500" />
                                 </Button>
@@ -610,11 +601,6 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                 <span className="px-2.5 py-1 rounded-lg bg-blue-100 text-blue-700 font-semibold text-xs border border-blue-200">
                                     Preview: Slide {previewIndex + 1}
                                 </span>
-                                {previewSlide.optimistic?.syncState && (
-                                    <span className={`px-2.5 py-1 rounded-lg font-semibold text-xs border ${previewSlide.optimistic.syncState === 'retrying' ? 'bg-amber-100 text-amber-700 border-amber-200' : 'bg-blue-50 text-blue-700 border-blue-200'}`}>
-                                        {previewSlide.optimistic.syncState === 'retrying' ? 'Retrying save' : 'Syncing'}
-                                    </span>
-                                )}
                                 {state?.currentSlideId === previewSlideId && (
                                     <span className="px-2.5 py-1 rounded-lg bg-green-100 text-green-700 font-semibold text-xs border border-green-200">
                                         ● LIVE for Students
@@ -751,10 +737,10 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                         <div className="p-6 space-y-6">
                             {!isShareEnabled && (
                                 <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900">
-                                    <p className="text-sm font-semibold">Syncing changes… sharing is disabled until saved.</p>
+                                    <p className="text-sm font-semibold">Finish saving your latest changes before sharing.</p>
                                     {editorSync.lastError && (
                                         <p className="mt-1 text-xs text-amber-800">
-                                            Last save failed: {editorSync.lastError}
+                                            Save failed: {editorSync.lastError}
                                         </p>
                                     )}
                                 </div>

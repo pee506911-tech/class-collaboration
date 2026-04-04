@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { Slide } from 'shared';
 
 import { SlideEditorPanel } from './slide-editor-panel';
@@ -311,6 +311,30 @@ describe('SlideEditorPanel', () => {
     // ── Characterization: Error Handling ──
 
     describe('error handling', () => {
+        it('shows calm saved and unsaved states in the editor chrome', async () => {
+            vi.useFakeTimers();
+
+            render(
+                <SlideEditorPanel
+                    slide={makeSlide()}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            expect(screen.getByText('Saved')).toBeTruthy();
+            expect(screen.getByRole('button', { name: /all saved/i })).toBeDisabled();
+
+            const input = screen.getByDisplayValue('Original');
+
+            await act(async () => {
+                fireEvent.change(input, { target: { value: 'Bad draft' } });
+            });
+
+            expect(screen.getByText('Unsaved changes')).toBeTruthy();
+            expect(screen.getByRole('button', { name: /save now/i })).toBeEnabled();
+        });
+
         it('shows error message when save fails', async () => {
             vi.useFakeTimers();
             const onUpdate = vi.fn().mockRejectedValue(new Error('Failed to save'));
@@ -333,7 +357,9 @@ describe('SlideEditorPanel', () => {
             });
 
             // Should show error in the UI
-            expect(screen.getByText(/Last save failed: Failed to save/i)).toBeTruthy();
+            expect(screen.getByText('Save failed.')).toBeTruthy();
+            expect(screen.getByText('Failed to save')).toBeTruthy();
+            expect(screen.getByText(/Auto-save paused. Failed to save/i)).toBeTruthy();
         });
 
         it('allows retry after error', async () => {
@@ -362,15 +388,47 @@ describe('SlideEditorPanel', () => {
             });
 
             // Error should appear
-            expect(screen.getByText(/Last save failed: Network error/i)).toBeTruthy();
+            expect(screen.getByText('Save failed.')).toBeTruthy();
+            expect(screen.getByText('Network error')).toBeTruthy();
 
-            // Click Save button to retry
-            const saveButton = screen.getByRole('button', { name: /save changes/i });
+            // Click Retry to bypass debounce
+            const saveButton = screen.getByRole('button', { name: /retry/i });
             await act(async () => {
                 fireEvent.click(saveButton);
             });
 
             expect(onUpdate).toHaveBeenCalledTimes(2);
+        });
+
+        it('shows stronger recovery guidance after repeated failures', async () => {
+            vi.useFakeTimers();
+            const onUpdate = vi.fn().mockRejectedValue(new Error('Network error'));
+
+            render(
+                <SlideEditorPanel
+                    slide={makeSlide()}
+                    onUpdate={onUpdate}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            const input = screen.getByDisplayValue('Original');
+
+            await act(async () => {
+                fireEvent.change(input, { target: { value: 'Retry draft' } });
+            });
+            await act(async () => {
+                vi.advanceTimersByTime(500);
+            });
+            await act(async () => {
+                fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+            });
+            await act(async () => {
+                fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+            });
+
+            expect(screen.getByText('Unable to save right now.')).toBeTruthy();
+            expect(screen.getByRole('button', { name: /copy content/i })).toBeTruthy();
         });
     });
 
