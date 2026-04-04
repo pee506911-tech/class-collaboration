@@ -45,6 +45,17 @@ function syncSequenceRefs(
     }
 }
 
+function shouldRetryConnectionError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return !(
+        message.includes('Authentication required') ||
+        message.includes('HTTP 400') ||
+        message.includes('HTTP 401') ||
+        message.includes('HTTP 403') ||
+        message.includes('HTTP 404')
+    );
+}
+
 // Generate unique tab ID with creation timestamp for priority
 const TAB_ID = typeof crypto !== 'undefined' && crypto.randomUUID
     ? crypto.randomUUID()
@@ -509,7 +520,7 @@ export function WebSocketProvider({
             console.error('[WS] Failed to connect:', e);
             setIsConnecting(false);
             setConnectionError(e instanceof Error ? e.message : 'Connection failed');
-            if (isLeaderRef.current) {
+            if (isLeaderRef.current && shouldRetryConnectionError(e)) {
                 scheduleReconnect();
             }
         }

@@ -13,6 +13,17 @@ import { fetchWsToken } from './ws-auth';
 import { createReconnect } from './ws-reconnect';
 import { trimTrailingSlash } from './url';
 
+function shouldRetryConnectionError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return !(
+        message.includes('Authentication required') ||
+        message.includes('HTTP 400') ||
+        message.includes('HTTP 401') ||
+        message.includes('HTTP 403') ||
+        message.includes('HTTP 404')
+    );
+}
+
 export interface WsConnection {
     isConnected: boolean;
     isConnecting: boolean;
@@ -161,7 +172,9 @@ export function createWsConnection(options: WsConnectionOptions): WsConnection {
             isConnecting = false;
             connectionError = e instanceof Error ? e.message : 'Connection failed';
             notifyStateChange();
-            reconnect.schedule();
+            if (shouldRetryConnectionError(e)) {
+                reconnect.schedule();
+            }
         }
     }
 

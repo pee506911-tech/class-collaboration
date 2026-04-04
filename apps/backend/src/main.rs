@@ -243,8 +243,6 @@ async fn main() -> anyhow::Result<()> {
         // Authentication (strict rate limiting)
         .route("/api/auth/register", post(handlers::auth::register))
         .route("/api/auth/login", post(handlers::auth::login))
-        // WS token endpoint (requires auth cookie)
-        .route("/api/auth/ws-token", get(handlers::ws_token::get_ws_token))
         .layer(overload_protection.clone())
         .layer(GovernorLayer {
             config: strict_governor_conf,
@@ -256,6 +254,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/client-error",
             post(handlers::client_error::report_client_error),
         )
+        // WS token endpoint:
+        // - staff requires auth
+        // - student/projector are public but session-scoped
+        .route("/api/auth/ws-token", get(handlers::ws_token::get_ws_token))
         // WebSocket upgrade endpoint (public; JWT-validated via query param)
         .route("/api/ws", get(ws::handler::ws_handler))
         // Public endpoints (no auth required)

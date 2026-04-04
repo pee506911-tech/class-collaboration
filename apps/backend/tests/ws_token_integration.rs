@@ -102,7 +102,7 @@ async fn ws_token_returns_valid_jwt_with_auth() {
 
 #[tokio::test]
 #[ignore]
-async fn ws_token_rejects_unauthenticated() {
+async fn ws_token_allows_unauthenticated_student() {
     let client = Client::new();
     let base = server_url();
     
@@ -111,6 +111,30 @@ async fn ws_token_rejects_unauthenticated() {
         .query(&[
             ("sessionId", "test-session"),
             ("role", "student"),
+            ("participantId", "participant-123"),
+        ])
+        .send()
+        .await
+        .expect("ws-token request failed");
+
+    assert!(
+        resp.status().is_success(),
+        "ws-token should allow unauthenticated student requests, got: {}",
+        resp.status()
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn ws_token_rejects_unauthenticated_staff() {
+    let client = Client::new();
+    let base = server_url();
+
+    let resp = client
+        .get(format!("{}/api/auth/ws-token", base))
+        .query(&[
+            ("sessionId", "test-session"),
+            ("role", "staff"),
         ])
         .send()
         .await
@@ -119,7 +143,7 @@ async fn ws_token_rejects_unauthenticated() {
     assert_eq!(
         resp.status(),
         401,
-        "ws-token should reject unauthenticated requests"
+        "ws-token should reject unauthenticated staff requests"
     );
 }
 
@@ -181,12 +205,18 @@ async fn ws_token_accepts_all_valid_roles() {
     let (auth_token, _email) = register_and_login(&client, &base).await;
     
     for role in &["staff", "student", "projector"] {
-        let resp = client
+        let mut req = client
             .get(format!("{}/api/auth/ws-token", base))
             .query(&[
                 ("sessionId", "test-session"),
                 ("role", role),
-            ])
+            ]);
+
+        if *role == "student" {
+            req = req.query(&[("participantId", "participant-123")]);
+        }
+
+        let resp = req
             .header("Authorization", bearer(&auth_token))
             .send()
             .await
@@ -232,5 +262,28 @@ async fn ws_token_accepts_optional_participant_id() {
         resp.status().is_success(),
         "ws-token should accept participantId, got: {}",
         resp.status()
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn ws_token_rejects_student_without_participant_id() {
+    let client = Client::new();
+    let base = server_url();
+
+    let resp = client
+        .get(format!("{}/api/auth/ws-token", base))
+        .query(&[
+            ("sessionId", "test-session"),
+            ("role", "student"),
+        ])
+        .send()
+        .await
+        .expect("ws-token request failed");
+
+    assert_eq!(
+        resp.status(),
+        400,
+        "student ws-token should require participantId"
     );
 }
