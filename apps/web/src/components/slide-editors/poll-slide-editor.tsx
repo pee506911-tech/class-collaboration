@@ -1,6 +1,9 @@
+import { useCallback, useMemo, useRef } from 'react';
+
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Settings } from 'lucide-react';
+import { useBufferedSlideContent } from './use-buffered-slide-content';
 
 interface PollSlideEditorProps {
     content: {
@@ -9,23 +12,47 @@ interface PollSlideEditorProps {
         chartType?: 'bar' | 'pie';
         limitSubmissions?: boolean;
     };
-    onChange: (content: any) => void;
+    onChange: (content: PollSlideEditorProps['content']) => void;
+    onBlur?: () => void;
     disabled: boolean;
 }
 
-export function PollSlideEditor({ content, onChange, disabled }: PollSlideEditorProps) {
+export function PollSlideEditor({ content, onChange, onBlur, disabled }: PollSlideEditorProps) {
     const question = content.question || '';
     const chartType = content.chartType || 'bar';
     const limitSubmissions = content.limitSubmissions !== false;
+    const questionRef = useRef<HTMLInputElement | null>(null);
+    const bufferedContent = useMemo(() => ({ ...content, question }), [content, question]);
+
+    const readCurrentContent = useCallback(() => ({
+        ...content,
+        question: questionRef.current?.value ?? '',
+    }), [content]);
+
+    const syncInputs = useCallback((nextContent: PollSlideEditorProps['content']) => {
+        if (questionRef.current && questionRef.current.value !== (nextContent.question || '')) {
+            questionRef.current.value = nextContent.question || '';
+        }
+    }, []);
+
+    const { scheduleBufferedChange, flushBufferedChange } = useBufferedSlideContent({
+        content: bufferedContent,
+        onChange,
+        onBlur,
+        readCurrentContent,
+        syncInputs,
+    });
 
     return (
         <div className="space-y-6">
             <div className="space-y-3">
                 <label className="text-sm font-medium text-slate-700">Question</label>
                 <Input
-                    value={question}
+                    defaultValue={question}
+                    ref={questionRef}
                     disabled={disabled}
-                    onChange={(e) => onChange({ ...content, question: e.target.value })}
+                    onChange={scheduleBufferedChange}
+                    onBlur={flushBufferedChange}
                     placeholder="Enter your question or title"
                     className="text-lg font-medium px-4 py-3 h-auto"
                 />

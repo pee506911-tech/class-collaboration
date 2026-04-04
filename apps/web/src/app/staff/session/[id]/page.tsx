@@ -2,12 +2,12 @@
 
 export const runtime = 'edge';
 
-import { Dispatch, SetStateAction, useCallback, useEffect, useRef, useState } from 'react';
+import { Dispatch, SetStateAction, startTransition, useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Slide, Session } from 'shared';
 import { getSlides, createSlide, deleteSlide, reorderSlides, getSession, updateSession, updateSlideVisibility, goLiveSession, stopSession, ApiRequestError } from '@/lib/api';
 import { Button } from '@/components/ui/button';
-import { Plus, Layout, BarChart2, HelpCircle, Play, X, CheckSquare, Smartphone, GripVertical, Share2, ArrowLeft, Settings, Edit2, MessageSquare, Users, Eye, EyeOff, Square, Copy, ExternalLink } from 'lucide-react';
+import { Plus, Layout, BarChart2, Play, X, CheckSquare, Smartphone, Share2, ArrowLeft, Settings, Edit2, MessageSquare, Users, Eye, Square, Copy, ExternalLink } from 'lucide-react';
 import Link from 'next/link';
 import { WebSocketProvider, useWebSocket } from '@/lib/websocket';
 import { SlideRenderer } from '@/components/slide-renderer';
@@ -16,6 +16,7 @@ import { QAManager } from '@/components/qa-manager';
 import { SlideTypeSelector } from '@/components/slide-type-selector';
 import { SessionDashboard } from '@/components/session-dashboard';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
+import type { DraggableProvided } from '@hello-pangea/dnd';
 import { toast } from 'sonner';
 import { Breadcrumb } from '@/components/ui/breadcrumb';
 import { EditorSlide, normalizeSlides } from '@/lib/optimistic-slide-queue';
@@ -23,6 +24,7 @@ import { useOptimisticSlideQueue } from '@/lib/use-optimistic-slide-queue';
 import { safeLocalStorageGet } from '@/lib/storage';
 import { formatRequestId, mapHttpErrorToUiMessage } from '@/lib/http-error-ui';
 import { saveSlideUpdate, SlideVersionConflictError } from '@/lib/slide-update';
+import { SlideListItem } from '@/components/slide-list-item';
 
 function reindexSlides(slides: Slide[]): Slide[] {
     return slides.map((slide, index) => ({ ...slide, orderIndex: index }));
@@ -197,8 +199,10 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
             slideType: type as Slide['type'],
             content: getDefaultSlideContent(type as Slide['type']),
         });
-        setPreviewSlideId(tempId);
-        setShowTypeSelector(false);
+        startTransition(() => {
+            setPreviewSlideId(tempId);
+            setShowTypeSelector(false);
+        });
     }
 
     // NAVIGATION REMOVED: Use Mobile Clicker for slide navigation
@@ -208,21 +212,27 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
     const previewIndex = slides.findIndex(s => s.id === previewSlideId);
     const previewSlide = slides[previewIndex] || slides[0];
 
-    const handlePreviewNext = () => {
+    const handlePreviewNext = useCallback(() => {
         if (previewIndex < slides.length - 1) {
-            setPreviewSlideId(slides[previewIndex + 1].id);
+            startTransition(() => {
+                setPreviewSlideId(slides[previewIndex + 1].id);
+            });
         }
-    };
+    }, [previewIndex, slides]);
 
-    const handlePreviewPrev = () => {
+    const handlePreviewPrev = useCallback(() => {
         if (previewIndex > 0) {
-            setPreviewSlideId(slides[previewIndex - 1].id);
+            startTransition(() => {
+                setPreviewSlideId(slides[previewIndex - 1].id);
+            });
         }
-    };
+    }, [previewIndex, slides]);
 
-    const handleSelectSlide = (slideId: string) => {
-        setPreviewSlideId(slideId);
-    };
+    const handleSelectSlide = useCallback((slideId: string) => {
+        startTransition(() => {
+            setPreviewSlideId(slideId);
+        });
+    }, []);
 
     async function handleUpdateSlide(slideId: string, content: Slide['content']) {
         try {
@@ -257,7 +267,9 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
         if (!result.accepted) {
             return;
         }
-        setPreviewSlideId(nextPreviewSlideId);
+        startTransition(() => {
+            setPreviewSlideId(nextPreviewSlideId);
+        });
     }
 
     function handleDuplicateSlide(slideId: string) {
@@ -266,10 +278,12 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
 
         clearInlineError(slideId);
         const tempId = enqueueDuplicateSlide(toSlide(slide));
-        setPreviewSlideId(tempId);
+        startTransition(() => {
+            setPreviewSlideId(tempId);
+        });
     }
 
-    async function handleToggleVisibility(e: React.MouseEvent, slide: Slide) {
+    const handleToggleVisibility = useCallback(async (e: React.MouseEvent, slide: Slide) => {
         e.stopPropagation();
         if ((slide as EditorSlide).optimistic?.isPending) return;
 
@@ -286,7 +300,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
         } finally {
             setIsTogglingVisibility(false);
         }
-    }
+    }, [id, setBaseSlidesSynced, resolveOptimisticId]);
 
     async function handleToggleLive() {
         if (!session) return;
@@ -348,6 +362,31 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
 
     const isStructuralSyncing = hasPendingStructuralMutations || isReordering;
     const isShareEnabled = !(editorSync.dirty || editorSync.saving || isStructuralSyncing || isTogglingVisibility || isSavingSettings);
+    const renderSlideCard = useCallback((
+        slide: EditorSlide,
+        index: number,
+        draggableProvided: DraggableProvided,
+        isDragging: boolean,
+    ) => (
+        <SlideListItem
+            slide={slide}
+            index={index}
+            isPreview={previewSlideId === slide.id}
+            isLive={state?.currentSlideId === slide.id}
+            isDragging={isDragging}
+            isStructuralSyncing={isStructuralSyncing}
+            innerRef={draggableProvided.innerRef}
+            draggableAttributes={{
+                'data-rfd-draggable-context-id': draggableProvided.draggableProps['data-rfd-draggable-context-id'],
+                'data-rfd-draggable-id': draggableProvided.draggableProps['data-rfd-draggable-id'],
+            }}
+            draggableStyle={draggableProvided.draggableProps.style}
+            onTransitionEnd={draggableProvided.draggableProps.onTransitionEnd}
+            dragHandleProps={draggableProvided.dragHandleProps}
+            onSelectSlide={handleSelectSlide}
+            onToggleVisibility={handleToggleVisibility}
+        />
+    ), [handleSelectSlide, handleToggleVisibility, isStructuralSyncing, previewSlideId, state?.currentSlideId]);
 
     return (
         <div className="h-screen bg-slate-50 flex overflow-hidden font-sans text-slate-900">
@@ -393,7 +432,13 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                 )}
 
                 <DragDropContext onDragEnd={onDragEnd}>
-                    <Droppable droppableId="slides-list">
+                    <Droppable
+                        droppableId="slides-list"
+                        renderClone={(provided, snapshot, rubric) => {
+                            const slide = slides[rubric.source.index];
+                            return renderSlideCard(slide, rubric.source.index, provided, snapshot.isDragging);
+                        }}
+                    >
                         {(provided) => (
                             <div
                                 className="flex-1 overflow-y-auto p-3 space-y-2 bg-slate-50/50"
@@ -402,92 +447,17 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                             >
                                 {slides.map((slide, index) => (
                                     <Draggable key={slide.id} draggableId={slide.id} index={index} isDragDisabled={isStructuralSyncing}>
-                                        {(provided, snapshot) => (
-                                            <div
-                                                ref={provided.innerRef}
-                                                {...provided.draggableProps}
-                                                // PREVIEW SELECTION: Click selects for EDITOR PREVIEW (not student view)
-                                                onClick={() => handleSelectSlide(slide.id)}
-                                                style={{
-                                                    ...provided.draggableProps.style,
-                                                    // Performance optimization: skip rendering off-screen slides
-                                                    contentVisibility: 'auto',
-                                                    containIntrinsicSize: '80px', // Estimated slide item height
-                                                }}
-                                                className={`group relative p-3 rounded-xl cursor-pointer transition-all duration-200 border ${previewSlideId === slide.id
-                                                    ? 'bg-white border-blue-600 shadow-md ring-1 ring-blue-600/20 z-10'
-                                                    : state?.currentSlideId === slide.id
-                                                        ? 'bg-green-50 border-green-600 shadow-sm ring-1 ring-green-600/20'
-                                                        : 'bg-white border-slate-200 hover:border-blue-300 hover:shadow-sm'
-                                                    } ${slide.optimistic?.isPending ? 'opacity-90' : ''} ${snapshot.isDragging ? 'shadow-xl ring-2 ring-blue-600 rotate-2 z-50' : ''}`}
-                                                title={
-                                                    previewSlideId === slide.id
-                                                        ? "Selected for Preview"
-                                                        : state?.currentSlideId === slide.id
-                                                            ? "Active for Students (via Mobile Clicker)"
-                                                            : "Click to preview"
-                                                }
-                                            >
-                                                <div className="flex items-center gap-3">
-                                                    <div {...provided.dragHandleProps} className="text-slate-300 hover:text-slate-500 cursor-grab active:cursor-grabbing p-1 -ml-1">
-                                                        <GripVertical className="w-4 h-4" />
-                                                    </div>
-                                                    <div className="flex-1 min-w-0">
-                                                        <div className="flex items-center justify-between mb-2">
-                                                            <div className="flex items-center gap-1">
-                                                                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${previewSlideId === slide.id
-                                                                    ? 'bg-blue-100 text-blue-700'
-                                                                    : state?.currentSlideId === slide.id
-                                                                        ? 'bg-green-100 text-green-700'
-                                                                        : 'bg-slate-100 text-slate-500'
-                                                                    }`}>
-                                                                    #{index + 1}
-                                                                </span>
-                                                                {state?.currentSlideId === slide.id && (
-                                                                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-green-600 text-white">
-                                                                        LIVE
-                                                                    </span>
-                                                                )}
-                                                                {slide.isHidden && (
-                                                                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-slate-200 text-slate-500 flex items-center gap-1">
-                                                                        <EyeOff className="w-3 h-3" /> HIDDEN
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                            <div className="flex items-center gap-1">
-                                                                <Button
-                                                                    variant="ghost"
-                                                                    size="icon"
-                                                                    className={`h-6 w-6 ${slide.isHidden ? 'text-slate-400' : 'text-slate-300 hover:text-slate-500'}`}
-                                                                    disabled={slide.optimistic?.isPending}
-                                                                    onClick={(e) => handleToggleVisibility(e, slide)}
-                                                                    title={slide.isHidden ? "Show Slide" : "Hide Slide"}
-                                                                >
-                                                                    {slide.isHidden ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                                                                </Button>
-                                                                {slide.type === 'poll' && <BarChart2 className="w-3 h-3 text-slate-400" />}
-                                                                {slide.type === 'quiz' && <HelpCircle className="w-3 h-3 text-yellow-500" />}
-                                                                {slide.type === 'static' && <Layout className="w-3 h-3 text-slate-400" />}
-                                                            </div>
-                                                        </div>
-                                                        <p className={`text-xs font-medium truncate ${slide.isHidden ? 'text-slate-400 italic' : 'text-slate-700'}`}>
-                                                            {slide.content.question || slide.content.title || 'Untitled Slide'}
-                                                        </p>
-                                                        {slide.optimistic?.error && (
-                                                            <p className="mt-2 text-[11px] text-rose-600 truncate">
-                                                                {slide.optimistic.error}
-                                                            </p>
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        )}
+                                        {(provided, snapshot) => renderSlideCard(slide, index, provided, snapshot.isDragging)}
                                     </Draggable>
                                 ))}
                                 {provided.placeholder}
                                 <Button
                                     variant="outline"
-                                    onClick={() => setShowTypeSelector(true)}
+                                    onClick={() => {
+                                        startTransition(() => {
+                                            setShowTypeSelector(true);
+                                        });
+                                    }}
                                     disabled={isStructuralSyncing}
                                     className="w-full h-12 border-dashed border-slate-300 text-slate-500 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50"
                                 >
@@ -690,7 +660,11 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                 <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4 backdrop-blur-sm">
                     <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full p-8 relative animate-in fade-in zoom-in-95 duration-200">
                         <button
-                            onClick={() => setShowTypeSelector(false)}
+                            onClick={() => {
+                                startTransition(() => {
+                                    setShowTypeSelector(false);
+                                });
+                            }}
                             className="absolute top-6 right-6 text-slate-400 hover:text-slate-600 transition-colors"
                         >
                             <X className="w-6 h-6" />

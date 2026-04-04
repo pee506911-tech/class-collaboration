@@ -114,7 +114,7 @@ describe('SlideEditorPanel', () => {
         });
 
         await act(async () => {
-            vi.advanceTimersByTime(500);
+            vi.advanceTimersByTime(2500);
         });
 
         expect(onUpdate).toHaveBeenCalledTimes(1);
@@ -148,7 +148,7 @@ describe('SlideEditorPanel', () => {
         });
 
         await act(async () => {
-            vi.advanceTimersByTime(500);
+            vi.advanceTimersByTime(2500);
         });
 
         expect(onUpdate).toHaveBeenCalledTimes(2);
@@ -202,7 +202,7 @@ describe('SlideEditorPanel', () => {
     // ── Characterization: Field Updates ──
 
     describe('field updates', () => {
-        it('marks dirty immediately when typing', async () => {
+        it('stays clean while typing until the buffered change is captured', async () => {
             vi.useFakeTimers();
             const onSyncStatusChange = vi.fn();
 
@@ -228,12 +228,69 @@ describe('SlideEditorPanel', () => {
                 fireEvent.change(input, { target: { value: 'Changed' } });
             });
 
-            // Dirty should be true
             const lastCall = onSyncStatusChange.mock.calls.at(-1)![0];
-            expect(lastCall.dirty).toBe(true);
+            expect(lastCall.dirty).toBe(false);
+
+            await act(async () => {
+                vi.advanceTimersByTime(2000);
+            });
+
+            const bufferedCall = onSyncStatusChange.mock.calls.at(-1)![0];
+            expect(bufferedCall.dirty).toBe(true);
         });
 
-        it('clears lastError when typing again', async () => {
+        it('flushes a buffered text edit on blur without waiting for idle capture', async () => {
+            vi.useFakeTimers();
+            const onUpdate = vi.fn().mockResolvedValue(undefined);
+
+            render(
+                <SlideEditorPanel
+                    slide={makeSlide()}
+                    onUpdate={onUpdate}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            const input = screen.getByDisplayValue('Original');
+
+            await act(async () => {
+                fireEvent.change(input, { target: { value: 'Changed' } });
+                fireEvent.blur(input);
+            });
+
+            expect(onUpdate).toHaveBeenCalledWith({
+                title: 'Changed',
+                body: 'Body',
+            });
+        });
+
+        it('preserves in-progress content edits when switching tabs', async () => {
+            render(
+                <SlideEditorPanel
+                    slide={makeSlide()}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            const input = screen.getByDisplayValue('Original');
+
+            await act(async () => {
+                fireEvent.change(input, { target: { value: 'Buffered title' } });
+            });
+
+            await act(async () => {
+                fireEvent.click(screen.getByRole('tab', { name: /settings/i }));
+            });
+
+            await act(async () => {
+                fireEvent.click(screen.getByRole('tab', { name: /content/i }));
+            });
+
+            expect(screen.getByDisplayValue('Buffered title')).toBeTruthy();
+        });
+
+        it('clears lastError when the next buffered edit is captured', async () => {
             vi.useFakeTimers();
             const onSyncStatusChange = vi.fn();
             const onUpdate = vi.fn().mockRejectedValueOnce(new Error('Network error'));
@@ -249,29 +306,25 @@ describe('SlideEditorPanel', () => {
 
             const input = screen.getByDisplayValue('Original');
 
-            // Type and trigger a failed save
             await act(async () => {
                 fireEvent.change(input, { target: { value: 'Draft' } });
             });
             await act(async () => {
-                vi.advanceTimersByTime(500);
+                vi.advanceTimersByTime(2500);
             });
 
-            // The pump runs synchronously with fake timers after advancing
-            // Wait for the error state
             await vi.waitFor(() => {
-                const lastCall = onSyncStatusChange.mock.calls.at(-1)![0];
-                expect(lastCall.lastError).toBe('Network error');
+                const latestCall = onSyncStatusChange.mock.calls.at(-1)![0];
+                expect(latestCall.lastError).toBe('Network error');
             });
 
-            // Type again — should clear the error
             await act(async () => {
                 fireEvent.change(input, { target: { value: 'Draft v2' } });
+                fireEvent.blur(input);
             });
 
-            // Error should be cleared immediately (updateContent calls setLastErrorState)
-            const lastCall = onSyncStatusChange.mock.calls.at(-1)![0];
-            expect(lastCall.lastError).toBe(null);
+            const clearedCall = onSyncStatusChange.mock.calls.at(-1)![0];
+            expect(clearedCall.lastError).toBe(null);
         });
     });
 
@@ -331,6 +384,10 @@ describe('SlideEditorPanel', () => {
                 fireEvent.change(input, { target: { value: 'Bad draft' } });
             });
 
+            await act(async () => {
+                vi.advanceTimersByTime(2000);
+            });
+
             expect(screen.getByText('Unsaved changes')).toBeTruthy();
             expect(screen.getByRole('button', { name: /save now/i })).toBeEnabled();
         });
@@ -353,7 +410,7 @@ describe('SlideEditorPanel', () => {
                 fireEvent.change(input, { target: { value: 'Bad draft' } });
             });
             await act(async () => {
-                vi.advanceTimersByTime(500);
+                vi.advanceTimersByTime(2500);
             });
 
             // Should show error in the UI
@@ -384,7 +441,7 @@ describe('SlideEditorPanel', () => {
 
             // Trigger save — it will fail
             await act(async () => {
-                vi.advanceTimersByTime(500);
+                vi.advanceTimersByTime(2500);
             });
 
             // Error should appear
@@ -418,7 +475,7 @@ describe('SlideEditorPanel', () => {
                 fireEvent.change(input, { target: { value: 'Retry draft' } });
             });
             await act(async () => {
-                vi.advanceTimersByTime(500);
+                vi.advanceTimersByTime(2500);
             });
             await act(async () => {
                 fireEvent.click(screen.getByRole('button', { name: /retry/i }));
@@ -456,7 +513,7 @@ describe('SlideEditorPanel', () => {
                 fireEvent.change(input, { target: { value: 'Pending' } });
             });
             await act(async () => {
-                vi.advanceTimersByTime(500);
+                vi.advanceTimersByTime(2500);
             });
 
             // Should be in saving state
@@ -602,6 +659,67 @@ describe('SlideEditorPanel', () => {
             });
 
             expect(redInput).toHaveValue('Crimson');
+        });
+
+        it('stays clean while typing option text until the buffered change is captured', async () => {
+            vi.useFakeTimers();
+            const onSyncStatusChange = vi.fn();
+
+            render(
+                <SlideEditorPanel
+                    slide={makePollSlide()}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                    onSyncStatusChange={onSyncStatusChange}
+                />,
+            );
+
+            expect(onSyncStatusChange).toHaveBeenLastCalledWith({
+                dirty: false,
+                saving: false,
+                lastError: null,
+            });
+
+            const redInput = screen.getByDisplayValue('Red');
+
+            await act(async () => {
+                fireEvent.change(redInput, { target: { value: 'Crimson' } });
+            });
+
+            const immediateCall = onSyncStatusChange.mock.calls.at(-1)![0];
+            expect(immediateCall.dirty).toBe(false);
+
+            await act(async () => {
+                vi.advanceTimersByTime(2000);
+            });
+
+            const bufferedCall = onSyncStatusChange.mock.calls.at(-1)![0];
+            expect(bufferedCall.dirty).toBe(true);
+        });
+
+        it('keeps the latest option text when adding another option before idle save', async () => {
+            vi.useFakeTimers();
+
+            render(
+                <SlideEditorPanel
+                    slide={makePollSlide()}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            const redInput = screen.getByDisplayValue('Red');
+
+            await act(async () => {
+                fireEvent.change(redInput, { target: { value: 'Crimson' } });
+            });
+
+            await act(async () => {
+                fireEvent.click(screen.getByRole('button', { name: /add option/i }));
+            });
+
+            expect(screen.getByDisplayValue('Crimson')).toBeTruthy();
+            expect(screen.getByDisplayValue('Option 3')).toBeTruthy();
         });
     });
 
@@ -753,7 +871,7 @@ describe('SlideEditorPanel', () => {
 
             // After debounce window, should save
             await act(async () => {
-                vi.advanceTimersByTime(500);
+                vi.advanceTimersByTime(2500);
             });
 
             expect(onUpdate).toHaveBeenCalledWith({

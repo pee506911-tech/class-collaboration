@@ -1,6 +1,8 @@
-import { Button } from '@/components/ui/button';
+import { useCallback, useMemo, useRef } from 'react';
+
 import { Input } from '@/components/ui/input';
 import { Clock, Settings } from 'lucide-react';
+import { useBufferedSlideContent } from './use-buffered-slide-content';
 
 interface QuizSlideEditorProps {
     content: {
@@ -10,24 +12,70 @@ interface QuizSlideEditorProps {
         timerDuration?: number;
         limitSubmissions?: boolean;
     };
-    onChange: (content: any) => void;
+    onChange: (content: QuizSlideEditorProps['content']) => void;
+    onBlur?: () => void;
     disabled: boolean;
 }
 
-export function QuizSlideEditor({ content, onChange, disabled }: QuizSlideEditorProps) {
+export function QuizSlideEditor({ content, onChange, onBlur, disabled }: QuizSlideEditorProps) {
     const question = content.question || '';
     const points = content.points || 1000;
     const timerDuration = content.timerDuration || 30;
     const limitSubmissions = content.limitSubmissions !== false;
+    const questionRef = useRef<HTMLInputElement | null>(null);
+    const timerDurationRef = useRef<HTMLInputElement | null>(null);
+    const pointsRef = useRef<HTMLInputElement | null>(null);
+    const bufferedContent = useMemo(
+        () => ({ ...content, question, points, timerDuration }),
+        [content, points, question, timerDuration],
+    );
+
+    const parseNumber = useCallback((value: string | undefined, fallback: number) => {
+        const parsed = Number.parseInt(value || '', 10);
+        return Number.isNaN(parsed) ? fallback : parsed;
+    }, []);
+
+    const readCurrentContent = useCallback(() => ({
+        ...content,
+        question: questionRef.current?.value ?? '',
+        timerDuration: parseNumber(timerDurationRef.current?.value, timerDuration),
+        points: parseNumber(pointsRef.current?.value, points),
+    }), [content, parseNumber, points, timerDuration]);
+
+    const syncInputs = useCallback((nextContent: QuizSlideEditorProps['content']) => {
+        if (questionRef.current && questionRef.current.value !== (nextContent.question || '')) {
+            questionRef.current.value = nextContent.question || '';
+        }
+
+        const nextTimerDuration = String(nextContent.timerDuration || 30);
+        if (timerDurationRef.current && timerDurationRef.current.value !== nextTimerDuration) {
+            timerDurationRef.current.value = nextTimerDuration;
+        }
+
+        const nextPoints = String(nextContent.points || 1000);
+        if (pointsRef.current && pointsRef.current.value !== nextPoints) {
+            pointsRef.current.value = nextPoints;
+        }
+    }, []);
+
+    const { scheduleBufferedChange, flushBufferedChange } = useBufferedSlideContent({
+        content: bufferedContent,
+        onChange,
+        onBlur,
+        readCurrentContent,
+        syncInputs,
+    });
 
     return (
         <div className="space-y-6">
             <div className="space-y-3">
                 <label className="text-sm font-medium text-slate-700">Question</label>
                 <Input
-                    value={question}
+                    defaultValue={question}
+                    ref={questionRef}
                     disabled={disabled}
-                    onChange={(e) => onChange({ ...content, question: e.target.value })}
+                    onChange={scheduleBufferedChange}
+                    onBlur={flushBufferedChange}
                     placeholder="Enter your question or title"
                     className="text-lg font-medium px-4 py-3 h-auto"
                 />
@@ -43,8 +91,10 @@ export function QuizSlideEditor({ content, onChange, disabled }: QuizSlideEditor
                         <Input
                             type="number"
                             disabled={disabled}
-                            value={timerDuration}
-                            onChange={(e) => onChange({ ...content, timerDuration: parseInt(e.target.value, 10) })}
+                            defaultValue={timerDuration}
+                            ref={timerDurationRef}
+                            onChange={scheduleBufferedChange}
+                            onBlur={flushBufferedChange}
                         />
                     </div>
                     <div className="space-y-2">
@@ -52,8 +102,10 @@ export function QuizSlideEditor({ content, onChange, disabled }: QuizSlideEditor
                         <Input
                             type="number"
                             disabled={disabled}
-                            value={points}
-                            onChange={(e) => onChange({ ...content, points: parseInt(e.target.value, 10) })}
+                            defaultValue={points}
+                            ref={pointsRef}
+                            onChange={scheduleBufferedChange}
+                            onBlur={flushBufferedChange}
                         />
                     </div>
                 </div>

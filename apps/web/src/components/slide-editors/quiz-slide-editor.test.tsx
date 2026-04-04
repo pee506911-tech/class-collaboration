@@ -1,3 +1,4 @@
+import { act } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { QuizSlideEditor } from './quiz-slide-editor';
@@ -50,7 +51,8 @@ describe('QuizSlideEditor', () => {
         expect(numberInputs.length).toBeGreaterThanOrEqual(2);
     });
 
-    it('calls onChange when timer duration changes', () => {
+    it('buffers timer duration changes until blur', async () => {
+        vi.useFakeTimers();
         const onChange = vi.fn();
         render(
             <QuizSlideEditor
@@ -64,10 +66,40 @@ describe('QuizSlideEditor', () => {
         const timerInput = timerInputs.find((el) => el.getAttribute('value') === '30');
         if (timerInput) {
             fireEvent.change(timerInput, { target: { value: '60' } });
+
+            expect(onChange).not.toHaveBeenCalled();
+
+            await act(async () => {
+                fireEvent.blur(timerInput);
+            });
+
             expect(onChange).toHaveBeenCalledWith(
                 expect.objectContaining({ timerDuration: 60 }),
             );
         }
+    });
+
+    it('flushes question changes after idle time', async () => {
+        vi.useFakeTimers();
+        const onChange = vi.fn();
+        render(
+            <QuizSlideEditor
+                content={makeContent()}
+                onChange={onChange}
+                disabled={false}
+            />,
+        );
+
+        const questionInput = screen.getByDisplayValue('What is 2+2?');
+        fireEvent.change(questionInput, { target: { value: 'What is 3+3?' } });
+
+        await act(async () => {
+            vi.advanceTimersByTime(2000);
+        });
+
+        expect(onChange).toHaveBeenCalledWith(
+            expect.objectContaining({ question: 'What is 3+3?' }),
+        );
     });
 
     it('renders limit submissions toggle', () => {

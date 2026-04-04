@@ -1,3 +1,4 @@
+import { act } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { PollSlideEditor } from './poll-slide-editor';
@@ -44,7 +45,8 @@ describe('PollSlideEditor', () => {
         expect(screen.queryByDisplayValue('Red')).toBeNull();
     });
 
-    it('calls onChange when question changes', () => {
+    it('buffers question changes until blur', async () => {
+        vi.useFakeTimers();
         const onChange = vi.fn();
         render(
             <PollSlideEditor
@@ -57,8 +59,37 @@ describe('PollSlideEditor', () => {
         const questionInput = screen.getByDisplayValue('Favorite color?');
         fireEvent.change(questionInput, { target: { value: 'New question?' } });
 
+        expect(onChange).not.toHaveBeenCalled();
+
+        await act(async () => {
+            fireEvent.blur(questionInput);
+        });
+
         expect(onChange).toHaveBeenCalledWith(
             expect.objectContaining({ question: 'New question?' }),
+        );
+    });
+
+    it('flushes question changes after idle time', async () => {
+        vi.useFakeTimers();
+        const onChange = vi.fn();
+        render(
+            <PollSlideEditor
+                content={makeContent()}
+                onChange={onChange}
+                disabled={false}
+            />,
+        );
+
+        const questionInput = screen.getByDisplayValue('Favorite color?');
+        fireEvent.change(questionInput, { target: { value: 'Buffered poll question?' } });
+
+        await act(async () => {
+            vi.advanceTimersByTime(2000);
+        });
+
+        expect(onChange).toHaveBeenCalledWith(
+            expect.objectContaining({ question: 'Buffered poll question?' }),
         );
     });
 

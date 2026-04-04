@@ -1,5 +1,5 @@
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
 import { MultipleChoiceSlideEditor } from './multiple-choice-slide-editor';
 
 function makeContent(overrides = {}) {
@@ -27,6 +27,31 @@ describe('MultipleChoiceSlideEditor', () => {
         );
 
         expect(screen.getByDisplayValue('Select all that apply')).toBeTruthy();
+    });
+
+    it('buffers question changes until blur', async () => {
+        vi.useFakeTimers();
+        const onChange = vi.fn();
+        render(
+            <MultipleChoiceSlideEditor
+                content={makeContent()}
+                onChange={onChange}
+                disabled={false}
+            />,
+        );
+
+        const questionInput = screen.getByDisplayValue('Select all that apply');
+        fireEvent.change(questionInput, { target: { value: 'Updated question' } });
+
+        expect(onChange).not.toHaveBeenCalled();
+
+        await act(async () => {
+            fireEvent.blur(questionInput);
+        });
+
+        expect(onChange).toHaveBeenCalledWith(
+            expect.objectContaining({ question: 'Updated question' }),
+        );
     });
 
     it('renders allow multiple selection toggle', () => {
