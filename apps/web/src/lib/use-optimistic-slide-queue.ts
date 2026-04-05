@@ -135,7 +135,6 @@ export function useOptimisticSlideQueue({
                         sessionId,
                         slideId: serverSlide.id,
                         content: latestDraft,
-                        baseVersion: serverSlide.version,
                     });
 
                 setBaseSlides((prevSlides) => applyCreateLikeSuccessToBaseSlides(prevSlides, head, persistedSlide, state.tempIdMap));
@@ -299,15 +298,13 @@ async function persistResolvedDraft({
     sessionId,
     slideId,
     content,
-    baseVersion,
 }: {
     sessionId: string;
     slideId: string;
     content: Slide['content'];
-    baseVersion: number;
 }) {
     try {
-        return await updateSlide(sessionId, slideId, content, baseVersion);
+        return await updateSlide(sessionId, slideId, content);
     } catch (error) {
         if (error instanceof ApiRequestError && error.status === 404) {
             throw new ApiRequestError('Slide is still confirming on the server', {

@@ -1,7 +1,7 @@
 import type { Dispatch, SetStateAction } from 'react';
 import type { Slide } from 'shared';
 
-import { ApiRequestError, updateSlide as updateSlideApi } from '@/lib/api';
+import { updateSlide as updateSlideApi } from '@/lib/api';
 
 type SaveSlideUpdateArgs = {
     sessionId: string;
@@ -11,22 +11,11 @@ type SaveSlideUpdateArgs = {
     resolveOptimisticId: (id: string) => string | null | undefined;
     setBaseSlides: Dispatch<SetStateAction<Slide[]>>;
     saveSlide?: typeof updateSlideApi;
-    refreshSlides: () => Promise<void>;
 };
 
 type SaveSlideUpdateResult =
     | { status: 'saved'; slide: Slide }
     | { status: 'noop' };
-
-export class SlideVersionConflictError extends Error {
-    constructor(message: string) {
-        super(message);
-        this.name = 'SlideVersionConflictError';
-    }
-}
-
-const CONFLICT_DRAFT_PRESERVED_MESSAGE =
-    'A newer version of this slide was saved elsewhere. Your draft is still in the editor; review and save again.';
 
 export async function saveSlideUpdate({
     sessionId,
@@ -36,7 +25,6 @@ export async function saveSlideUpdate({
     resolveOptimisticId,
     setBaseSlides,
     saveSlide = updateSlideApi,
-    refreshSlides,
 }: SaveSlideUpdateArgs): Promise<SaveSlideUpdateResult> {
     const resolvedSlideId = resolveOptimisticId(slideId) ?? slideId;
     const existingSlide = getBaseSlides().find((slide) => slide.id === resolvedSlideId);
@@ -51,12 +39,7 @@ export async function saveSlideUpdate({
     );
 
     try {
-        const savedSlide = await saveSlide(
-            sessionId,
-            resolvedSlideId,
-            content,
-            existingSlide.version,
-        );
+        const savedSlide = await saveSlide(sessionId, resolvedSlideId, content);
         setBaseSlides((prevSlides) =>
             prevSlides.map((slide) =>
                 slide.id === resolvedSlideId
@@ -71,29 +54,6 @@ export async function saveSlideUpdate({
         );
         return { status: 'saved', slide: savedSlide };
     } catch (error) {
-        if (isSlideVersionConflict(error)) {
-            await refreshSlides();
-            throw new SlideVersionConflictError(
-                CONFLICT_DRAFT_PRESERVED_MESSAGE,
-            );
-        }
-
-        setBaseSlides((prevSlides) =>
-            prevSlides.map((slide) =>
-                slide.id === resolvedSlideId
-                    ? {
-                        ...slide,
-                        type: existingSlide.type,
-                        content: existingSlide.content,
-                        version: existingSlide.version,
-                    }
-                    : slide,
-            ),
-        );
         throw error;
     }
-}
-
-export function isSlideVersionConflict(error: unknown): error is ApiRequestError {
-    return error instanceof ApiRequestError && error.status === 409;
 }

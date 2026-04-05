@@ -303,7 +303,6 @@ export async function updateSlide(
     sessionId: string,
     slideId: string,
     content: unknown,
-    baseVersion?: number,
 ): Promise<Slide> {
     let res: Response;
 
@@ -313,7 +312,6 @@ export async function updateSlide(
             headers: getHeaders(),
             body: JSON.stringify({
                 content,
-                ...(baseVersion !== undefined ? { baseVersion } : {}),
             }),
         });
     } catch (error) {

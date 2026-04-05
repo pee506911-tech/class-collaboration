@@ -201,7 +201,6 @@ vi.mock('@/lib/use-optimistic-slide-queue', () => ({
 
 vi.mock('@/lib/slide-update', () => ({
     saveSlideUpdate: mockSaveSlideUpdate,
-    SlideVersionConflictError: class SlideVersionConflictError extends Error {},
 }));
 
 describe('SlideEditor session loading', () => {
@@ -801,7 +800,7 @@ describe('SlideEditor session loading', () => {
         const { rerender } = render(<SlideEditor />);
 
         fireEvent.click(await screen.findByText('Slide 24 draft'));
-        expect(await screen.findByText('Preview: Slide 3')).toBeInTheDocument();
+        expect(await screen.findByDisplayValue('Slide 24 draft')).toBeInTheDocument();
 
         queueMockState.tempIdMap = { 'temp-duplicate': 'slide-twenty-four' };
         queueMockState.slides = [
@@ -845,8 +844,8 @@ describe('SlideEditor session loading', () => {
 
         rerender(<SlideEditor />);
 
-        expect(await screen.findByText('Preview: Slide 3')).toBeInTheDocument();
-        expect(screen.queryByText('Preview: Slide 1')).not.toBeInTheDocument();
+        expect(await screen.findByDisplayValue('Slide 24 draft')).toBeInTheDocument();
+        expect(screen.queryByDisplayValue('Slide 1')).not.toBeInTheDocument();
     });
 
     it('keeps temp slides editable and queues local saves while they are still syncing', async () => {
@@ -1220,7 +1219,7 @@ describe('SlideEditor session loading', () => {
         expect(screen.queryByText('This slide is temporarily locked while structural changes are syncing.')).not.toBeInTheDocument();
     });
 
-    it('debounces websocket slide updates into an authoritative refresh request', async () => {
+    it('does not trigger editor slide refetches from websocket slide updates', async () => {
         mockStorage.set('token', 'valid-token');
 
         vi.mocked(httpFetch).mockImplementation(async (url: string) => {
@@ -1277,21 +1276,14 @@ describe('SlideEditor session loading', () => {
 
         await screen.findByDisplayValue('Agenda');
         expect(mockRequestRefreshAfterDrain).not.toHaveBeenCalled();
-        expect(debounceMockState.lastValue).toBe(0);
-        expect(debounceMockState.lastDelayMs).toBe(200);
+        expect(debounceMockState.callback).toBeNull();
 
         act(() => {
             wsMockState.lastSlideUpdate = 1_234;
             wsMockState.setLastSlideUpdate?.(1_234);
         });
 
-        expect(debounceMockState.lastValue).toBe(1_234);
-        expect(debounceMockState.lastDelayMs).toBe(200);
+        expect(debounceMockState.callback).toBeNull();
         expect(mockRequestRefreshAfterDrain).not.toHaveBeenCalled();
-
-        act(() => {
-            debounceMockState.callback?.(1_234);
-        });
-        expect(mockRequestRefreshAfterDrain).toHaveBeenCalledTimes(1);
     });
 });

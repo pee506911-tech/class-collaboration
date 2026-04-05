@@ -20,7 +20,7 @@ describe('updateSlide', () => {
         vi.restoreAllMocks();
     });
 
-    it('sends content and baseVersion in the request body', async () => {
+    it('sends only content in the request body', async () => {
         const fetchMock = vi.fn().mockResolvedValue(
             mockJsonResponse({
                 success: true,
@@ -37,7 +37,7 @@ describe('updateSlide', () => {
         );
         global.fetch = fetchMock as typeof fetch;
 
-        const slide = await updateSlide('session-1', 'slide-1', { title: 'Saved', body: 'Saved body' }, 1);
+        const slide = await updateSlide('session-1', 'slide-1', { title: 'Saved', body: 'Saved body' });
 
         expect(slide.version).toBe(2);
         expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -46,7 +46,6 @@ describe('updateSlide', () => {
         expect(options.method).toBe('PUT');
         expect(JSON.parse(String(options.body))).toEqual({
             content: { title: 'Saved', body: 'Saved body' },
-            baseVersion: 1,
         });
     });
 
@@ -71,7 +70,7 @@ describe('updateSlide', () => {
         global.fetch = fetchMock as typeof fetch;
 
         await expect(
-            updateSlide('session-1', 'slide-1', { title: 'Queued', body: 'Queued body' }, 1),
+            updateSlide('session-1', 'slide-1', { title: 'Queued', body: 'Queued body' }),
         ).resolves.toMatchObject({
             version: 2,
             content: { title: 'Queued', body: 'Queued body' },
@@ -95,7 +94,7 @@ describe('updateSlide', () => {
         global.fetch = fetchMock as typeof fetch;
 
         await expect(
-            updateSlide('session-1', 'slide-1', { title: 'Saved', body: 'Saved body' }, 1),
+            updateSlide('session-1', 'slide-1', { title: 'Saved', body: 'Saved body' }),
         ).rejects.toEqual(
             expect.objectContaining({
                 status: 409,
@@ -129,7 +128,7 @@ describe('updateSlide', () => {
             );
         global.fetch = fetchMock as typeof fetch;
 
-        const updatePromise = updateSlide('session-1', 'slide-1', { title: 'Saved', body: 'Saved body' }, 1);
+        const updatePromise = updateSlide('session-1', 'slide-1', { title: 'Saved', body: 'Saved body' });
 
         await vi.advanceTimersByTimeAsync(1000);
 

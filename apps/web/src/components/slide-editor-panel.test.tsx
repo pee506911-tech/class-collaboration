@@ -158,9 +158,10 @@ describe('SlideEditorPanel', () => {
         });
     });
 
-    it('keeps the local draft visible when a conflicting server snapshot arrives mid-save', async () => {
+    it('keeps the local draft visible when a newer server snapshot arrives mid-save', async () => {
         vi.useFakeTimers();
 
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
         const firstSave = deferred<void>();
         const onUpdate = vi.fn().mockReturnValueOnce(firstSave.promise);
         const onSave = vi.fn();
@@ -214,10 +215,9 @@ describe('SlideEditorPanel', () => {
         });
 
         expect(screen.getByDisplayValue('Local draft')).toBeInTheDocument();
-        expect(screen.getByText('Save failed.')).toBeInTheDocument();
-        expect(
-            screen.getByText('A newer version of this slide was saved elsewhere. Your draft is still in the editor; review and save again.'),
-        ).toBeInTheDocument();
+        expect(screen.queryByText('Save failed.')).not.toBeInTheDocument();
+        expect(screen.queryByText('A newer version of this slide was saved elsewhere. Your draft is still in the editor; review and save again.')).not.toBeInTheDocument();
+        expect(errorSpy).toHaveBeenCalledWith('Failed to save slide draft', expect.any(Error));
     });
 
     it('cancels pending save and does not flush when unmounting (slide deleted)', async () => {
@@ -264,26 +264,17 @@ describe('SlideEditorPanel', () => {
     // ── Characterization: Field Updates ──
 
     describe('field updates', () => {
-        it('stays clean while typing until the buffered change is captured', async () => {
+        it('does not save a text edit until the debounce window elapses', async () => {
             vi.useFakeTimers();
-            const onSyncStatusChange = vi.fn();
+            const onUpdate = vi.fn().mockResolvedValue(undefined);
 
             render(
                 <SlideEditorPanel
                     slide={makeSlide()}
-                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onUpdate={onUpdate}
                     onSave={vi.fn()}
-                    onSyncStatusChange={onSyncStatusChange}
                 />,
             );
-
-            // Initial status should be clean
-            expect(onSyncStatusChange).toHaveBeenLastCalledWith({
-                dirty: false,
-                saving: false,
-                lastError: null,
-                phase: 'idle',
-            });
 
             const input = screen.getByDisplayValue('Original');
 
@@ -291,15 +282,16 @@ describe('SlideEditorPanel', () => {
                 fireEvent.change(input, { target: { value: 'Changed' } });
             });
 
-            const lastCall = onSyncStatusChange.mock.calls.at(-1)![0];
-            expect(lastCall.dirty).toBe(false);
+            expect(onUpdate).not.toHaveBeenCalled();
 
             await act(async () => {
-                vi.advanceTimersByTime(2000);
+                vi.advanceTimersByTime(2500);
             });
 
-            const bufferedCall = onSyncStatusChange.mock.calls.at(-1)![0];
-            expect(bufferedCall.dirty).toBe(true);
+            expect(onUpdate).toHaveBeenCalledWith({
+                title: 'Changed',
+                body: 'Body',
+            });
         });
 
         it('flushes a buffered text edit on blur without waiting for idle capture', async () => {
@@ -353,9 +345,9 @@ describe('SlideEditorPanel', () => {
             expect(screen.getByDisplayValue('Buffered title')).toBeTruthy();
         });
 
-        it('clears lastError when the next buffered edit is captured', async () => {
+        it('keeps the local draft visible and logs when a save fails', async () => {
             vi.useFakeTimers();
-            const onSyncStatusChange = vi.fn();
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
             const onUpdate = vi.fn().mockRejectedValueOnce(new Error('Network error'));
 
             render(
@@ -363,7 +355,6 @@ describe('SlideEditorPanel', () => {
                     slide={makeSlide()}
                     onUpdate={onUpdate}
                     onSave={vi.fn()}
-                    onSyncStatusChange={onSyncStatusChange}
                 />,
             );
 
@@ -377,17 +368,12 @@ describe('SlideEditorPanel', () => {
             });
 
             await vi.waitFor(() => {
-                const latestCall = onSyncStatusChange.mock.calls.at(-1)![0];
-                expect(latestCall.lastError).toBe('Network error');
+                expect(errorSpy).toHaveBeenCalledWith('Failed to save slide draft', expect.any(Error));
             });
 
-            await act(async () => {
-                fireEvent.change(input, { target: { value: 'Draft v2' } });
-                fireEvent.blur(input);
-            });
-
-            const clearedCall = onSyncStatusChange.mock.calls.at(-1)![0];
-            expect(clearedCall.lastError).toBe(null);
+            expect(screen.getByDisplayValue('Draft')).toBeInTheDocument();
+            expect(screen.queryByText('Save failed.')).not.toBeInTheDocument();
+            expect(screen.queryByText('Network error')).not.toBeInTheDocument();
         });
     });
 
@@ -427,36 +413,9 @@ describe('SlideEditorPanel', () => {
     // ── Characterization: Error Handling ──
 
     describe('error handling', () => {
-        it('shows calm saved and unsaved states in the editor chrome', async () => {
+        it('does not render sync status chrome or retry controls', async () => {
             vi.useFakeTimers();
-
-            render(
-                <SlideEditorPanel
-                    slide={makeSlide()}
-                    onUpdate={vi.fn().mockResolvedValue(undefined)}
-                    onSave={vi.fn()}
-                />,
-            );
-
-            expect(screen.getByText('Saved')).toBeTruthy();
-            expect(screen.getByRole('button', { name: /all saved/i })).toBeDisabled();
-
-            const input = screen.getByDisplayValue('Original');
-
-            await act(async () => {
-                fireEvent.change(input, { target: { value: 'Bad draft' } });
-            });
-
-            await act(async () => {
-                vi.advanceTimersByTime(2000);
-            });
-
-            expect(screen.getByText('Unsaved changes')).toBeTruthy();
-            expect(screen.getByRole('button', { name: /save now/i })).toBeEnabled();
-        });
-
-        it('shows error message when save fails', async () => {
-            vi.useFakeTimers();
+            const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
             const onUpdate = vi.fn().mockRejectedValue(new Error('Failed to save'));
 
             render(
@@ -476,122 +435,14 @@ describe('SlideEditorPanel', () => {
                 vi.advanceTimersByTime(2500);
             });
 
-            // Should show error in the UI
-            expect(screen.getByText('Save failed.')).toBeTruthy();
-            expect(screen.getByText('Failed to save')).toBeTruthy();
-            expect(screen.getByText(/Auto-save paused. Failed to save/i)).toBeTruthy();
-        });
-
-        it('allows retry after error', async () => {
-            vi.useFakeTimers();
-            const onUpdate = vi.fn()
-                .mockRejectedValueOnce(new Error('Network error'))
-                .mockResolvedValue(undefined);
-
-            render(
-                <SlideEditorPanel
-                    slide={makeSlide()}
-                    onUpdate={onUpdate}
-                    onSave={vi.fn()}
-                />,
-            );
-
-            const input = screen.getByDisplayValue('Original');
-
-            await act(async () => {
-                fireEvent.change(input, { target: { value: 'Retry draft' } });
+            await vi.waitFor(() => {
+                expect(errorSpy).toHaveBeenCalledWith('Failed to save slide draft', expect.any(Error));
             });
 
-            // Trigger save — it will fail
-            await act(async () => {
-                vi.advanceTimersByTime(2500);
-            });
-
-            // Error should appear
-            expect(screen.getByText('Save failed.')).toBeTruthy();
-            expect(screen.getByText('Network error')).toBeTruthy();
-
-            // Click Retry to bypass debounce
-            const saveButton = screen.getByRole('button', { name: /retry/i });
-            await act(async () => {
-                fireEvent.click(saveButton);
-            });
-
-            expect(onUpdate).toHaveBeenCalledTimes(2);
-        });
-
-        it('shows stronger recovery guidance after repeated failures', async () => {
-            vi.useFakeTimers();
-            const onUpdate = vi.fn().mockRejectedValue(new Error('Network error'));
-
-            render(
-                <SlideEditorPanel
-                    slide={makeSlide()}
-                    onUpdate={onUpdate}
-                    onSave={vi.fn()}
-                />,
-            );
-
-            const input = screen.getByDisplayValue('Original');
-
-            await act(async () => {
-                fireEvent.change(input, { target: { value: 'Retry draft' } });
-            });
-            await act(async () => {
-                vi.advanceTimersByTime(2500);
-            });
-            await act(async () => {
-                fireEvent.click(screen.getByRole('button', { name: /retry/i }));
-            });
-            await act(async () => {
-                fireEvent.click(screen.getByRole('button', { name: /retry/i }));
-            });
-
-            expect(screen.getByText('Unable to save right now.')).toBeTruthy();
-            expect(screen.getByRole('button', { name: /copy content/i })).toBeTruthy();
-        });
-    });
-
-    // ── Characterization: Sync Status ──
-
-    describe('sync status reporting', () => {
-        it('reports saving state while save is in flight', async () => {
-            vi.useFakeTimers();
-            const onSyncStatusChange = vi.fn();
-            const deferredSave = deferred<void>();
-            const onUpdate = vi.fn().mockReturnValueOnce(deferredSave.promise).mockResolvedValue(undefined);
-
-            render(
-                <SlideEditorPanel
-                    slide={makeSlide()}
-                    onUpdate={onUpdate}
-                    onSave={vi.fn()}
-                    onSyncStatusChange={onSyncStatusChange}
-                />,
-            );
-
-            const input = screen.getByDisplayValue('Original');
-
-            await act(async () => {
-                fireEvent.change(input, { target: { value: 'Pending' } });
-            });
-            await act(async () => {
-                vi.advanceTimersByTime(2500);
-            });
-
-            // Should be in saving state
-            const savingCall = onSyncStatusChange.mock.calls.find((c) => c[0].saving === true);
-            expect(savingCall).toBeTruthy();
-
-            // Resolve the save
-            await act(async () => {
-                deferredSave.resolve();
-            });
-
-            // Should return to clean
-            const cleanCall = onSyncStatusChange.mock.calls.at(-1)![0];
-            expect(cleanCall.dirty).toBe(false);
-            expect(cleanCall.saving).toBe(false);
+            expect(screen.queryByText('Saved')).not.toBeInTheDocument();
+            expect(screen.queryByText('Unsaved changes')).not.toBeInTheDocument();
+            expect(screen.queryByRole('button', { name: /save now/i })).not.toBeInTheDocument();
+            expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument();
         });
     });
 
@@ -600,7 +451,6 @@ describe('SlideEditorPanel', () => {
     describe('slide switch reset', () => {
         it('resets all state when switching to a different slide', async () => {
             vi.useFakeTimers();
-            const onSyncStatusChange = vi.fn();
             const onUpdate = vi.fn().mockResolvedValue(undefined);
 
             const { rerender } = render(
@@ -608,7 +458,6 @@ describe('SlideEditorPanel', () => {
                     slide={makeSlide({ id: 'slide-1' })}
                     onUpdate={onUpdate}
                     onSave={vi.fn()}
-                    onSyncStatusChange={onSyncStatusChange}
                 />,
             );
 
@@ -625,17 +474,12 @@ describe('SlideEditorPanel', () => {
                         slide={makeSlide({ id: 'slide-2', content: { title: 'Fresh', body: 'New' } })}
                         onUpdate={onUpdate}
                         onSave={vi.fn()}
-                        onSyncStatusChange={onSyncStatusChange}
                     />,
                 );
             });
 
             // Should show the new slide's content
             expect(screen.getByDisplayValue('Fresh')).toBeTruthy();
-
-            // Should be clean (not dirty)
-            const lastCall = onSyncStatusChange.mock.calls.at(-1)![0];
-            expect(lastCall.dirty).toBe(false);
         });
     });
 
@@ -752,25 +596,17 @@ describe('SlideEditorPanel', () => {
             expect(redInput).toHaveValue('Crimson');
         });
 
-        it('stays clean while typing option text until the buffered change is captured', async () => {
+        it('does not save option text until the buffered change is captured', async () => {
             vi.useFakeTimers();
-            const onSyncStatusChange = vi.fn();
+            const onUpdate = vi.fn().mockResolvedValue(undefined);
 
             render(
                 <SlideEditorPanel
                     slide={makePollSlide()}
-                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onUpdate={onUpdate}
                     onSave={vi.fn()}
-                    onSyncStatusChange={onSyncStatusChange}
                 />,
             );
-
-            expect(onSyncStatusChange).toHaveBeenLastCalledWith({
-                dirty: false,
-                saving: false,
-                lastError: null,
-                phase: 'idle',
-            });
 
             const redInput = screen.getByDisplayValue('Red');
 
@@ -778,15 +614,18 @@ describe('SlideEditorPanel', () => {
                 fireEvent.change(redInput, { target: { value: 'Crimson' } });
             });
 
-            const immediateCall = onSyncStatusChange.mock.calls.at(-1)![0];
-            expect(immediateCall.dirty).toBe(false);
+            expect(onUpdate).not.toHaveBeenCalled();
 
             await act(async () => {
-                vi.advanceTimersByTime(2000);
+                vi.advanceTimersByTime(2500);
             });
 
-            const bufferedCall = onSyncStatusChange.mock.calls.at(-1)![0];
-            expect(bufferedCall.dirty).toBe(true);
+            expect(onUpdate).toHaveBeenCalledWith(expect.objectContaining({
+                options: expect.arrayContaining([
+                    expect.objectContaining({ id: 'opt-1', text: 'Crimson' }),
+                    expect.objectContaining({ id: 'opt-2', text: 'Blue' }),
+                ]),
+            }));
         });
 
         it('keeps the latest option text when adding another option before idle save', async () => {

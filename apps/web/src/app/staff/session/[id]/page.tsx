@@ -11,7 +11,7 @@ import { Plus, Layout, BarChart2, Play, X, CheckSquare, Smartphone, Share2, Arro
 import Link from 'next/link';
 import { WebSocketProvider, useWebSocket } from '@/lib/websocket';
 import { SlideRenderer } from '@/components/slide-renderer';
-import { SlideEditorPanel, SlideEditorSyncStatus } from '@/components/slide-editor-panel';
+import { SlideEditorPanel } from '@/components/slide-editor-panel';
 import { QAManager } from '@/components/qa-manager';
 import { SlideTypeSelector } from '@/components/slide-type-selector';
 import { SessionDashboard } from '@/components/session-dashboard';
@@ -23,12 +23,11 @@ import { EditorSlide, normalizeSlides } from '@/lib/optimistic-slide-queue';
 import { useOptimisticSlideQueue } from '@/lib/use-optimistic-slide-queue';
 import { safeLocalStorageGet } from '@/lib/storage';
 import { formatRequestId, mapHttpErrorToUiMessage } from '@/lib/http-error-ui';
-import { saveSlideUpdate, SlideVersionConflictError } from '@/lib/slide-update';
+import { saveSlideUpdate } from '@/lib/slide-update';
 import { SlideListItem } from '@/components/slide-list-item';
 import { getSlideEditorLockState } from '@/lib/slide-editor-lock';
 import { reorderSlidesWithRollback } from '@/lib/slide-reorder';
 import { getNextPreviewSlideId, resolveDeleteRollbackPreviewId } from '@/lib/slide-preview-selection';
-import { useDebouncedValue } from '@/lib/use-debounced-slide-refetch';
 
 function getDefaultSlideContent(type: Slide['type']) {
     if (type === 'static') return { title: 'New Slide', body: 'Content here' };
@@ -53,7 +52,7 @@ function toSlide(slide: EditorSlide): Slide {
 }
 
 function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSession }: { baseSlides: Slide[], setBaseSlides: Dispatch<SetStateAction<Slide[]>>, loadSlides: () => Promise<void>, session: Session | null, loadSession: () => void }) {
-    const { sendMessage, state, activeParticipants, updateState, initialStateLoaded, lastSlideUpdate } = useWebSocket();
+    const { sendMessage, state, activeParticipants, updateState, initialStateLoaded } = useWebSocket();
     const params = useParams();
     const id = params?.id as string;
     const [showTypeSelector, setShowTypeSelector] = useState(false);
@@ -63,7 +62,6 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
     const [showDashboard, setShowDashboard] = useState(false);
     const [editTitle, setEditTitle] = useState('');
     const [showShareDialog, setShowShareDialog] = useState(false);
-    const [editorSync, setEditorSync] = useState<SlideEditorSyncStatus>({ dirty: false, saving: false, lastError: null, phase: 'idle' });
     const [isReordering, setIsReordering] = useState(false);
     const [isTogglingVisibility, setIsTogglingVisibility] = useState(false);
     const [isSavingSettings, setIsSavingSettings] = useState(false);
@@ -100,7 +98,6 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
         clearInlineError,
         clearSessionInlineError,
         resolveOptimisticId,
-        requestRefreshAfterDrain,
         hasPendingStructuralMutations,
         sessionInlineError,
     } = useOptimisticSlideQueue({
@@ -116,8 +113,6 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
             }));
         },
     });
-
-    useDebouncedValue(lastSlideUpdate, 200, requestRefreshAfterDrain);
 
     useEffect(() => {
         if (session) setEditTitle(session.title);
@@ -268,25 +263,17 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
         }
 
         try {
-            const result = await saveSlideUpdate({
+            await saveSlideUpdate({
                 sessionId: id,
                 slideId,
                 content,
                 getBaseSlides: () => baseSlidesRef.current,
                 resolveOptimisticId,
                 setBaseSlides: setBaseSlidesSynced,
-                refreshSlides: loadSlides,
             });
             return { status: 'saved' as const };
-        } catch (e) {
-            if (e instanceof SlideVersionConflictError) {
-                toast.error('Slide changed elsewhere', {
-                    description: e.message,
-                });
-                throw e;
-            }
-            toast.error('Failed to update slide');
-            throw new Error('Failed to update slide');
+        } catch (error) {
+            throw error;
         }
     }
 
@@ -388,10 +375,6 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
     });
 
     async function onDragEnd(result: DropResult) {
-        if (isStructuralSyncing) {
-            return;
-        }
-
         if (!result.destination) return;
 
         const sourceIndex = result.source.index;
@@ -424,7 +407,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
 
     const isStructuralSyncing = hasPendingStructuralMutations || isReordering;
     const isReorderLocked = isReordering;
-    const isShareEnabled = !(editorSync.dirty || editorSync.saving || isStructuralSyncing || isTogglingVisibility || isSavingSettings);
+    const isShareEnabled = !(isStructuralSyncing || isTogglingVisibility || isSavingSettings);
     const renderSlideCard = useCallback((
         slide: EditorSlide,
         index: number,
@@ -706,8 +689,6 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                             <SlideEditorPanel
                                 slide={previewSlide}
                                 onUpdate={(content) => handleUpdateSlide(previewSlide.id, content)}
-                                onSave={() => toast.success('Changes saved')}
-                                onSyncStatusChange={setEditorSync}
                                 disabled={editorLockState.disabled}
                                 disabledReason={editorLockState.reason ?? undefined}
                             />
@@ -775,12 +756,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                         <div className="p-6 space-y-6">
                             {!isShareEnabled && (
                                 <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900">
-                                    <p className="text-sm font-semibold">Finish saving your latest changes before sharing.</p>
-                                    {editorSync.lastError && (
-                                        <p className="mt-1 text-xs text-amber-800">
-                                            Save failed: {editorSync.lastError}
-                                        </p>
-                                    )}
+                                    <p className="text-sm font-semibold">Finish the current structural update before sharing.</p>
                                 </div>
                             )}
                             {/* Join Code Card */}
