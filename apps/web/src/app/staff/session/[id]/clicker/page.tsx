@@ -223,11 +223,10 @@ function ClickerContent() {
         // Immediate UI update
         currentIndexRef.current = nextIndex;
         setCurrentIndex(nextIndex);
-        updateState({ currentSlideId: nextSlide.id });
         
         // Debounced server update
         sendSlideToServer(nextSlide.id);
-    }, [updateState, sendSlideToServer]);
+    }, [sendSlideToServer]);
 
     const handlePrev = useCallback(() => {
         const slides = visibleSlidesRef.current;
@@ -241,11 +240,10 @@ function ClickerContent() {
         // Immediate UI update
         currentIndexRef.current = prevIndex;
         setCurrentIndex(prevIndex);
-        updateState({ currentSlideId: prevSlide.id });
         
         // Debounced server update
         sendSlideToServer(prevSlide.id);
-    }, [updateState, sendSlideToServer]);
+    }, [sendSlideToServer]);
 
     const currentSlide = visibleSlides[currentIndex];
 

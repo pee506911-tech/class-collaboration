@@ -245,12 +245,10 @@ pub(crate) async fn commit_vote_submission(
         increment_vote_count(tx, session_id, slide_id, option_id).await?;
     }
 
-    let sequence = next_vote_sequence(tx, session_id).await?;
     let results = current_vote_counts(tx, slide_id).await?;
     let vote_payload = serde_json::json!({
         "slideId": slide_id,
-        "results": results,
-        "sequence": sequence
+        "results": results
     });
     crate::services::outbox::enqueue_event(
         tx,
@@ -262,26 +260,6 @@ pub(crate) async fn commit_vote_submission(
 
     Ok(true)
 }
-
-/// Helper function: Atomically increment vote_sequence and fetch the new value.
-pub(crate) async fn next_vote_sequence(
-    tx: &mut Transaction<'_, MySql>,
-    session_id: &str,
-) -> Result<u64> {
-    sqlx::query(
-        "UPDATE sessions SET vote_sequence = LAST_INSERT_ID(vote_sequence + 1) WHERE id = ?",
-    )
-    .bind(session_id)
-    .execute(&mut **tx)
-    .await?;
-
-    let sequence: u64 = sqlx::query_scalar("SELECT LAST_INSERT_ID()")
-        .fetch_one(&mut **tx)
-        .await?;
-
-    Ok(sequence)
-}
-
 /// Helper function: Atomically increment qa_sequence and fetch questions.
 /// Returns (sequence, Vec<Question>)
 pub(crate) async fn next_qa_sequence_and_questions(
@@ -434,11 +412,6 @@ pub async fn submit_vote(
     {
         return Ok((StatusCode::OK, Json(ApiResponse::success(existing))).into_response());
     }
-
-    // Queue votes per session before opening a DB transaction so waiters do not
-    // consume pool connections while contending on the same vote-sequence row.
-    let vote_lock = app_state.vote_gate.session_lock(&session_id).await;
-    let _vote_guard = vote_lock.lock().await;
 
     for attempt in 0..=MAX_DEADLOCK_RETRIES {
         let mut tx = pool.begin().await?;

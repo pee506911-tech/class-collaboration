@@ -60,7 +60,6 @@ pub struct AppState {
     pub session_service: Arc<SessionService>,
     pub registry: Arc<ws::registry::InMemoryRegistry>,
     pub wal_store: services::wal::WalStore,
-    pub vote_gate: Arc<services::vote_gate::VoteGate>,
 }
 
 #[tokio::main]
@@ -125,8 +124,6 @@ async fn main() -> anyhow::Result<()> {
     // WebSocket session registry — in-memory broadcast registry for real-time
     // event delivery to connected WebSocket clients.
     let registry = Arc::new(ws::registry::InMemoryRegistry::new());
-    let vote_gate = Arc::new(services::vote_gate::VoteGate::new());
-
     // Spawn the outbox worker in the background once the DB pool is ready.
     // The worker accepts a shutdown signal so it can flush pending events before exit.
     let (outbox_shutdown_tx, outbox_shutdown_rx) = watch::channel(false);
@@ -194,7 +191,6 @@ async fn main() -> anyhow::Result<()> {
         session_service: session_service.clone(),
         registry: registry.clone(),
         wal_store: wal_store.clone(),
-        vote_gate,
     };
 
     let (wal_shutdown_tx, wal_shutdown_rx) = watch::channel(false);

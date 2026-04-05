@@ -225,7 +225,6 @@ function fetchVerificationSnapshot(data) {
   const statsInteractions = Array.isArray(targetSlideStats?.interactions)
     ? targetSlideStats.interactions
     : [];
-  const expectedVoteSequence = data.baselineVoteSequence + CONCURRENCY;
   const observedVoteSequence = Number(finalState.voteSequence || 0);
   const totalVotes = sumVoteCounts(voteCounts);
   const uniqueOptionsHit = countUniqueHitOptions(voteCounts);
@@ -254,7 +253,6 @@ function fetchVerificationSnapshot(data) {
     voteCounts,
     statsVoteCounts,
     statsInteractions,
-    expectedVoteSequence,
     observedVoteSequence,
     totalVotes,
     uniqueOptionsHit,
@@ -534,9 +532,8 @@ export function verifyResults(data) {
         statsInteractionCount: snapshot.statsInteractions.length,
         statsInteractionSamples: snapshot.statsInteractions.slice(0, 5),
         participantCount: snapshot.participantCount,
-        expectedVoteSequence: snapshot.expectedVoteSequence,
         observedVoteSequence: snapshot.observedVoteSequence,
-        voteSequenceMatched: snapshot.observedVoteSequence === snapshot.expectedVoteSequence,
+        voteSequenceAdvanced: snapshot.observedVoteSequence > data.baselineVoteSequence,
         myVotesSamples: snapshot.myVotesSamples,
       })
     );
@@ -552,7 +549,6 @@ export function verifyResults(data) {
     voteCounts,
     statsVoteCounts,
     statsInteractions,
-    expectedVoteSequence,
     observedVoteSequence,
     totalVotes,
     uniqueOptionsHit,
@@ -573,6 +569,10 @@ export function verifyResults(data) {
     `stats unique option hit mismatch after polling (expected=${CONCURRENCY} got=${statsUniqueOptionsHit})`
   );
   assert(participantCount === CONCURRENCY, `participant count mismatch after polling (expected=${CONCURRENCY} got=${participantCount})`);
+  assert(
+    observedVoteSequence > data.baselineVoteSequence,
+    `vote_sequence should advance beyond baseline (baseline=${data.baselineVoteSequence} observed=${observedVoteSequence})`
+  );
 
   for (let index = 1; index <= CONCURRENCY; index += 1) {
     const optionId = buildOptionId(index);
@@ -596,9 +596,8 @@ export function verifyResults(data) {
       statsTotalVotes,
       statsUniqueOptionsHit,
       statsInteractionCount: statsInteractions.length,
-      expectedVoteSequence,
       observedVoteSequence,
-      voteSequenceMatched: observedVoteSequence === expectedVoteSequence,
+      voteSequenceAdvanced: observedVoteSequence > data.baselineVoteSequence,
       myVotesSamples,
     })
   );

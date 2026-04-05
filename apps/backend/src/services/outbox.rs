@@ -51,11 +51,18 @@ impl std::str::FromStr for OutboxEventType {
 #[allow(dead_code)]
 pub struct OutboxEvent {
     pub id: String,
+    pub sequence_id: u64,
     pub session_id: String,
     pub event_type: String,
     pub payload: serde_json::Value,
     pub status: String,
     pub retry_count: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnqueuedOutboxEvent {
+    pub id: String,
+    pub sequence_id: u64,
 }
 
 /// Insert an event into the outbox within an existing transaction
@@ -64,7 +71,7 @@ pub async fn enqueue_event(
     session_id: &str,
     event_type: OutboxEventType,
     payload: &impl Serialize,
-) -> Result<String, sqlx::Error> {
+) -> Result<EnqueuedOutboxEvent, sqlx::Error> {
     let id = Uuid::new_v4().to_string();
     let payload_json = serde_json::to_value(payload).map_err(|e| {
         tracing::error!("Failed to serialize outbox payload: {}", e);
@@ -81,24 +88,23 @@ pub async fn enqueue_event(
     .execute(&mut **tx)
     .await?;
 
-    Ok(id)
+    let sequence_id: u64 = sqlx::query_scalar("SELECT LAST_INSERT_ID()")
+        .fetch_one(&mut **tx)
+        .await?;
+
+    Ok(EnqueuedOutboxEvent { id, sequence_id })
 }
 
 /// Publish a single event to the Broadcaster based on its type
-async fn publish_event(
-    broadcaster: &dyn Broadcaster,
-    session_id: &str,
-    event_type: &str,
-    payload: &serde_json::Value,
-) -> bool {
-    let message = match event_type.parse::<OutboxEventType>() {
+async fn publish_event(broadcaster: &dyn Broadcaster, event: &OutboxEvent) -> bool {
+    let message = match event.event_type.parse::<OutboxEventType>() {
         Ok(OutboxEventType::StateUpdate) => serde_json::json!({
             "type": "STATE_UPDATE",
-            "payload": payload
+            "payload": event.payload
         }),
         Ok(OutboxEventType::VoteUpdate) => {
-            let slide_id = payload["slideId"].as_str().unwrap_or("");
-            let results = payload["results"]
+            let slide_id = event.payload["slideId"].as_str().unwrap_or("");
+            let results = event.payload["results"]
                 .as_object()
                 .map(|obj| {
                     obj.iter()
@@ -106,7 +112,9 @@ async fn publish_event(
                         .collect::<serde_json::Map<String, serde_json::Value>>()
                 })
                 .unwrap_or_default();
-            let sequence = payload["sequence"].as_u64().unwrap_or(0);
+            let sequence = event.payload["sequence"]
+                .as_u64()
+                .unwrap_or(event.sequence_id);
             serde_json::json!({
                 "type": "VOTE_UPDATE",
                 "slideId": slide_id,
@@ -115,8 +123,8 @@ async fn publish_event(
             })
         }
         Ok(OutboxEventType::QaUpdate) => {
-            let questions = payload["payload"]["questions"].clone();
-            let sequence = payload["sequence"].as_u64().unwrap_or(0);
+            let questions = event.payload["payload"]["questions"].clone();
+            let sequence = event.payload["sequence"].as_u64().unwrap_or(0);
             serde_json::json!({
                 "type": "QA_UPDATE",
                 "payload": { "questions": questions },
@@ -124,7 +132,7 @@ async fn publish_event(
             })
         }
         Ok(OutboxEventType::SlidesUpdate) => {
-            let slides = payload["slides"].clone();
+            let slides = event.payload["slides"].clone();
             serde_json::json!({
                 "type": "SLIDES_UPDATE",
                 "slides": slides
@@ -136,10 +144,10 @@ async fn publish_event(
         }
     };
 
-    match broadcaster.broadcast(session_id, &message).await {
+    match broadcaster.broadcast(&event.session_id, &message).await {
         Ok(_) => true,
         Err(e) => {
-            tracing::error!("Broadcast failed for event {}: {}", event_type, e);
+            tracing::error!("Broadcast failed for event {}: {}", event.event_type, e);
             false
         }
     }
@@ -151,10 +159,10 @@ pub async fn process_pending_batch(
     broadcaster: &dyn Broadcaster,
 ) -> Result<usize, sqlx::Error> {
     let events: Vec<OutboxEvent> = sqlx::query_as(
-        "SELECT id, session_id, event_type, payload, status, retry_count
+        "SELECT id, sequence_id, session_id, event_type, payload, status, retry_count
          FROM outbox_events
          WHERE status = 'pending' AND retry_count < ?
-         ORDER BY created_at
+         ORDER BY sequence_id
          LIMIT ?",
     )
     .bind(MAX_RETRIES as i32)
@@ -165,13 +173,7 @@ pub async fn process_pending_batch(
     let count = events.len();
 
     for event in events {
-        let success = publish_event(
-            broadcaster,
-            &event.session_id,
-            &event.event_type,
-            &event.payload,
-        )
-        .await;
+        let success = publish_event(broadcaster, &event).await;
 
         if success {
             sqlx::query(
@@ -367,9 +369,17 @@ mod tests {
     #[tokio::test]
     async fn publish_event_dispatches_state_update_to_broadcaster() {
         let spy = BroadcasterSpy::new();
-        let payload = serde_json::json!({ "currentSlideId": "slide-1" });
+        let event = OutboxEvent {
+            id: "evt-1".to_string(),
+            sequence_id: 1,
+            session_id: "session-123".to_string(),
+            event_type: "STATE_UPDATE".to_string(),
+            payload: serde_json::json!({ "currentSlideId": "slide-1" }),
+            status: "pending".to_string(),
+            retry_count: 0,
+        };
 
-        let success = publish_event(&spy, "session-123", "STATE_UPDATE", &payload).await;
+        let success = publish_event(&spy, &event).await;
 
         assert!(success);
         assert_eq!(
@@ -386,13 +396,20 @@ mod tests {
     #[tokio::test]
     async fn publish_event_dispatches_vote_update_to_broadcaster() {
         let spy = BroadcasterSpy::new();
-        let payload = serde_json::json!({
-            "slideId": "slide-2",
-            "results": { "opt-a": 5, "opt-b": 3 },
-            "sequence": 10
-        });
+        let event = OutboxEvent {
+            id: "evt-2".to_string(),
+            sequence_id: 10,
+            session_id: "session-456".to_string(),
+            event_type: "VOTE_UPDATE".to_string(),
+            payload: serde_json::json!({
+                "slideId": "slide-2",
+                "results": { "opt-a": 5, "opt-b": 3 }
+            }),
+            status: "pending".to_string(),
+            retry_count: 0,
+        };
 
-        let success = publish_event(&spy, "session-456", "VOTE_UPDATE", &payload).await;
+        let success = publish_event(&spy, &event).await;
 
         assert!(success);
         let messages = spy.messages_for_session("session-456").await;
@@ -406,16 +423,24 @@ mod tests {
     #[tokio::test]
     async fn publish_event_dispatches_qa_update_to_broadcaster() {
         let spy = BroadcasterSpy::new();
-        let payload = serde_json::json!({
-            "payload": {
-                "questions": [
-                    { "id": "q1", "text": "What is Rust?" }
-                ]
-            },
-            "sequence": 5
-        });
+        let event = OutboxEvent {
+            id: "evt-3".to_string(),
+            sequence_id: 11,
+            session_id: "session-789".to_string(),
+            event_type: "QA_UPDATE".to_string(),
+            payload: serde_json::json!({
+                "payload": {
+                    "questions": [
+                        { "id": "q1", "text": "What is Rust?" }
+                    ]
+                },
+                "sequence": 5
+            }),
+            status: "pending".to_string(),
+            retry_count: 0,
+        };
 
-        let success = publish_event(&spy, "session-789", "QA_UPDATE", &payload).await;
+        let success = publish_event(&spy, &event).await;
 
         assert!(success);
         let messages = spy.messages_for_session("session-789").await;
@@ -431,14 +456,22 @@ mod tests {
     #[tokio::test]
     async fn publish_event_dispatches_slides_update_to_broadcaster() {
         let spy = BroadcasterSpy::new();
-        let payload = serde_json::json!({
-            "slides": [
-                { "id": "slide-1", "title": "Intro" },
-                { "id": "slide-2", "title": "Details" }
-            ]
-        });
+        let event = OutboxEvent {
+            id: "evt-4".to_string(),
+            sequence_id: 12,
+            session_id: "session-abc".to_string(),
+            event_type: "SLIDES_UPDATE".to_string(),
+            payload: serde_json::json!({
+                "slides": [
+                    { "id": "slide-1", "title": "Intro" },
+                    { "id": "slide-2", "title": "Details" }
+                ]
+            }),
+            status: "pending".to_string(),
+            retry_count: 0,
+        };
 
-        let success = publish_event(&spy, "session-abc", "SLIDES_UPDATE", &payload).await;
+        let success = publish_event(&spy, &event).await;
 
         assert!(success);
         let messages = spy.messages_for_session("session-abc").await;
@@ -451,9 +484,17 @@ mod tests {
     #[tokio::test]
     async fn publish_event_returns_false_on_broadcaster_failure() {
         let spy = BroadcasterSpy::failing();
-        let payload = serde_json::json!({ "currentSlideId": "slide-1" });
+        let event = OutboxEvent {
+            id: "evt-5".to_string(),
+            sequence_id: 13,
+            session_id: "session-123".to_string(),
+            event_type: "STATE_UPDATE".to_string(),
+            payload: serde_json::json!({ "currentSlideId": "slide-1" }),
+            status: "pending".to_string(),
+            retry_count: 0,
+        };
 
-        let success = publish_event(&spy, "session-123", "STATE_UPDATE", &payload).await;
+        let success = publish_event(&spy, &event).await;
 
         assert!(!success);
         assert_eq!(
@@ -465,9 +506,17 @@ mod tests {
     #[tokio::test]
     async fn publish_event_returns_false_for_unknown_event_type() {
         let spy = BroadcasterSpy::new();
-        let payload = serde_json::json!({});
+        let event = OutboxEvent {
+            id: "evt-6".to_string(),
+            sequence_id: 14,
+            session_id: "session-123".to_string(),
+            event_type: "UNKNOWN_TYPE".to_string(),
+            payload: serde_json::json!({}),
+            status: "pending".to_string(),
+            retry_count: 0,
+        };
 
-        let success = publish_event(&spy, "session-123", "UNKNOWN_TYPE", &payload).await;
+        let success = publish_event(&spy, &event).await;
 
         assert!(!success);
         assert_eq!(
@@ -479,13 +528,20 @@ mod tests {
     #[tokio::test]
     async fn publish_event_preserves_sequence_numbers() {
         let spy = BroadcasterSpy::new();
-        let payload = serde_json::json!({
-            "slideId": "slide-1",
-            "results": {},
-            "sequence": 99
-        });
+        let event = OutboxEvent {
+            id: "evt-7".to_string(),
+            sequence_id: 99,
+            session_id: "session-123".to_string(),
+            event_type: "VOTE_UPDATE".to_string(),
+            payload: serde_json::json!({
+                "slideId": "slide-1",
+                "results": {}
+            }),
+            status: "pending".to_string(),
+            retry_count: 0,
+        };
 
-        publish_event(&spy, "session-123", "VOTE_UPDATE", &payload).await;
+        publish_event(&spy, &event).await;
 
         let messages = spy.messages_for_session("session-123").await;
         assert_eq!(messages[0]["sequence"], 99);

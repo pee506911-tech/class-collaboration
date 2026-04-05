@@ -266,7 +266,19 @@ impl SessionRepository for SqlxSessionRepository {
         let row = if crate::tidb_ru::should_sample() {
             let mut conn = pool.acquire().await?;
             let row = query_as::<_, SessionStateHeaderRow>(
-                "SELECT current_slide_id, is_presentation_active, is_results_visible, state_version, vote_sequence, qa_sequence FROM sessions WHERE id = ?",
+                "SELECT
+                    s.current_slide_id,
+                    s.is_presentation_active,
+                    s.is_results_visible,
+                    s.state_version,
+                    COALESCE((
+                        SELECT MAX(oe.sequence_id)
+                        FROM outbox_events oe
+                        WHERE oe.session_id = s.id AND oe.event_type = 'VOTE_UPDATE'
+                    ), 0) AS vote_sequence,
+                    s.qa_sequence
+                 FROM sessions s
+                 WHERE s.id = ?",
             )
             .bind(session_id)
             .fetch_optional(&mut *conn)
@@ -275,7 +287,19 @@ impl SessionRepository for SqlxSessionRepository {
             row
         } else {
             query_as::<_, SessionStateHeaderRow>(
-                "SELECT current_slide_id, is_presentation_active, is_results_visible, state_version, vote_sequence, qa_sequence FROM sessions WHERE id = ?",
+                "SELECT
+                    s.current_slide_id,
+                    s.is_presentation_active,
+                    s.is_results_visible,
+                    s.state_version,
+                    COALESCE((
+                        SELECT MAX(oe.sequence_id)
+                        FROM outbox_events oe
+                        WHERE oe.session_id = s.id AND oe.event_type = 'VOTE_UPDATE'
+                    ), 0) AS vote_sequence,
+                    s.qa_sequence
+                 FROM sessions s
+                 WHERE s.id = ?",
             )
             .bind(session_id)
             .fetch_optional(&pool)
@@ -370,11 +394,20 @@ impl SessionRepository for SqlxSessionRepository {
 
     async fn get_sequences(&self, session_id: &str) -> Result<SessionSequences> {
         let pool = self.get_pool().await?;
-        let sequences: Option<(u64, u64)> =
-            sqlx::query_as("SELECT vote_sequence, qa_sequence FROM sessions WHERE id = ?")
-                .bind(session_id)
-                .fetch_optional(&pool)
-                .await?;
+        let sequences: Option<(u64, u64)> = sqlx::query_as(
+            "SELECT
+                COALESCE((
+                    SELECT MAX(oe.sequence_id)
+                    FROM outbox_events oe
+                    WHERE oe.session_id = s.id AND oe.event_type = 'VOTE_UPDATE'
+                ), 0) AS vote_sequence,
+                s.qa_sequence
+             FROM sessions s
+             WHERE s.id = ?",
+        )
+        .bind(session_id)
+        .fetch_optional(&pool)
+        .await?;
 
         Ok(sequences
             .map(|(v, q)| SessionSequences {
