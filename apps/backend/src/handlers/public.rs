@@ -133,8 +133,7 @@ pub async fn public_set_current_slide(
 
     let pool = app_state.db_pool.pool_fast_fail().await?;
     let pool_ready_at = std::time::Instant::now();
-    let mut tx = pool.begin().await?;
-    let tx_started_at = std::time::Instant::now();
+    let tx_started_at = pool_ready_at;
 
     let mut validated_at = tx_started_at;
     let update_result = if should_validate_slide_in_update(requested_slide_id_for_validation) {
@@ -152,11 +151,10 @@ pub async fn public_set_current_slide(
         .bind(&payload.slide_id)
         .bind(&payload.slide_id)
         .bind(&session_id)
-        .execute(&mut *tx)
+        .execute(&pool)
         .await?
     } else {
-        validate_target_slide_exists(&mut tx, &session_id, requested_slide_id_for_validation)
-            .await?;
+        validate_target_slide_exists(&pool, &session_id, requested_slide_id_for_validation).await?;
         validated_at = std::time::Instant::now();
 
         sqlx::query(
@@ -165,12 +163,12 @@ pub async fn public_set_current_slide(
             .bind(&payload.slide_id)
             .bind(&session_id)
             .bind(&payload.slide_id)
-            .execute(&mut *tx)
+            .execute(&pool)
             .await?
     };
     let updated_at = std::time::Instant::now();
 
-    let state_payload = fetch_state_payload(&mut *tx, &session_id).await?;
+    let state_payload = fetch_state_payload(&pool, &session_id).await?;
     let session_fetched_at = std::time::Instant::now();
     if update_result.rows_affected() == 0
         && should_validate_slide_in_update(requested_slide_id_for_validation)
@@ -179,15 +177,12 @@ pub async fn public_set_current_slide(
             requested_slide_id_for_validation,
         )
     {
-        validate_target_slide_exists(&mut tx, &session_id, requested_slide_id_for_validation)
-            .await?;
+        validate_target_slide_exists(&pool, &session_id, requested_slide_id_for_validation).await?;
     }
 
     let should_flush_outbox = update_result.rows_affected() > 0;
     let outbox_enqueued_at = std::time::Instant::now();
-
-    tx.commit().await?;
-    let committed_at = std::time::Instant::now();
+    let committed_at = outbox_enqueued_at;
     if should_flush_outbox {
         broadcast_state_update_fast_lane(app_state.registry.as_ref(), &session_id, &state_payload)
             .await;
@@ -355,11 +350,14 @@ where
     Ok(session)
 }
 
-async fn validate_target_slide_exists(
-    tx: &mut sqlx::Transaction<'_, MySql>,
+async fn validate_target_slide_exists<'c, E>(
+    executor: E,
     session_id: &str,
     slide_id: Option<&str>,
-) -> Result<()> {
+) -> Result<()>
+where
+    E: sqlx::Executor<'c, Database = MySql>,
+{
     let Some(slide_id) = slide_id.filter(|value| !value.trim().is_empty()) else {
         return Ok(());
     };
@@ -368,7 +366,7 @@ async fn validate_target_slide_exists(
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM slides WHERE id = ? AND session_id = ?)")
             .bind(slide_id)
             .bind(session_id)
-            .fetch_one(&mut **tx)
+            .fetch_one(executor)
             .await?;
 
     if exists {

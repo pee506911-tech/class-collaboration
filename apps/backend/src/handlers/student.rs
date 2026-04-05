@@ -20,6 +20,7 @@ const MAX_NAME_LENGTH: usize = 100;
 const MAX_OPTION_IDS: usize = 10;
 const MAX_DEADLOCK_RETRIES: u32 = 3;
 const MY_VOTES_SLIDE_ID_CHUNK_SIZE: usize = 128;
+const VOTE_COUNT_SHARD_COUNT: u32 = 16;
 
 fn decode_wal_response<T: DeserializeOwned>(value: serde_json::Value) -> Result<T> {
     serde_json::from_value(value).map_err(|error| {
@@ -154,19 +155,30 @@ pub(crate) async fn increment_vote_count(
     session_id: &str,
     slide_id: &str,
     option_id: &str,
+    shard_id: u32,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO vote_counts (session_id, slide_id, option_id, vote_count)
-         VALUES (?, ?, ?, 1)
+        "INSERT INTO vote_count_shards (session_id, slide_id, option_id, shard_id, vote_count)
+         VALUES (?, ?, ?, ?, 1)
          ON DUPLICATE KEY UPDATE vote_count = vote_count + 1",
     )
     .bind(session_id)
     .bind(slide_id)
     .bind(option_id)
+    .bind(shard_id as i64)
     .execute(&mut **tx)
     .await?;
 
     Ok(())
+}
+
+pub(crate) fn vote_count_shard_id(participant_id: &str) -> u32 {
+    let mut hash = 0x811c9dc5u32;
+    for byte in participant_id.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash % VOTE_COUNT_SHARD_COUNT
 }
 
 pub(crate) fn build_vote_update_payload(slide_id: &str) -> serde_json::Value {
@@ -228,8 +240,9 @@ pub(crate) async fn commit_vote_submission(
         return Ok(false);
     }
 
+    let shard_id = vote_count_shard_id(participant_id);
     for option_id in &inserted_option_ids {
-        increment_vote_count(tx, session_id, slide_id, option_id).await?;
+        increment_vote_count(tx, session_id, slide_id, option_id, shard_id).await?;
     }
 
     crate::services::outbox::enqueue_event(
@@ -560,7 +573,8 @@ pub fn resolve_option_ids(
 mod tests {
     use super::{
         build_vote_update_payload, dedupe_option_ids, resolve_option_ids,
-        should_skip_vote_snapshot, validate_vote_options, VoteValidationResult,
+        should_skip_vote_snapshot, validate_vote_options, vote_count_shard_id,
+        VoteValidationResult,
     };
     use serde_json::json;
 
@@ -907,6 +921,24 @@ mod tests {
 
         assert_eq!(payload["slideId"], "slide-123");
         assert!(payload.get("results").is_none());
+    }
+
+    #[test]
+    fn vote_count_shard_id_is_stable_for_the_same_participant() {
+        let first = vote_count_shard_id("participant-123");
+        let second = vote_count_shard_id("participant-123");
+
+        assert_eq!(first, second);
+        assert!(first < 16);
+    }
+
+    #[test]
+    fn vote_count_shard_id_spreads_different_participants_across_valid_range() {
+        let shard_a = vote_count_shard_id("participant-a");
+        let shard_b = vote_count_shard_id("participant-b");
+
+        assert!(shard_a < 16);
+        assert!(shard_b < 16);
     }
 }
 
