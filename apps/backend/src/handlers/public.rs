@@ -73,8 +73,10 @@ pub struct PublicSetResultsRequest {
 #[serde(rename_all = "camelCase")]
 pub struct StateUpdatePayload {
     current_slide_id: Option<String>,
-    is_presentation_active: bool,
-    is_results_visible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_presentation_active: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_results_visible: Option<bool>,
     state_version: i64,
 }
 
@@ -139,7 +141,7 @@ pub async fn public_set_current_slide(
     let update_result = if should_validate_slide_in_update(requested_slide_id_for_validation) {
         sqlx::query(
             "UPDATE sessions
-             SET current_slide_id = ?, state_version = state_version + 1
+             SET current_slide_id = ?, state_version = LAST_INSERT_ID(state_version + 1)
              WHERE id = ?
                AND NOT (current_slide_id <=> ?)
                AND EXISTS (
@@ -158,27 +160,38 @@ pub async fn public_set_current_slide(
         validated_at = std::time::Instant::now();
 
         sqlx::query(
-            "UPDATE sessions SET current_slide_id = ?, state_version = state_version + 1 WHERE id = ? AND NOT (current_slide_id <=> ?)"
+            "UPDATE sessions
+             SET current_slide_id = ?, state_version = LAST_INSERT_ID(state_version + 1)
+             WHERE id = ? AND NOT (current_slide_id <=> ?)",
         )
-            .bind(&payload.slide_id)
-            .bind(&session_id)
-            .bind(&payload.slide_id)
-            .execute(&pool)
-            .await?
+        .bind(&payload.slide_id)
+        .bind(&session_id)
+        .bind(&payload.slide_id)
+        .execute(&pool)
+        .await?
     };
     let updated_at = std::time::Instant::now();
 
-    let state_payload = fetch_state_payload(&pool, &session_id).await?;
-    let session_fetched_at = std::time::Instant::now();
-    if update_result.rows_affected() == 0
-        && should_validate_slide_in_update(requested_slide_id_for_validation)
-        && !requested_slide_matches_current_state(
-            state_payload.current_slide_id.as_deref(),
-            requested_slide_id_for_validation,
+    let state_payload = if update_result.rows_affected() > 0 {
+        build_clicker_ack_payload(
+            payload.slide_id.clone(),
+            i64::try_from(update_result.last_insert_id()).unwrap_or_default(),
         )
-    {
-        validate_target_slide_exists(&pool, &session_id, requested_slide_id_for_validation).await?;
-    }
+    } else {
+        let current_state = fetch_state_payload(&pool, &session_id).await?;
+        if should_validate_slide_in_update(requested_slide_id_for_validation)
+            && !requested_slide_matches_current_state(
+                current_state.current_slide_id.as_deref(),
+                requested_slide_id_for_validation,
+            )
+        {
+            validate_target_slide_exists(&pool, &session_id, requested_slide_id_for_validation)
+                .await?;
+        }
+
+        current_state
+    };
+    let session_fetched_at = std::time::Instant::now();
 
     let should_flush_outbox = update_result.rows_affected() > 0;
     let outbox_enqueued_at = std::time::Instant::now();
@@ -272,9 +285,21 @@ pub async fn public_set_results_visibility(
 fn build_state_payload(session: &Session) -> StateUpdatePayload {
     StateUpdatePayload {
         current_slide_id: session.current_slide_id.clone(),
-        is_presentation_active: session.is_presentation_active,
-        is_results_visible: session.is_results_visible,
+        is_presentation_active: Some(session.is_presentation_active),
+        is_results_visible: Some(session.is_results_visible),
         state_version: session.state_version,
+    }
+}
+
+fn build_clicker_ack_payload(
+    current_slide_id: Option<String>,
+    state_version: i64,
+) -> StateUpdatePayload {
+    StateUpdatePayload {
+        current_slide_id,
+        is_presentation_active: None,
+        is_results_visible: None,
+        state_version,
     }
 }
 
@@ -388,8 +413,8 @@ mod tests {
         let spy = BroadcasterSpy::new();
         let payload = StateUpdatePayload {
             current_slide_id: Some("slide-123".to_string()),
-            is_presentation_active: true,
-            is_results_visible: false,
+            is_presentation_active: Some(true),
+            is_results_visible: Some(false),
             state_version: 42,
         };
 
@@ -407,8 +432,8 @@ mod tests {
         let spy = BroadcasterSpy::failing();
         let payload = StateUpdatePayload {
             current_slide_id: Some("slide-456".to_string()),
-            is_presentation_active: true,
-            is_results_visible: true,
+            is_presentation_active: Some(true),
+            is_results_visible: Some(true),
             state_version: 99,
         };
 
@@ -460,5 +485,15 @@ mod tests {
             None,
             Some("slide-123")
         ));
+    }
+
+    #[test]
+    fn build_clicker_ack_payload_omits_full_state_flags() {
+        let payload = build_clicker_ack_payload(Some("slide-789".to_string()), 17);
+
+        assert_eq!(payload.current_slide_id.as_deref(), Some("slide-789"));
+        assert_eq!(payload.state_version, 17);
+        assert_eq!(payload.is_presentation_active, None);
+        assert_eq!(payload.is_results_visible, None);
     }
 }
