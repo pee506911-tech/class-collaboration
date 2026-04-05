@@ -2,7 +2,7 @@
 
 export const runtime = 'edge';
 
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useParams } from 'next/navigation';
 import { Slide } from 'shared';
 import { publicGetSlides, publicSetCurrentSlide } from '@/lib/api';
@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { WebSocketProvider, useWebSocket } from '@/lib/websocket';
 import { ChevronLeft, ChevronRight, Smartphone, Layout } from 'lucide-react';
 import { SlideRenderer } from '@/components/slide-renderer';
+import { createLatestOnlySlideCommitter, reconcilePendingSlide } from '@/lib/clicker-navigation';
 
 function ClickerContent() {
     const { state, isConnected, lastSlideUpdate, updateState, initialStateLoaded } = useWebSocket();
@@ -17,23 +18,35 @@ function ClickerContent() {
     const id = params?.id as string;
     const [slides, setSlides] = useState<Slide[]>([]);
     const [currentIndex, setCurrentIndex] = useState(-1);
-    const [currentTime, setCurrentTime] = useState<Date | null>(null);
+    const [currentTime, setCurrentTime] = useState<Date | null>(() => new Date());
     
     // Use ref to track the latest index for rapid clicks
     const currentIndexRef = useRef(currentIndex);
-    currentIndexRef.current = currentIndex;
     
-    // Track pending API call - only send the latest slide, cancel previous
+    // Track pending API call - debounce taps before they enter the serial commit queue.
     const pendingSlideRef = useRef<string | null>(null);
     const apiTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-    
-    // Track when we last navigated locally to ignore server sync briefly
-    const lastLocalNavRef = useRef<number>(0);
+    const slideCommitterRef = useRef(createLatestOnlySlideCommitter((slideId: string) => publicSetCurrentSlide(id, slideId)));
+    const pendingRemoteSlideRef = useRef<string | null>(null);
 
     useEffect(() => {
-        setCurrentTime(new Date());
+        currentIndexRef.current = currentIndex;
+    }, [currentIndex]);
+
+    useEffect(() => {
+        slideCommitterRef.current = createLatestOnlySlideCommitter((slideId: string) => publicSetCurrentSlide(id, slideId));
+    }, [id]);
+
+    useEffect(() => {
         const timer = setInterval(() => setCurrentTime(new Date()), 1000);
         return () => clearInterval(timer);
+    }, []);
+
+    useEffect(() => () => {
+        if (apiTimeoutRef.current) {
+            clearTimeout(apiTimeoutRef.current);
+            apiTimeoutRef.current = null;
+        }
     }, []);
 
     // Fetch slides and reload when they change
@@ -47,29 +60,43 @@ function ClickerContent() {
     }, [id, lastSlideUpdate]);
 
     // Filter out hidden slides for navigation logic
-    const visibleSlides = slides.filter(s => !s.isHidden);
+    const visibleSlides = useMemo(() => slides.filter(s => !s.isHidden), [slides]);
     const visibleSlidesRef = useRef(visibleSlides);
-    visibleSlidesRef.current = visibleSlides;
+
+    useEffect(() => {
+        visibleSlidesRef.current = visibleSlides;
+    }, [visibleSlides]);
 
     useEffect(() => {
         if (visibleSlides.length > 0) {
             if (state?.currentSlideId) {
-                // Ignore server sync for 1 second after local navigation
-                const timeSinceLocalNav = Date.now() - lastLocalNavRef.current;
-                if (timeSinceLocalNav > 1000) {
-                    const index = visibleSlides.findIndex(s => s.id === state.currentSlideId);
-                    if (index !== -1) {
+                const syncDecision = reconcilePendingSlide(
+                    pendingRemoteSlideRef.current,
+                    state.currentSlideId,
+                );
+                pendingRemoteSlideRef.current = syncDecision.pendingSlideId;
+
+                if (!syncDecision.shouldApply) {
+                    return;
+                }
+
+                const index = visibleSlides.findIndex(s => s.id === state.currentSlideId);
+                if (index !== -1 && index !== currentIndex) {
+                    queueMicrotask(() => {
                         setCurrentIndex(index);
-                    }
+                    });
                 }
             } else if (currentIndex === -1) {
                 // Initialize to first slide if no state yet
-                setCurrentIndex(0);
+                queueMicrotask(() => {
+                    setCurrentIndex(0);
+                });
             }
         }
-    }, [slides, state?.currentSlideId]); // Re-run when slides change (visibility might change)
+    }, [currentIndex, state?.currentSlideId, visibleSlides]); // Re-run when slides change (visibility might change)
 
-    // Debounced API call - only sends the final slide after rapid clicks settle
+    // Debounced API call - only sends the final slide after rapid clicks settle.
+    // Once a request starts, the queue keeps only the newest target until the in-flight call finishes.
     const sendSlideToServer = useCallback((slideId: string) => {
         pendingSlideRef.current = slideId;
         
@@ -82,11 +109,11 @@ function ClickerContent() {
         // This batches rapid clicks and only sends the final destination
         apiTimeoutRef.current = setTimeout(() => {
             if (pendingSlideRef.current) {
-                publicSetCurrentSlide(id, pendingSlideRef.current);
+                slideCommitterRef.current.schedule(pendingSlideRef.current);
                 pendingSlideRef.current = null;
             }
         }, 150);
-    }, [id]);
+    }, []);
 
     const handleNext = useCallback(() => {
         const slides = visibleSlidesRef.current;
@@ -94,10 +121,9 @@ function ClickerContent() {
         
         if (idx >= slides.length - 1) return;
         
-        lastLocalNavRef.current = Date.now();
-        
         const nextIndex = idx + 1;
         const nextSlide = slides[nextIndex];
+        pendingRemoteSlideRef.current = nextSlide.id;
         
         // Immediate UI update
         setCurrentIndex(nextIndex);
@@ -113,10 +139,9 @@ function ClickerContent() {
         
         if (idx <= 0) return;
         
-        lastLocalNavRef.current = Date.now();
-        
         const prevIndex = idx - 1;
         const prevSlide = slides[prevIndex];
+        pendingRemoteSlideRef.current = prevSlide.id;
         
         // Immediate UI update
         setCurrentIndex(prevIndex);
