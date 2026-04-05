@@ -125,7 +125,12 @@ pub async fn public_set_current_slide(
 
     tx.commit().await?;
     if should_flush_outbox {
-        broadcast_state_update_fast_lane(app_state.registry.as_ref(), &session_id, &build_state_payload(&session)).await;
+        broadcast_state_update_fast_lane(
+            app_state.registry.as_ref(),
+            &session_id,
+            &build_state_payload(&session),
+        )
+        .await;
         app_state.outbox_flush_notify.notify_one();
     }
 
@@ -312,8 +317,7 @@ mod tests {
         broadcast_state_update_fast_lane(&spy, "session-fast-lane", &payload).await;
 
         assert_eq!(
-            spy.failure_count
-                .load(std::sync::atomic::Ordering::SeqCst),
+            spy.failure_count.load(std::sync::atomic::Ordering::SeqCst),
             1
         );
     }

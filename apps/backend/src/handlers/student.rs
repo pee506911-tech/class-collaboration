@@ -169,23 +169,10 @@ pub(crate) async fn increment_vote_count(
     Ok(())
 }
 
-pub(crate) async fn current_vote_counts(
-    tx: &mut Transaction<'_, MySql>,
-    slide_id: &str,
-) -> Result<HashMap<String, i32>> {
-    let vote_counts: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT option_id, vote_count as count FROM vote_counts WHERE slide_id = ? AND vote_count > 0",
-    )
-    .bind(slide_id)
-    .fetch_all(&mut **tx)
-    .await?;
-
-    let results: HashMap<String, i32> = vote_counts
-        .into_iter()
-        .map(|(option_id, count)| (option_id, count as i32))
-        .collect();
-
-    Ok(results)
+pub(crate) fn build_vote_update_payload(slide_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "slideId": slide_id
+    })
 }
 
 pub(crate) async fn commit_vote_submission(
@@ -245,16 +232,11 @@ pub(crate) async fn commit_vote_submission(
         increment_vote_count(tx, session_id, slide_id, option_id).await?;
     }
 
-    let results = current_vote_counts(tx, slide_id).await?;
-    let vote_payload = serde_json::json!({
-        "slideId": slide_id,
-        "results": results
-    });
     crate::services::outbox::enqueue_event(
         tx,
         session_id,
         crate::services::outbox::OutboxEventType::VoteUpdate,
-        &vote_payload,
+        &build_vote_update_payload(slide_id),
     )
     .await?;
 
@@ -439,6 +421,7 @@ pub async fn submit_vote(
                 .await?;
 
                 tx.commit().await?;
+                app_state.outbox_flush_notify.notify_one();
                 app_state
                     .session_service
                     .invalidate_session_cache(&session_id)
@@ -576,8 +559,8 @@ pub fn resolve_option_ids(
 #[cfg(test)]
 mod tests {
     use super::{
-        dedupe_option_ids, resolve_option_ids, should_skip_vote_snapshot, validate_vote_options,
-        VoteValidationResult,
+        build_vote_update_payload, dedupe_option_ids, resolve_option_ids,
+        should_skip_vote_snapshot, validate_vote_options, VoteValidationResult,
     };
     use serde_json::json;
 
@@ -916,6 +899,14 @@ mod tests {
             VoteValidationResult::Valid { .. } => {}
             other => panic!("Expected Valid when no options array, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn build_vote_update_payload_keeps_vote_snapshot_out_of_the_write_path() {
+        let payload = build_vote_update_payload("slide-123");
+
+        assert_eq!(payload["slideId"], "slide-123");
+        assert!(payload.get("results").is_none());
     }
 }
 

@@ -113,8 +113,60 @@ pub async fn enqueue_event(
     Ok(EnqueuedOutboxEvent { id, sequence_id })
 }
 
+fn vote_results_from_payload(
+    payload: &serde_json::Value,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    payload["results"].as_object().map(|obj| {
+        obj.iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<serde_json::Map<String, serde_json::Value>>()
+    })
+}
+
+async fn fetch_vote_results(
+    pool: &Pool<MySql>,
+    slide_id: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, sqlx::Error> {
+    let vote_counts: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT option_id, vote_count as count FROM vote_counts WHERE slide_id = ? AND vote_count > 0",
+    )
+    .bind(slide_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(vote_counts
+        .into_iter()
+        .map(|(option_id, count)| (option_id, serde_json::Value::from(count)))
+        .collect())
+}
+
+async fn build_vote_update_message(
+    pool: &Pool<MySql>,
+    event: &OutboxEvent,
+) -> Result<serde_json::Value, sqlx::Error> {
+    let slide_id = event.payload["slideId"].as_str().unwrap_or("");
+    let results = match vote_results_from_payload(&event.payload) {
+        Some(results) => results,
+        None => fetch_vote_results(pool, slide_id).await?,
+    };
+    let sequence = event.payload["sequence"]
+        .as_u64()
+        .unwrap_or(event.sequence_id);
+
+    Ok(serde_json::json!({
+        "type": "VOTE_UPDATE",
+        "slideId": slide_id,
+        "results": results,
+        "sequence": sequence
+    }))
+}
+
 /// Publish a single event to the Broadcaster based on its type
-async fn publish_event(broadcaster: &dyn Broadcaster, event: &OutboxEvent) -> bool {
+async fn publish_event(
+    pool: &Pool<MySql>,
+    broadcaster: &dyn Broadcaster,
+    event: &OutboxEvent,
+) -> bool {
     let parsed_event_type = match event.event_type.parse::<OutboxEventType>() {
         Ok(value) => value,
         Err(e) => {
@@ -123,31 +175,23 @@ async fn publish_event(broadcaster: &dyn Broadcaster, event: &OutboxEvent) -> bo
         }
     };
 
-    let message = match parsed_event_type {
+    let message_result = match parsed_event_type {
         OutboxEventType::StateUpdate => serde_json::json!({
             "type": "STATE_UPDATE",
             "payload": event.payload
         }),
-        OutboxEventType::VoteUpdate => {
-            let slide_id = event.payload["slideId"].as_str().unwrap_or("");
-            let results = event.payload["results"]
-                .as_object()
-                .map(|obj| {
-                    obj.iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect::<serde_json::Map<String, serde_json::Value>>()
-                })
-                .unwrap_or_default();
-            let sequence = event.payload["sequence"]
-                .as_u64()
-                .unwrap_or(event.sequence_id);
-            serde_json::json!({
-                "type": "VOTE_UPDATE",
-                "slideId": slide_id,
-                "results": results,
-                "sequence": sequence
-            })
-        }
+        OutboxEventType::VoteUpdate => match build_vote_update_message(pool, event).await {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::error!(
+                    session_id = %event.session_id,
+                    slide_id = ?event.payload["slideId"].as_str(),
+                    error = %error,
+                    "Failed to hydrate vote results for outbox publish"
+                );
+                return false;
+            }
+        },
         OutboxEventType::QaUpdate => {
             let questions = event.payload["payload"]["questions"].clone();
             let sequence = event.payload["sequence"].as_u64().unwrap_or(0);
@@ -166,7 +210,10 @@ async fn publish_event(broadcaster: &dyn Broadcaster, event: &OutboxEvent) -> bo
         }
     };
 
-    match broadcaster.broadcast(&event.session_id, &message).await {
+    match broadcaster
+        .broadcast(&event.session_id, &message_result)
+        .await
+    {
         Ok(_) => {
             if parsed_event_type == OutboxEventType::StateUpdate {
                 tracing::info!(
@@ -205,16 +252,16 @@ pub async fn process_pending_batch(
     broadcaster: &dyn Broadcaster,
 ) -> Result<usize, sqlx::Error> {
     let events: Vec<OutboxEvent> = sqlx::query_as(PENDING_EVENTS_QUERY)
-    .bind(MAX_RETRIES as i32)
-    .bind(BATCH_SIZE as i64)
-    .fetch_all(pool)
-    .await?;
+        .bind(MAX_RETRIES as i32)
+        .bind(BATCH_SIZE as i64)
+        .fetch_all(pool)
+        .await?;
 
     let events = prioritize_events_for_delivery(events);
     let count = events.len();
 
     for event in events {
-        let success = publish_event(broadcaster, &event).await;
+        let success = publish_event(pool, broadcaster, &event).await;
 
         if success {
             sqlx::query(
@@ -322,17 +369,15 @@ pub async fn run_outbox_worker(
             OutboxWorkerSignal::FlushRequested => {
                 flush_pending_events(&pool, broadcaster.as_ref(), "notify").await;
             }
-            OutboxWorkerSignal::CleanupTick => {
-                match cleanup_old_events(&pool).await {
-                    Ok(0) => {}
-                    Ok(count) => {
-                        tracing::info!(count, "Outbox worker cleaned up old events");
-                    }
-                    Err(e) => {
-                        tracing::error!("Outbox worker error cleaning up old events: {}", e);
-                    }
+            OutboxWorkerSignal::CleanupTick => match cleanup_old_events(&pool).await {
+                Ok(0) => {}
+                Ok(count) => {
+                    tracing::info!(count, "Outbox worker cleaned up old events");
                 }
-            }
+                Err(e) => {
+                    tracing::error!("Outbox worker error cleaning up old events: {}", e);
+                }
+            },
             OutboxWorkerSignal::ShutdownRequested => {
                 tracing::info!("Outbox worker received shutdown signal, flushing pending batch");
                 match process_pending_batch(&pool, broadcaster.as_ref()).await {
@@ -524,7 +569,8 @@ mod tests {
 
     #[test]
     fn pending_events_query_prioritizes_state_updates_before_sequence_order() {
-        assert!(PENDING_EVENTS_QUERY.contains("CASE WHEN event_type = 'STATE_UPDATE' THEN 0 ELSE 1 END"));
+        assert!(PENDING_EVENTS_QUERY
+            .contains("CASE WHEN event_type = 'STATE_UPDATE' THEN 0 ELSE 1 END"));
         assert!(PENDING_EVENTS_QUERY.contains("sequence_id"));
 
         let state_priority_index = PENDING_EVENTS_QUERY
@@ -545,6 +591,8 @@ mod tests {
     #[tokio::test]
     async fn publish_event_dispatches_state_update_to_broadcaster() {
         let spy = BroadcasterSpy::new();
+        let pool =
+            Pool::<MySql>::connect_lazy("mysql://ignored:ignored@localhost/ignored").unwrap();
         let event = OutboxEvent {
             id: "evt-1".to_string(),
             sequence_id: 1,
@@ -555,7 +603,7 @@ mod tests {
             retry_count: 0,
         };
 
-        let success = publish_event(&spy, &event).await;
+        let success = publish_event(&pool, &spy, &event).await;
 
         assert!(success);
         assert_eq!(
@@ -572,6 +620,8 @@ mod tests {
     #[tokio::test]
     async fn publish_event_dispatches_vote_update_to_broadcaster() {
         let spy = BroadcasterSpy::new();
+        let pool =
+            Pool::<MySql>::connect_lazy("mysql://ignored:ignored@localhost/ignored").unwrap();
         let event = OutboxEvent {
             id: "evt-2".to_string(),
             sequence_id: 10,
@@ -585,7 +635,7 @@ mod tests {
             retry_count: 0,
         };
 
-        let success = publish_event(&spy, &event).await;
+        let success = publish_event(&pool, &spy, &event).await;
 
         assert!(success);
         let messages = spy.messages_for_session("session-456").await;
@@ -599,6 +649,8 @@ mod tests {
     #[tokio::test]
     async fn publish_event_dispatches_qa_update_to_broadcaster() {
         let spy = BroadcasterSpy::new();
+        let pool =
+            Pool::<MySql>::connect_lazy("mysql://ignored:ignored@localhost/ignored").unwrap();
         let event = OutboxEvent {
             id: "evt-3".to_string(),
             sequence_id: 11,
@@ -616,7 +668,7 @@ mod tests {
             retry_count: 0,
         };
 
-        let success = publish_event(&spy, &event).await;
+        let success = publish_event(&pool, &spy, &event).await;
 
         assert!(success);
         let messages = spy.messages_for_session("session-789").await;
@@ -632,6 +684,8 @@ mod tests {
     #[tokio::test]
     async fn publish_event_dispatches_slides_update_to_broadcaster() {
         let spy = BroadcasterSpy::new();
+        let pool =
+            Pool::<MySql>::connect_lazy("mysql://ignored:ignored@localhost/ignored").unwrap();
         let event = OutboxEvent {
             id: "evt-4".to_string(),
             sequence_id: 12,
@@ -647,7 +701,7 @@ mod tests {
             retry_count: 0,
         };
 
-        let success = publish_event(&spy, &event).await;
+        let success = publish_event(&pool, &spy, &event).await;
 
         assert!(success);
         let messages = spy.messages_for_session("session-abc").await;
@@ -660,6 +714,8 @@ mod tests {
     #[tokio::test]
     async fn publish_event_returns_false_on_broadcaster_failure() {
         let spy = BroadcasterSpy::failing();
+        let pool =
+            Pool::<MySql>::connect_lazy("mysql://ignored:ignored@localhost/ignored").unwrap();
         let event = OutboxEvent {
             id: "evt-5".to_string(),
             sequence_id: 13,
@@ -670,7 +726,7 @@ mod tests {
             retry_count: 0,
         };
 
-        let success = publish_event(&spy, &event).await;
+        let success = publish_event(&pool, &spy, &event).await;
 
         assert!(!success);
         assert_eq!(
@@ -682,6 +738,8 @@ mod tests {
     #[tokio::test]
     async fn publish_event_returns_false_for_unknown_event_type() {
         let spy = BroadcasterSpy::new();
+        let pool =
+            Pool::<MySql>::connect_lazy("mysql://ignored:ignored@localhost/ignored").unwrap();
         let event = OutboxEvent {
             id: "evt-6".to_string(),
             sequence_id: 14,
@@ -692,7 +750,7 @@ mod tests {
             retry_count: 0,
         };
 
-        let success = publish_event(&spy, &event).await;
+        let success = publish_event(&pool, &spy, &event).await;
 
         assert!(!success);
         assert_eq!(
@@ -704,6 +762,8 @@ mod tests {
     #[tokio::test]
     async fn publish_event_preserves_sequence_numbers() {
         let spy = BroadcasterSpy::new();
+        let pool =
+            Pool::<MySql>::connect_lazy("mysql://ignored:ignored@localhost/ignored").unwrap();
         let event = OutboxEvent {
             id: "evt-7".to_string(),
             sequence_id: 99,
@@ -717,9 +777,33 @@ mod tests {
             retry_count: 0,
         };
 
-        publish_event(&spy, &event).await;
+        publish_event(&pool, &spy, &event).await;
 
         let messages = spy.messages_for_session("session-123").await;
         assert_eq!(messages[0]["sequence"], 99);
+    }
+
+    #[test]
+    fn vote_results_from_payload_returns_none_when_results_are_omitted_for_late_hydration() {
+        let payload = serde_json::json!({
+            "slideId": "slide-123"
+        });
+
+        assert!(vote_results_from_payload(&payload).is_none());
+    }
+
+    #[test]
+    fn vote_results_from_payload_clones_existing_results_without_mutating_shape() {
+        let payload = serde_json::json!({
+            "slideId": "slide-123",
+            "results": {
+                "opt-a": 4,
+                "opt-b": 2
+            }
+        });
+
+        let results = vote_results_from_payload(&payload).expect("results should be present");
+        assert_eq!(results["opt-a"], 4);
+        assert_eq!(results["opt-b"], 2);
     }
 }
