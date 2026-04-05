@@ -94,7 +94,10 @@ pub async fn get_ws_token(
             .map(|user| user.user_id)
             .ok_or_else(|| AppError::Auth("Missing authorization".to_string()))?,
         "student" | "projector" => {
-            state.session_service.get_session_state(&session_id).await?;
+            state
+                .session_service
+                .ensure_session_exists(&session_id)
+                .await?;
             auth_user
                 .map(|user| user.user_id)
                 .unwrap_or_else(|| public_user_id(&role, participant_id.as_deref(), &session_id))

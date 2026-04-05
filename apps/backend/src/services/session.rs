@@ -284,6 +284,16 @@ impl SessionService {
         })
     }
 
+    /// Lightweight existence check for auth/join hot paths.
+    pub async fn ensure_session_exists(&self, session_id: &str) -> Result<()> {
+        self.repository
+            .get_state_header(session_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
+
+        Ok(())
+    }
+
     /// Get session state for real-time sync
     pub async fn get_session_state(
         &self,
@@ -1077,6 +1087,35 @@ mod tests {
         assert_eq!(result.vote_counts["slide-a"]["opt-red"], 4);
         assert_eq!(result.vote_counts["slide-a"]["opt-blue"], 1);
         assert_eq!(result.vote_counts["slide-b"]["opt-green"], 9);
+    }
+
+    #[tokio::test]
+    async fn ensure_session_exists_uses_only_state_header() {
+        let repo = MockSessionRepository::default();
+        configure_repo(&repo, |state| {
+            state.state_header_result = Some(Some(SessionStateHeader {
+                current_slide_id: Some("slide-b".to_string()),
+                is_presentation_active: true,
+                is_results_visible: false,
+                state_version: 42,
+                vote_sequence: 17,
+                qa_sequence: 23,
+            }));
+        })
+        .await;
+        let service = build_service(&repo, Duration::from_secs(60));
+
+        service
+            .ensure_session_exists("session-1")
+            .await
+            .expect("session existence check should succeed");
+
+        let state = repo.snapshot().await;
+        assert_eq!(state.get_state_header_calls, vec!["session-1".to_string()]);
+        assert!(state.get_slides_calls.is_empty());
+        assert!(state.get_questions_calls.is_empty());
+        assert!(state.get_vote_counts_calls.is_empty());
+        assert!(state.get_participants_calls.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
