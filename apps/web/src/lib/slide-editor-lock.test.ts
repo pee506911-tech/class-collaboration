@@ -27,27 +27,27 @@ describe('getSlideEditorLockState', () => {
         });
     });
 
-    it('still locks the optimistic preview slide while it is syncing', () => {
+    it('keeps the optimistic preview slide editable while it is syncing', () => {
         expect(getSlideEditorLockState({
             hasPendingStructuralMutations: true,
             isReordering: false,
             disableEditing: true,
             syncState: 'syncing',
         })).toEqual({
-            disabled: true,
-            reason: 'This slide is still syncing. Editing is disabled until it is confirmed.',
+            disabled: false,
+            reason: null,
         });
     });
 
-    it('surfaces retry-specific guidance when the slide itself is still syncing', () => {
+    it('keeps retrying slides editable while they continue syncing', () => {
         expect(getSlideEditorLockState({
             hasPendingStructuralMutations: false,
             isReordering: false,
             disableEditing: true,
             syncState: 'retrying',
         })).toEqual({
-            disabled: true,
-            reason: 'This slide is retrying. Editing is disabled until it is confirmed.',
+            disabled: false,
+            reason: null,
         });
     });
 });

@@ -3,8 +3,8 @@ import { Slide } from 'shared';
 export const SESSION_INLINE_ERROR_KEY = '__session__';
 
 export type StructuralOpType = 'create' | 'duplicate' | 'delete';
-export type StructuralOpStatus = 'queued' | 'sending' | 'retrying';
-export type SlideSyncState = 'syncing' | 'retrying';
+export type StructuralOpStatus = 'queued' | 'sending' | 'retrying' | 'failed';
+export type SlideSyncState = 'queued' | 'syncing' | 'retrying' | 'failed';
 
 export type SlideErrorKey = string | typeof SESSION_INLINE_ERROR_KEY;
 
@@ -38,6 +38,7 @@ export type CreateLikeStructuralOp = StructuralOpBase & {
     type: 'create' | 'duplicate';
     tempId: string;
     afterId?: string;
+    sentContent?: SlideContent;
     payload: {
         slideType: SlideType;
         content: SlideContent;
@@ -60,6 +61,7 @@ export type StructuralOp = CreateLikeStructuralOp | DeleteStructuralOp;
 export type StructuralQueueState = {
     optimisticOps: Record<string, StructuralOp>;
     queue: string[];
+    displayOrder: string[];
     tempIdMap: Record<string, string>;
     inlineErrors: Record<string, string>;
     inFlightOpId: string | null;
@@ -69,6 +71,7 @@ export type StructuralQueueState = {
 export const initialStructuralQueueState: StructuralQueueState = {
     optimisticOps: {},
     queue: [],
+    displayOrder: [],
     tempIdMap: {},
     inlineErrors: {},
     inFlightOpId: null,
@@ -166,14 +169,19 @@ export function isOpReady(state: StructuralQueueState, op: StructuralOp | null):
 export function deriveOptimisticSlides(baseSlides: Slide[], state: StructuralQueueState): EditorSlide[] {
     let slides = normalizeSlides(baseSlides).map((slide) => ({ ...slide })) as EditorSlide[];
 
-    for (const opId of state.queue) {
-        const op = state.optimisticOps[opId];
+    for (const op of Object.values(state.optimisticOps)) {
         if (!op) {
             continue;
         }
 
-        if (op.type === 'delete') {
+        if (op.type === 'delete' && op.status !== 'failed') {
             slides = slides.filter((slide) => slide.id !== op.targetId);
+        }
+    }
+
+    for (const opId of state.displayOrder) {
+        const op = state.optimisticOps[opId];
+        if (!op || op.type === 'delete') {
             continue;
         }
 
@@ -191,11 +199,12 @@ export function deriveOptimisticSlides(baseSlides: Slide[], state: StructuralQue
             version: 0,
             optimistic: {
                 opId: op.opId,
-                syncState: op.status === 'retrying' ? 'retrying' : 'syncing',
-                isPending: true,
+                syncState: toSlideSyncState(op.status),
+                isPending: op.status !== 'failed',
                 isTemp: true,
-                disableEditing: true,
+                disableEditing: false,
                 sourceId: op.payload.sourceId,
+                error: op.error,
             },
         };
 
@@ -243,6 +252,7 @@ export function enqueueCreate(state: StructuralQueueState, params: EnqueueCreate
             [op.opId]: op,
         },
         queue: [...state.queue, op.opId],
+        displayOrder: [...state.displayOrder, op.opId],
         inlineErrors: omitKey(state.inlineErrors, SESSION_INLINE_ERROR_KEY),
     };
 }
@@ -280,6 +290,7 @@ export function enqueueDuplicate(
             [op.opId]: op,
         },
         queue: [...state.queue, op.opId],
+        displayOrder: [...state.displayOrder, op.opId],
         inlineErrors: omitKey(state.inlineErrors, params.sourceSlide.id),
     };
 
@@ -335,6 +346,7 @@ export function markOpSending(state: StructuralQueueState, opId: string): Struct
                 ...op,
                 status: 'sending',
                 error: undefined,
+                ...(op.type === 'delete' ? {} : { sentContent: op.payload.content }),
             },
         },
     };
@@ -400,6 +412,7 @@ export function resolveCreateLikeSuccess(
         ...state,
         optimisticOps: nextOps,
         queue: nextQueue,
+        displayOrder: state.displayOrder.filter((displayOpId) => displayOpId !== opId),
         inFlightOpId: state.inFlightOpId === opId ? null : state.inFlightOpId,
         tempIdMap: {
             ...state.tempIdMap,
@@ -445,33 +458,71 @@ export function failOpPermanently(
     }
 
     const removedOpIds = getDependentOpIds(state, opId);
-    const removedTempIds = removedOpIds.flatMap((removedOpId) => {
-        const removedOp = state.optimisticOps[removedOpId];
-        return removedOp && removedOp.type !== 'delete' ? [removedOp.tempId] : [];
-    });
-
     const nextOps = { ...state.optimisticOps };
     for (const removedOpId of removedOpIds) {
-        delete nextOps[removedOpId];
-    }
+        const removedOp = state.optimisticOps[removedOpId];
+        if (!removedOp || removedOp.type === 'delete') {
+            delete nextOps[removedOpId];
+            continue;
+        }
 
-    const nextInlineErrors = {
-        ...state.inlineErrors,
-        [op.payload.sourceId ?? SESSION_INLINE_ERROR_KEY]: error,
-    };
-
-    const nextTempIdMap = { ...state.tempIdMap };
-    for (const tempId of removedTempIds) {
-        delete nextTempIdMap[tempId];
+        nextOps[removedOpId] = {
+            ...removedOp,
+            status: 'failed',
+            error,
+        };
     }
 
     return {
         ...state,
         optimisticOps: nextOps,
         queue: state.queue.filter((queuedOpId) => !removedOpIds.includes(queuedOpId)),
-        tempIdMap: nextTempIdMap,
         inFlightOpId: state.inFlightOpId === opId ? null : state.inFlightOpId,
-        inlineErrors: nextInlineErrors,
+    };
+}
+
+export function updateCreateLikeDraft(
+    state: StructuralQueueState,
+    tempId: string,
+    content: SlideContent,
+): StructuralQueueState {
+    const opId = getOpIdByTempId(state, tempId);
+    if (!opId) {
+        return state;
+    }
+
+    const op = state.optimisticOps[opId];
+    if (!op || op.type === 'delete') {
+        return state;
+    }
+
+    return {
+        ...state,
+        optimisticOps: {
+            ...state.optimisticOps,
+            [opId]: {
+                ...op,
+                payload: {
+                    ...op.payload,
+                    content,
+                },
+            },
+        },
+    };
+}
+
+export function discardCreateLikeOp(state: StructuralQueueState, tempId: string): StructuralQueueState {
+    const opId = getOpIdByTempId(state, tempId);
+    if (!opId) {
+        return state;
+    }
+
+    return {
+        ...state,
+        optimisticOps: omitKey(state.optimisticOps, opId),
+        queue: state.queue.filter((queuedOpId) => queuedOpId !== opId),
+        displayOrder: state.displayOrder.filter((displayOpId) => displayOpId !== opId),
+        inFlightOpId: state.inFlightOpId === opId ? null : state.inFlightOpId,
     };
 }
 
@@ -527,7 +578,7 @@ function getDependentOpIds(state: StructuralQueueState, rootOpId: string): strin
     while (foundNewDependency) {
         foundNewDependency = false;
 
-        for (const opId of state.queue) {
+        for (const opId of state.displayOrder) {
             const op = state.optimisticOps[opId];
             if (!op || dependentOpIds.has(opId)) {
                 continue;
@@ -555,6 +606,22 @@ function insertSlideAfter(slides: Slide[], newSlide: Slide, afterId?: string): S
 
 function findSlideById(slides: Slide[], slideId: string): Slide | undefined {
     return slides.find((slide) => slide.id === slideId);
+}
+
+function toSlideSyncState(status: StructuralOpStatus): SlideSyncState {
+    if (status === 'queued') {
+        return 'queued';
+    }
+
+    if (status === 'retrying') {
+        return 'retrying';
+    }
+
+    if (status === 'failed') {
+        return 'failed';
+    }
+
+    return 'syncing';
 }
 
 function omitKey<T extends Record<string, unknown>>(record: T, key: string): T {

@@ -4,13 +4,16 @@ import { Slide } from 'shared';
 import {
     applyCreateLikeSuccessToBaseSlides,
     canEnqueueDelete,
+    discardCreateLikeOp,
     deriveOptimisticSlides,
     enqueueDelete,
     enqueueDuplicate,
     failOpPermanently,
     initialStructuralQueueState,
+    markOpSending,
     resolveCreateLikeSuccess,
     resolveSlideId,
+    updateCreateLikeDraft,
 } from './optimistic-slide-queue';
 
 function makeSlide(id: string, orderIndex: number): Slide {
@@ -93,7 +96,7 @@ describe('optimistic slide queue', () => {
         expect(deriveOptimisticSlides(nextBaseSlides, state).map((slide) => slide.id)).toEqual(['A', 'S101', 'temp-2', 'B']);
     });
 
-    it('removes failed temp subtrees and reports an inline source error', () => {
+    it('retains failed temp subtrees on the canvas with an error state', () => {
         const baseSlides = [makeSlide('A', 0), makeSlide('B', 1)];
         let state = initialStructuralQueueState;
 
@@ -115,9 +118,12 @@ describe('optimistic slide queue', () => {
         state = failOpPermanently(state, 'dup-1', 'Duplicate failed');
 
         expect(state.queue).toEqual([]);
-        expect(Object.keys(state.optimisticOps)).toEqual([]);
-        expect(deriveOptimisticSlides(baseSlides, state).map((slide) => slide.id)).toEqual(['A', 'B']);
-        expect(state.inlineErrors.A).toBe('Duplicate failed');
+        expect(Object.keys(state.optimisticOps)).toEqual(['dup-1', 'dup-2']);
+        expect(deriveOptimisticSlides(baseSlides, state).map((slide) => slide.id)).toEqual(['A', 'temp-1', 'temp-2', 'B']);
+        expect(deriveOptimisticSlides(baseSlides, state)[1].optimistic).toMatchObject({
+            syncState: 'failed',
+            error: 'Duplicate failed',
+        });
     });
 
     it('hides deleted slides immediately and blocks duplicate pending deletes', () => {
@@ -134,5 +140,88 @@ describe('optimistic slide queue', () => {
 
         expect(canEnqueueDelete(state, 'A')).toBe(false);
         expect(deriveOptimisticSlides(baseSlides, state).map((slide) => slide.id)).toEqual(['B']);
+    });
+
+    it('keeps temp slide drafts editable before and during send', () => {
+        const baseSlides = [makeSlide('A', 0)];
+        let state = enqueueDuplicate(initialStructuralQueueState, baseSlides, {
+            opId: 'dup-1',
+            tempId: 'temp-1',
+            sessionId: 'session-1',
+            clientRequestId: 'req-1',
+            sourceSlide: baseSlides[0],
+        });
+
+        state = updateCreateLikeDraft(state, 'temp-1', {
+            title: 'Edited before send',
+            body: 'Local body',
+        });
+
+        let slides = deriveOptimisticSlides(baseSlides, state);
+        expect(slides.find((slide) => slide.id === 'temp-1')?.content).toEqual({
+            title: 'Edited before send',
+            body: 'Local body',
+        });
+
+        state = markOpSending(state, 'dup-1');
+        state = updateCreateLikeDraft(state, 'temp-1', {
+            title: 'Edited while sending',
+            body: 'Newest body',
+        });
+
+        slides = deriveOptimisticSlides(baseSlides, state);
+        expect(slides.find((slide) => slide.id === 'temp-1')?.content).toEqual({
+            title: 'Edited while sending',
+            body: 'Newest body',
+        });
+        expect(state.optimisticOps['dup-1']).toMatchObject({
+            status: 'sending',
+            sentContent: { title: 'Edited before send', body: 'Local body' },
+            payload: { content: { title: 'Edited while sending', body: 'Newest body' } },
+        });
+    });
+
+    it('retains failed temp slides with their draft and error state', () => {
+        const baseSlides = [makeSlide('A', 0)];
+        let state = enqueueDuplicate(initialStructuralQueueState, baseSlides, {
+            opId: 'dup-1',
+            tempId: 'temp-1',
+            sessionId: 'session-1',
+            clientRequestId: 'req-1',
+            sourceSlide: baseSlides[0],
+        });
+
+        state = updateCreateLikeDraft(state, 'temp-1', {
+            title: 'Edited draft',
+            body: 'Keep me',
+        });
+        state = failOpPermanently(state, 'dup-1', 'Failed to save slide');
+
+        const slides = deriveOptimisticSlides(baseSlides, state);
+        expect(state.queue).toEqual([]);
+        expect(slides.map((slide) => slide.id)).toEqual(['A', 'temp-1']);
+        expect(slides[1]).toMatchObject({
+            content: { title: 'Edited draft', body: 'Keep me' },
+            optimistic: {
+                syncState: 'failed',
+                isPending: false,
+                error: 'Failed to save slide',
+            },
+        });
+    });
+
+    it('can discard a retained temp slide after a failed sync', () => {
+        const baseSlides = [makeSlide('A', 0)];
+        let state = enqueueDuplicate(initialStructuralQueueState, baseSlides, {
+            opId: 'dup-1',
+            tempId: 'temp-1',
+            sessionId: 'session-1',
+            clientRequestId: 'req-1',
+            sourceSlide: baseSlides[0],
+        });
+        state = failOpPermanently(state, 'dup-1', 'Failed to save slide');
+        state = discardCreateLikeOp(state, 'temp-1');
+
+        expect(deriveOptimisticSlides(baseSlides, state).map((slide) => slide.id)).toEqual(['A']);
     });
 });

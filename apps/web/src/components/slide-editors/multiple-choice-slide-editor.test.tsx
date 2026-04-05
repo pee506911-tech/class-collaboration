@@ -54,7 +54,7 @@ describe('MultipleChoiceSlideEditor', () => {
         );
     });
 
-    it('renders allow multiple selection toggle', () => {
+    it('does not render configuration controls in the content editor', () => {
         const onChange = vi.fn();
         render(
             <MultipleChoiceSlideEditor
@@ -64,20 +64,7 @@ describe('MultipleChoiceSlideEditor', () => {
             />,
         );
 
-        expect(screen.getByText(/allow multiple selection/i)).toBeTruthy();
-        expect(screen.getByText(/prevent students from changing/i)).toBeTruthy();
-    });
-
-    it('renders limit submissions toggle', () => {
-        const onChange = vi.fn();
-        render(
-            <MultipleChoiceSlideEditor
-                content={makeContent()}
-                onChange={onChange}
-                disabled={false}
-            />,
-        );
-
-        expect(screen.getByText(/limit to one submission/i)).toBeTruthy();
+        expect(screen.queryByText(/allow multiple selection/i)).toBeNull();
+        expect(screen.queryByText(/limit to one submission/i)).toBeNull();
     });
 });

@@ -111,4 +111,44 @@ describe('ClickerPage', () => {
 
         expect(apiMockState.publicSetCurrentSlide).toHaveBeenCalledWith('session-1', 'slide-2');
     });
+
+    it('does not fall back to slide 1 when there is no authoritative live slide yet', async () => {
+        wsMockState.initialState = {
+            currentSlideId: null,
+            stateVersion: 1,
+            isPresentationActive: true,
+            isResultsVisible: false,
+        };
+        apiMockState.publicGetSlides.mockResolvedValue([
+            {
+                id: 'slide-1',
+                sessionId: 'session-1',
+                type: 'static',
+                content: { title: 'One', body: 'First' },
+                orderIndex: 0,
+                isHidden: false,
+                version: 1,
+            },
+            {
+                id: 'slide-2',
+                sessionId: 'session-1',
+                type: 'static',
+                content: { title: 'Two', body: 'Second' },
+                orderIndex: 1,
+                isHidden: false,
+                version: 1,
+            },
+        ]);
+
+        const { default: ClickerPage } = await import('./page');
+        render(<ClickerPage />);
+
+        await act(async () => {
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+
+        expect(screen.getByText('No active slide')).toBeInTheDocument();
+        expect(screen.queryByTestId('slide-renderer')).not.toBeInTheDocument();
+    });
 });

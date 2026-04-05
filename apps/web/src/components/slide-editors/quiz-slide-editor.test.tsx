@@ -102,7 +102,7 @@ describe('QuizSlideEditor', () => {
         );
     });
 
-    it('renders limit submissions toggle', () => {
+    it('does not render configuration controls in the content editor', () => {
         const onChange = vi.fn();
         render(
             <QuizSlideEditor
@@ -112,6 +112,6 @@ describe('QuizSlideEditor', () => {
             />,
         );
 
-        expect(screen.getByText(/limit to one submission/i)).toBeTruthy();
+        expect(screen.queryByText(/limit to one submission/i)).toBeNull();
     });
 });

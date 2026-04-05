@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useRef } from 'react';
 
 import { Input } from '@/components/ui/input';
-import { Clock, Settings } from 'lucide-react';
+import { Clock } from 'lucide-react';
 import { useBufferedSlideContent } from './use-buffered-slide-content';
 
 interface QuizSlideEditorProps {
@@ -21,7 +21,6 @@ export function QuizSlideEditor({ content, onChange, onBlur, disabled }: QuizSli
     const question = content.question || '';
     const points = content.points || 1000;
     const timerDuration = content.timerDuration || 30;
-    const limitSubmissions = content.limitSubmissions !== false;
     const questionRef = useRef<HTMLInputElement | null>(null);
     const timerDurationRef = useRef<HTMLInputElement | null>(null);
     const pointsRef = useRef<HTMLInputElement | null>(null);
@@ -108,25 +107,6 @@ export function QuizSlideEditor({ content, onChange, onBlur, disabled }: QuizSli
                             onBlur={flushBufferedChange}
                         />
                     </div>
-                </div>
-            </div>
-
-            <div className="space-y-4 bg-white p-4 rounded-lg border">
-                <h3 className="font-medium flex items-center gap-2 text-slate-800">
-                    <Settings className="w-4 h-4" /> Configuration
-                </h3>
-                <div className="flex items-center justify-between">
-                    <div className="space-y-0.5">
-                        <label className="text-sm font-medium text-slate-700">Limit to One Submission</label>
-                        <p className="text-xs text-slate-500">Prevent students from changing their answer.</p>
-                    </div>
-                    <input
-                        type="checkbox"
-                        className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
-                        disabled={disabled}
-                        checked={limitSubmissions}
-                        onChange={(e) => onChange({ ...content, limitSubmissions: e.target.checked })}
-                    />
                 </div>
             </div>
         </div>

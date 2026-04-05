@@ -1,7 +1,7 @@
 import { Dispatch, SetStateAction, useEffect, useRef, useState } from 'react';
 import { Slide } from 'shared';
 
-import { ApiRequestError, createSlide, deleteSlide, isRetryableApiError } from '@/lib/api';
+import { ApiRequestError, createSlide, deleteSlide, isRetryableApiError, updateSlide } from '@/lib/api';
 import {
     SESSION_INLINE_ERROR_KEY,
     StructuralQueueState,
@@ -9,6 +9,7 @@ import {
     applyDeleteSuccessToBaseSlides,
     canEnqueueDelete,
     clearInlineError,
+    discardCreateLikeOp,
     deriveOptimisticSlides,
     enqueueCreate,
     enqueueDelete,
@@ -25,6 +26,7 @@ import {
     resolveCreateLikeSuccess,
     resolveDeleteSuccess,
     resolveSlideId,
+    updateCreateLikeDraft,
 } from '@/lib/optimistic-slide-queue';
 
 type UseOptimisticSlideQueueArgs = {
@@ -54,6 +56,11 @@ export function useOptimisticSlideQueue({
     const [state, setState] = useState<StructuralQueueState>(initialStructuralQueueState);
     const retryTimersRef = useRef<Record<string, number>>({});
     const processingRef = useRef(false);
+    const stateRef = useRef(state);
+
+    useEffect(() => {
+        stateRef.current = state;
+    }, [state]);
 
     useEffect(() => {
         return () => {
@@ -119,7 +126,19 @@ export function useOptimisticSlideQueue({
                     clientRequestId: head.clientRequestId,
                 });
 
-                setBaseSlides((prevSlides) => applyCreateLikeSuccessToBaseSlides(prevSlides, head, serverSlide, state.tempIdMap));
+                const latestOp = stateRef.current.optimisticOps[head.opId];
+                const latestDraft = latestOp && latestOp.type !== 'delete' ? latestOp.payload.content : head.payload.content;
+                const sentContent = latestOp && latestOp.type !== 'delete' ? latestOp.sentContent ?? latestOp.payload.content : head.payload.content;
+                const persistedSlide = areSlideContentsEqual(latestDraft, sentContent)
+                    ? serverSlide
+                    : await persistResolvedDraft({
+                        sessionId,
+                        slideId: serverSlide.id,
+                        content: latestDraft,
+                        baseVersion: serverSlide.version,
+                    });
+
+                setBaseSlides((prevSlides) => applyCreateLikeSuccessToBaseSlides(prevSlides, head, persistedSlide, state.tempIdMap));
                 setState((prev) => resolveCreateLikeSuccess(prev, head.opId, serverSlide.id));
             } catch (error) {
                 const apiError = toApiRequestError(error, head.type === 'delete' ? 'Failed to delete slide' : 'Failed to save slide');
@@ -210,6 +229,26 @@ export function useOptimisticSlideQueue({
         return { accepted: true };
     }
 
+    function stageTempSlideContent(slideId: string, content: Slide['content']): { accepted: boolean } {
+        const hasTempSlide = Boolean(getOpIdBySlideId(stateRef.current, slideId));
+        if (!hasTempSlide) {
+            return { accepted: false };
+        }
+
+        setState((prev) => updateCreateLikeDraft(prev, slideId, content));
+        return { accepted: true };
+    }
+
+    function discardTempSlide(slideId: string): { accepted: boolean } {
+        const hasTempSlide = Boolean(getOpIdBySlideId(stateRef.current, slideId));
+        if (!hasTempSlide) {
+            return { accepted: false };
+        }
+
+        setState((prev) => discardCreateLikeOp(prev, slideId));
+        return { accepted: true };
+    }
+
     function requestRefreshAfterDrain() {
         if (state.queue.length === 0) {
             void refreshBaseSlides();
@@ -229,6 +268,8 @@ export function useOptimisticSlideQueue({
         enqueueCreateSlide,
         enqueueDuplicateSlide,
         enqueueDeleteSlide,
+        stageTempSlideContent,
+        discardTempSlide,
         clearInlineError(targetId: string) {
             setState((prev) => clearInlineError(prev, targetId));
         },
@@ -242,6 +283,46 @@ export function useOptimisticSlideQueue({
         hasPendingStructuralMutations: state.queue.length > 0 || state.inFlightOpId !== null,
         sessionInlineError: state.inlineErrors[SESSION_INLINE_ERROR_KEY] ?? null,
     };
+}
+
+function getOpIdBySlideId(state: StructuralQueueState, slideId: string): string | null {
+    for (const [opId, op] of Object.entries(state.optimisticOps)) {
+        if (op.type !== 'delete' && op.tempId === slideId) {
+            return opId;
+        }
+    }
+
+    return null;
+}
+
+async function persistResolvedDraft({
+    sessionId,
+    slideId,
+    content,
+    baseVersion,
+}: {
+    sessionId: string;
+    slideId: string;
+    content: Slide['content'];
+    baseVersion: number;
+}) {
+    try {
+        return await updateSlide(sessionId, slideId, content, baseVersion);
+    } catch (error) {
+        if (error instanceof ApiRequestError && error.status === 404) {
+            throw new ApiRequestError('Slide is still confirming on the server', {
+                status: 404,
+                retryable: true,
+                cause: error,
+            });
+        }
+
+        throw error;
+    }
+}
+
+function areSlideContentsEqual(left: Slide['content'], right: Slide['content']) {
+    return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function createLocalId(prefix: string): string {

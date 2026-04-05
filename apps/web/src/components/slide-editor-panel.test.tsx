@@ -220,6 +220,7 @@ describe('SlideEditorPanel', () => {
                 dirty: false,
                 saving: false,
                 lastError: null,
+                phase: 'idle',
             });
 
             const input = screen.getByDisplayValue('Original');
@@ -579,6 +580,34 @@ describe('SlideEditorPanel', () => {
     // ── Characterization: Poll Slide Option CRUD ──
 
     describe('poll slide option CRUD', () => {
+        it('renders poll configuration under the settings tab', async () => {
+            vi.useFakeTimers();
+            const onUpdate = vi.fn().mockResolvedValue(undefined);
+
+            render(
+                <SlideEditorPanel
+                    slide={makePollSlide()}
+                    onUpdate={onUpdate}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            await act(async () => {
+                fireEvent.click(screen.getByRole('tab', { name: /settings/i }));
+            });
+
+            expect(screen.getByRole('button', { name: /bar chart/i })).toBeTruthy();
+            expect(screen.getByRole('button', { name: /pie chart/i })).toBeTruthy();
+            expect(screen.getByText(/limit to one submission/i)).toBeTruthy();
+
+            await act(async () => {
+                fireEvent.click(screen.getByRole('button', { name: /pie chart/i }));
+                vi.advanceTimersByTime(500);
+            });
+
+            expect(onUpdate).toHaveBeenCalledWith(expect.objectContaining({ chartType: 'pie' }));
+        });
+
         it('renders existing options', async () => {
             render(
                 <SlideEditorPanel
@@ -678,6 +707,7 @@ describe('SlideEditorPanel', () => {
                 dirty: false,
                 saving: false,
                 lastError: null,
+                phase: 'idle',
             });
 
             const redInput = screen.getByDisplayValue('Red');
@@ -726,6 +756,22 @@ describe('SlideEditorPanel', () => {
     // ── Characterization: Quiz Slide ──
 
     describe('quiz slide', () => {
+        it('renders quiz configuration under the settings tab', async () => {
+            render(
+                <SlideEditorPanel
+                    slide={makeQuizSlide()}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            await act(async () => {
+                fireEvent.click(screen.getByRole('tab', { name: /settings/i }));
+            });
+
+            expect(screen.getByText(/limit to one submission/i)).toBeTruthy();
+        });
+
         it('renders options with correct/incorrect state', async () => {
             render(
                 <SlideEditorPanel
@@ -794,7 +840,7 @@ describe('SlideEditorPanel', () => {
     // ── Characterization: Multiple Choice Slide ──
 
     describe('multiple choice slide', () => {
-        it('renders settings tab button', async () => {
+        it('renders configuration under the settings tab', async () => {
             render(
                 <SlideEditorPanel
                     slide={makeMultipleChoiceSlide()}
@@ -808,6 +854,13 @@ describe('SlideEditorPanel', () => {
             const contentTab = screen.getByRole('tab', { name: /content/i });
             expect(settingsTab).toBeTruthy();
             expect(contentTab).toBeTruthy();
+
+            await act(async () => {
+                fireEvent.click(settingsTab);
+            });
+
+            expect(screen.getByText(/allow multiple selection/i)).toBeTruthy();
+            expect(screen.getByText(/limit to one submission/i)).toBeTruthy();
         });
     });
 

@@ -170,11 +170,6 @@ function ClickerContent() {
                         setCurrentIndex(index);
                     });
                 }
-            } else if (currentIndex === -1) {
-                // Initialize to first slide if no state yet
-                queueMicrotask(() => {
-                    setCurrentIndex(0);
-                });
             }
         }
     }, [currentIndex, state?.currentSlideId, visibleSlides]); // Re-run when slides change (visibility might change)

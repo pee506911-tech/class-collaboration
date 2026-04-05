@@ -27,7 +27,7 @@ import { saveSlideUpdate, SlideVersionConflictError } from '@/lib/slide-update';
 import { SlideListItem } from '@/components/slide-list-item';
 import { getSlideEditorLockState } from '@/lib/slide-editor-lock';
 import { reorderSlidesWithRollback } from '@/lib/slide-reorder';
-import { getNextPreviewSlideId, resolveDeleteRollbackPreviewId, resolvePreviewSlideId } from '@/lib/slide-preview-selection';
+import { getNextPreviewSlideId, resolveDeleteRollbackPreviewId } from '@/lib/slide-preview-selection';
 
 function getDefaultSlideContent(type: Slide['type']) {
     if (type === 'static') return { title: 'New Slide', body: 'Content here' };
@@ -62,7 +62,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
     const [showDashboard, setShowDashboard] = useState(false);
     const [editTitle, setEditTitle] = useState('');
     const [showShareDialog, setShowShareDialog] = useState(false);
-    const [editorSync, setEditorSync] = useState<SlideEditorSyncStatus>({ dirty: false, saving: false, lastError: null });
+    const [editorSync, setEditorSync] = useState<SlideEditorSyncStatus>({ dirty: false, saving: false, lastError: null, phase: 'idle' });
     const [isReordering, setIsReordering] = useState(false);
     const [isTogglingVisibility, setIsTogglingVisibility] = useState(false);
     const [isSavingSettings, setIsSavingSettings] = useState(false);
@@ -87,12 +87,15 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
 
     // SEPARATE PREVIEW STATE: This is for editor preview only, independent of student view
     const [previewSlideId, setPreviewSlideId] = useState<string | null>(null);
+    const hasManualPreviewSelectionRef = useRef(false);
     const {
         slides,
         queueState,
         enqueueCreateSlide,
         enqueueDuplicateSlide,
         enqueueDeleteSlide,
+        stageTempSlideContent,
+        discardTempSlide,
         clearInlineError,
         clearSessionInlineError,
         resolveOptimisticId,
@@ -116,20 +119,48 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
         if (session) setEditTitle(session.title);
     }, [session]);
 
-    // Sync preview to active slide when it changes (optional - keeps preview updated)
     useEffect(() => {
-        if (state?.currentSlideId && !previewSlideId) {
-            setPreviewSlideId(state.currentSlideId);
+        if (previewSlideId) {
+            return;
         }
-    }, [state?.currentSlideId]);
+
+        if (state?.currentSlideId && slides.some((slide) => slide.id === state.currentSlideId)) {
+            setPreviewSlideId(state.currentSlideId);
+            return;
+        }
+
+        if (slides[0]) {
+            setPreviewSlideId(slides[0].id);
+        }
+    }, [previewSlideId, slides, state?.currentSlideId]);
 
     useEffect(() => {
-        setPreviewSlideId((currentPreviewSlideId) => resolvePreviewSlideId(
-            slides.map((slide) => slide.id),
-            currentPreviewSlideId,
-            queueState.tempIdMap,
-        ));
-    }, [queueState.tempIdMap, slides]);
+        setPreviewSlideId((currentPreviewSlideId) => {
+            if (!currentPreviewSlideId) {
+                return currentPreviewSlideId;
+            }
+
+            const resolvedPreviewSlideId = queueState.tempIdMap[currentPreviewSlideId] ?? currentPreviewSlideId;
+            if (slides.some((slide) => slide.id === resolvedPreviewSlideId)) {
+                return resolvedPreviewSlideId;
+            }
+
+            if (slides.some((slide) => slide.id === currentPreviewSlideId)) {
+                return currentPreviewSlideId;
+            }
+
+            if (currentPreviewSlideId.startsWith('temp-')) {
+                const liveSlideId = state?.currentSlideId ?? null;
+                if (liveSlideId && slides.some((slide) => slide.id === liveSlideId)) {
+                    return liveSlideId;
+                }
+
+                return slides[0]?.id ?? null;
+            }
+
+            return hasManualPreviewSelectionRef.current ? currentPreviewSlideId : (slides[0]?.id ?? null);
+        });
+    }, [queueState.tempIdMap, slides, state?.currentSlideId]);
 
     const handleSaveSettings = async () => {
         if (!session) return;
@@ -180,6 +211,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
             slideType: type as Slide['type'],
             content: getDefaultSlideContent(type as Slide['type']),
         });
+        hasManualPreviewSelectionRef.current = true;
         startTransition(() => {
             setPreviewSlideId(tempId);
             setShowTypeSelector(false);
@@ -191,10 +223,13 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
 
     // PREVIEW NAVIGATION: For editor preview only (does NOT affect students)
     const previewIndex = slides.findIndex(s => s.id === previewSlideId);
-    const previewSlide = slides[previewIndex] || slides[0];
+    const previewSlide = previewIndex >= 0 ? slides[previewIndex] : null;
+    const resolvedPreviewSlideId = previewSlideId ? resolveOptimisticId(previewSlideId) ?? previewSlideId : null;
+    const isPreviewLive = Boolean(state?.currentSlideId && resolvedPreviewSlideId === state.currentSlideId);
 
     const handlePreviewNext = useCallback(() => {
         if (previewIndex < slides.length - 1) {
+            hasManualPreviewSelectionRef.current = true;
             startTransition(() => {
                 setPreviewSlideId(slides[previewIndex + 1].id);
             });
@@ -203,6 +238,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
 
     const handlePreviewPrev = useCallback(() => {
         if (previewIndex > 0) {
+            hasManualPreviewSelectionRef.current = true;
             startTransition(() => {
                 setPreviewSlideId(slides[previewIndex - 1].id);
             });
@@ -210,14 +246,25 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
     }, [previewIndex, slides]);
 
     const handleSelectSlide = useCallback((slideId: string) => {
+        hasManualPreviewSelectionRef.current = true;
         startTransition(() => {
             setPreviewSlideId(slideId);
         });
     }, []);
 
     async function handleUpdateSlide(slideId: string, content: Slide['content']) {
+        const slide = slides.find((entry) => entry.id === slideId);
+        if (slide?.optimistic?.isTemp) {
+            const result = stageTempSlideContent(slideId, content);
+            if (!result.accepted) {
+                throw new Error('Failed to queue slide update');
+            }
+
+            return { status: 'queued' as const };
+        }
+
         try {
-            await saveSlideUpdate({
+            const result = await saveSlideUpdate({
                 sessionId: id,
                 slideId,
                 content,
@@ -226,6 +273,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                 setBaseSlides: setBaseSlidesSynced,
                 refreshSlides: loadSlides,
             });
+            return { status: 'saved' as const };
         } catch (e) {
             if (e instanceof SlideVersionConflictError) {
                 toast.error('Slide changed elsewhere', {
@@ -248,6 +296,20 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
             slideId,
             previewSlideId,
         );
+
+        if (slide.optimistic?.isTemp) {
+            const result = discardTempSlide(slideId);
+            if (!result.accepted) {
+                return;
+            }
+
+            hasManualPreviewSelectionRef.current = true;
+            startTransition(() => {
+                setPreviewSlideId(nextPreviewSlideId);
+            });
+            return;
+        }
+
         const result = enqueueDeleteSlide(slideId, {
             restorePreviewSlideId: previewSlideId,
             fallbackPreviewSlideId: nextPreviewSlideId,
@@ -255,6 +317,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
         if (!result.accepted) {
             return;
         }
+        hasManualPreviewSelectionRef.current = true;
         startTransition(() => {
             setPreviewSlideId(nextPreviewSlideId);
         });
@@ -266,6 +329,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
 
         clearInlineError(slideId);
         const tempId = enqueueDuplicateSlide(toSlide(slide));
+        hasManualPreviewSelectionRef.current = true;
         startTransition(() => {
             setPreviewSlideId(tempId);
         });
@@ -313,8 +377,6 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
         }
     }
 
-    const currentSlideIndex = slides.findIndex(s => s.id === state?.currentSlideId);
-    const currentSlide = slides[currentSlideIndex];
     const editorLockState = getSlideEditorLockState({
         hasPendingStructuralMutations,
         isReordering,
@@ -565,10 +627,25 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                 <span className="px-2.5 py-1 rounded-lg bg-blue-100 text-blue-700 font-semibold text-xs border border-blue-200">
                                     Preview: Slide {previewIndex + 1}
                                 </span>
-                                {state?.currentSlideId === previewSlideId && (
+                                {isPreviewLive && (
                                     <span className="px-2.5 py-1 rounded-lg bg-green-100 text-green-700 font-semibold text-xs border border-green-200">
                                         ● LIVE for Students
                                     </span>
+                                )}
+                                {!isPreviewLive && state?.currentSlideId && (
+                                    <Button
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-7 rounded-lg border-green-200 bg-white/90 px-2 text-[11px] font-semibold text-green-700 hover:bg-green-50"
+                                        onClick={() => {
+                                            hasManualPreviewSelectionRef.current = true;
+                                            startTransition(() => {
+                                                setPreviewSlideId(state.currentSlideId ?? null);
+                                            });
+                                        }}
+                                    >
+                                        Jump to live
+                                    </Button>
                                 )}
                             </div>
                             <div className="aspect-video bg-white shadow-2xl rounded-xl overflow-hidden ring-1 ring-slate-900/5 z-10 transition-all duration-300">

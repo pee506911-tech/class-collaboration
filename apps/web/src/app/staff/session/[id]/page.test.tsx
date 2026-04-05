@@ -19,6 +19,12 @@ const queueMockState = vi.hoisted(() => ({
     slides: null as null | any[],
     tempIdMap: {} as Record<string, string>,
     hasPendingStructuralMutations: false,
+    stageTempSlideContent: vi.fn(() => ({ accepted: true })),
+    discardTempSlide: vi.fn(() => ({ accepted: true })),
+}));
+
+const wsMockState = vi.hoisted(() => ({
+    initialState: null as null | Record<string, unknown>,
 }));
 
 // Mock next/navigation
@@ -116,16 +122,26 @@ vi.mock('@/lib/http', () => ({
     createClientRequestId: () => 'test-request-id',
 }));
 
-vi.mock('@/lib/websocket', () => ({
-    WebSocketProvider: ({ children }: { children: React.ReactNode }) => children,
-    useWebSocket: () => ({
-        sendMessage: vi.fn(),
-        state: null,
-        activeParticipants: 0,
-        updateState: vi.fn(),
-        initialStateLoaded: true,
-    }),
-}));
+vi.mock('@/lib/websocket', async () => {
+    const ReactModule = await import('react');
+
+    return {
+        WebSocketProvider: ({ children }: { children: React.ReactNode }) => children,
+        useWebSocket: () => {
+            const [state, setState] = ReactModule.useState(wsMockState.initialState);
+
+            return {
+                sendMessage: vi.fn(),
+                state,
+                activeParticipants: 0,
+                updateState: (updates: Record<string, unknown>) => {
+                    setState((prev: Record<string, unknown> | null) => ({ ...(prev ?? {}), ...updates }));
+                },
+                initialStateLoaded: true,
+            };
+        },
+    };
+});
 
 vi.mock('@/lib/use-optimistic-slide-queue', () => ({
     useOptimisticSlideQueue: ({ baseSlides, refreshBaseSlides, onDeleteRollback }: {
@@ -143,6 +159,8 @@ vi.mock('@/lib/use-optimistic-slide-queue', () => ({
             enqueueCreateSlide: mockEnqueueCreateSlide,
             enqueueDuplicateSlide: mockEnqueueDuplicateSlide,
             enqueueDeleteSlide: mockEnqueueDeleteSlide,
+            stageTempSlideContent: queueMockState.stageTempSlideContent,
+            discardTempSlide: queueMockState.discardTempSlide,
             clearInlineError: mockClearInlineError,
             clearSessionInlineError: mockClearSessionInlineError,
             resolveOptimisticId: mockResolveOptimisticId,
@@ -176,6 +194,11 @@ describe('SlideEditor session loading', () => {
         queueMockState.slides = null;
         queueMockState.tempIdMap = {};
         queueMockState.hasPendingStructuralMutations = false;
+        queueMockState.stageTempSlideContent.mockReset();
+        queueMockState.discardTempSlide.mockReset();
+        queueMockState.stageTempSlideContent.mockReturnValue({ accepted: true });
+        queueMockState.discardTempSlide.mockReturnValue({ accepted: true });
+        wsMockState.initialState = null;
         mockSaveSlideUpdate.mockResolvedValue({ status: 'saved' });
         apiMockState.reorderSlides.mockResolvedValue(undefined);
         vi.mocked(httpFetch).mockReset();
@@ -792,7 +815,7 @@ describe('SlideEditor session loading', () => {
         expect(screen.queryByText('Preview: Slide 1')).not.toBeInTheDocument();
     });
 
-    it('keeps a confirmed slide editable while a new temp slide is still syncing', async () => {
+    it('keeps temp slides editable and queues local saves while they are still syncing', async () => {
         mockStorage.set('token', 'valid-token');
         queueMockState.hasPendingStructuralMutations = true;
 
@@ -906,13 +929,100 @@ describe('SlideEditor session loading', () => {
         render(<SlideEditor />);
 
         fireEvent.click(await screen.findByText('New Slide'));
-        expect(await screen.findByDisplayValue('New Slide')).toBeDisabled();
+        const tempInput = await screen.findByDisplayValue('New Slide');
+        expect(tempInput).not.toBeDisabled();
+        fireEvent.change(tempInput, { target: { value: 'Edited temp slide' } });
+        fireEvent.blur(tempInput);
+
+        await waitFor(() => {
+            expect(queueMockState.stageTempSlideContent).toHaveBeenCalled();
+        });
+        expect(mockSaveSlideUpdate).not.toHaveBeenCalled();
 
         fireEvent.click(screen.getAllByText('Agenda')[0]);
 
         const agendaInput = await screen.findByDisplayValue('Agenda');
         expect(agendaInput).not.toBeDisabled();
-        expect(screen.queryByText('This slide is temporarily locked while structural changes are syncing.')).not.toBeInTheDocument();
+    });
+
+    it('shows a live badge for the authoritative slide and only follows live when asked', async () => {
+        mockStorage.set('token', 'valid-token');
+        wsMockState.initialState = {
+            currentSlideId: 'slide-live',
+            stateVersion: 5,
+            isPresentationActive: true,
+        };
+
+        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
+            if (url.includes('/sessions/test-session-id') && !url.includes('/slides')) {
+                return {
+                    response: {
+                        ok: true,
+                        json: async () => ({
+                            success: true,
+                            data: {
+                                id: 'test-session-id',
+                                title: 'Test Session',
+                                status: 'draft',
+                                createdAt: '2024-01-01T00:00:00Z',
+                                allowQuestions: false,
+                                requireName: false,
+                                createdBy: 'user-1',
+                            },
+                        }),
+                    },
+                };
+            }
+
+            if (url.includes('/slides')) {
+                return {
+                    response: {
+                        ok: true,
+                        json: async () => ({
+                            success: true,
+                            data: [
+                                {
+                                    id: 'slide-agenda',
+                                    sessionId: 'test-session-id',
+                                    type: 'static',
+                                    content: { title: 'Agenda', body: 'First slide' },
+                                    orderIndex: 0,
+                                    isHidden: false,
+                                    version: 1,
+                                },
+                                {
+                                    id: 'slide-live',
+                                    sessionId: 'test-session-id',
+                                    type: 'static',
+                                    content: { title: 'Live slide', body: 'Students see this' },
+                                    orderIndex: 1,
+                                    isHidden: false,
+                                    version: 1,
+                                },
+                            ],
+                        }),
+                    },
+                };
+            }
+
+            return { response: { ok: true, json: async () => ({ success: true, data: null }) } };
+        });
+
+        const { default: SlideEditor } = await import('./page');
+        render(<SlideEditor />);
+
+        expect(await screen.findByText('Preview: Slide 2')).toBeInTheDocument();
+        expect(screen.getByText('● LIVE for Students')).toBeInTheDocument();
+
+        fireEvent.click(screen.getAllByText('Agenda')[0]);
+
+        expect(await screen.findByText('Preview: Slide 1')).toBeInTheDocument();
+        expect(screen.queryByText('● LIVE for Students')).not.toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: /jump to live/i }));
+
+        expect(await screen.findByText('Preview: Slide 2')).toBeInTheDocument();
+        expect(screen.getByText('● LIVE for Students')).toBeInTheDocument();
     });
 
     it('keeps the delete fallback slide editable while the delete is still syncing', async () => {

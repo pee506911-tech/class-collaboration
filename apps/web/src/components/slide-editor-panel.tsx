@@ -1,7 +1,7 @@
 import type { Slide, StaticSlideContent, PollSlideContent, QuizSlideContent, MultipleChoiceSlideContent } from 'shared';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Plus, GripVertical, Trash2, Type, List, Trophy, CheckCircle2, AlertCircle, LoaderCircle } from 'lucide-react';
+import { Plus, GripVertical, Trash2, Type, List, Trophy, CheckCircle2, AlertCircle, LoaderCircle, Settings } from 'lucide-react';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -10,8 +10,15 @@ import { StaticSlideEditor } from '@/components/slide-editors/static-slide-edito
 import { PollSlideEditor } from '@/components/slide-editors/poll-slide-editor';
 import { QuizSlideEditor } from '@/components/slide-editors/quiz-slide-editor';
 import { MultipleChoiceSlideEditor } from '@/components/slide-editors/multiple-choice-slide-editor';
+import type { EditorSlide } from '@/lib/optimistic-slide-queue';
 
-export type SlideEditorSyncStatus = { dirty: boolean; saving: boolean; lastError?: string | null };
+export type SlideEditorSaveResult = { status: 'saved' | 'queued' };
+export type SlideEditorSyncStatus = {
+    dirty: boolean;
+    saving: boolean;
+    lastError?: string | null;
+    phase: 'idle' | 'saving' | 'queued' | 'error';
+};
 
 type SaveMode = 'auto' | 'manual';
 type SlideOption = { id: string; text: string; isCorrect?: boolean };
@@ -28,7 +35,7 @@ type SlideContentDraft = {
     timerDuration?: number;
 };
 type AutoSaveFeedback = {
-    phase: 'idle' | 'saving' | 'success' | 'error';
+    phase: 'idle' | 'saving' | 'queued' | 'success' | 'error';
     message: string | null;
 };
 
@@ -43,8 +50,8 @@ function areOptionListsEqual(left: SlideOption[], right: SlideOption[]) {
 }
 
 interface SlideEditorPanelProps {
-    slide: Slide;
-    onUpdate: (content: SlideContentDraft) => Promise<void>;
+    slide: Slide | EditorSlide;
+    onUpdate: (content: SlideContentDraft) => Promise<SlideEditorSaveResult>;
     onSave: () => void;
     onSyncStatusChange?: (status: SlideEditorSyncStatus) => void;
     disabled?: boolean;
@@ -165,13 +172,14 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
                 const seqToSave = editSeqRef.current;
                 const contentToSave = latestContentRef.current;
                 const saveMode = pendingSaveModeRef.current;
+                let saveResult: SlideEditorSaveResult = { status: 'saved' };
 
                 if (saveMode === 'auto') {
                     showAutoSaveFeedback('saving');
                 }
 
                 try {
-                    await onUpdateRef.current(contentToSave);
+                    saveResult = await onUpdateRef.current(contentToSave) ?? { status: 'saved' };
                 } catch (err: unknown) {
                     const message = err instanceof Error ? err.message : 'Failed to save';
                     setLastErrorState(message || 'Failed to save');
@@ -186,9 +194,13 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
                 ackedSeqRef.current = Math.max(ackedSeqRef.current, seqToSave);
                 setConsecutiveFailuresState(0);
                 if (saveMode === 'auto') {
-                    showAutoSaveFeedback('success', 'Draft saved', 2000);
+                    if (saveResult.status === 'queued') {
+                        showAutoSaveFeedback('queued', 'Saved locally. Syncing slide…');
+                    } else {
+                        showAutoSaveFeedback('success', 'Draft saved', 2000);
+                    }
                 } else {
-                    showAutoSaveFeedback('idle');
+                    showAutoSaveFeedback(saveResult.status === 'queued' ? 'queued' : 'idle', saveResult.status === 'queued' ? 'Saved locally. Syncing slide…' : null);
                 }
                 recomputeDirty();
             }
@@ -312,8 +324,13 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
     }, [slide.content, slide.version, setLastErrorState]);
 
     useEffect(() => {
-        onSyncStatusChange?.({ dirty, saving, lastError });
-    }, [dirty, saving, lastError, onSyncStatusChange]);
+        onSyncStatusChange?.({
+            dirty,
+            saving,
+            lastError,
+            phase: lastError ? 'error' : saving ? 'saving' : autoSaveFeedback.phase === 'queued' ? 'queued' : 'idle',
+        });
+    }, [autoSaveFeedback.phase, dirty, lastError, onSyncStatusChange, saving]);
 
     useEffect(() => {
         for (const option of (localContent.options || []) as SlideOption[]) {
@@ -412,6 +429,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
         await navigator.clipboard.writeText(JSON.stringify(latestContentRef.current, null, 2));
     };
 
+    const optimisticSyncState = (slide as EditorSlide).optimistic?.syncState;
     const saveIndicator = lastError
         ? {
             label: 'Save failed',
@@ -420,6 +438,30 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
             dotClassName: 'bg-rose-500',
             title: lastError,
         }
+        : optimisticSyncState === 'failed'
+            ? {
+                label: 'Sync failed',
+                tone: 'text-rose-700',
+                icon: <AlertCircle className="h-3.5 w-3.5" />,
+                dotClassName: 'bg-rose-500',
+                title: (slide as EditorSlide).optimistic?.error,
+            }
+            : optimisticSyncState === 'queued'
+                ? {
+                    label: 'Queued',
+                    tone: 'text-blue-700',
+                    icon: <LoaderCircle className="h-3.5 w-3.5" />,
+                    dotClassName: '',
+                    title: 'Saved locally. Waiting to sync this slide.',
+                }
+                : optimisticSyncState === 'syncing' || optimisticSyncState === 'retrying'
+                    ? {
+                        label: optimisticSyncState === 'retrying' ? 'Retrying…' : 'Syncing…',
+                        tone: optimisticSyncState === 'retrying' ? 'text-amber-700' : 'text-blue-700',
+                        icon: <LoaderCircle className={`h-3.5 w-3.5 ${optimisticSyncState === 'retrying' ? '' : 'animate-spin'}`} />,
+                        dotClassName: '',
+                        title: (slide as EditorSlide).optimistic?.error,
+                    }
         : saving
             ? {
                 label: 'Saving…',
@@ -444,13 +486,141 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
                     title: undefined,
                 };
 
+    const pollChartType = localContent.chartType || 'bar';
+    const limitSubmissions = localContent.limitSubmissions !== false;
+    const allowMultipleSelection = localContent.allowMultipleSelection || false;
+
+    const renderSettingsContent = () => {
+        if (slide.type === 'poll') {
+            return (
+                <div className="space-y-4 rounded-lg border bg-white p-4">
+                    <h3 className="flex items-center gap-2 font-medium text-slate-800">
+                        <Settings className="h-4 w-4" /> Configuration
+                    </h3>
+
+                    <div className="space-y-3 border-b border-slate-100 pb-4">
+                        <label className="text-sm text-slate-600">Chart Visualization</label>
+                        <div className="flex gap-2">
+                            <Button
+                                variant={pollChartType === 'bar' ? 'default' : 'outline'}
+                                disabled={disabled}
+                                onClick={() => updateField('chartType', 'bar')}
+                                size="sm"
+                                className="flex-1"
+                            >
+                                Bar Chart
+                            </Button>
+                            <Button
+                                variant={pollChartType === 'pie' ? 'default' : 'outline'}
+                                disabled={disabled}
+                                onClick={() => updateField('chartType', 'pie')}
+                                size="sm"
+                                className="flex-1"
+                            >
+                                Pie Chart
+                            </Button>
+                        </div>
+                    </div>
+
+                    <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                            <label className="text-sm font-medium text-slate-700">Limit to One Submission</label>
+                            <p className="text-xs text-slate-500">Prevent students from changing their answer.</p>
+                        </div>
+                        <input
+                            type="checkbox"
+                            className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                            disabled={disabled}
+                            checked={limitSubmissions}
+                            onChange={(e) => updateField('limitSubmissions', e.target.checked)}
+                        />
+                    </div>
+                </div>
+            );
+        }
+
+        if (slide.type === 'quiz') {
+            return (
+                <div className="space-y-4 rounded-lg border bg-white p-4">
+                    <h3 className="flex items-center gap-2 font-medium text-slate-800">
+                        <Settings className="h-4 w-4" /> Configuration
+                    </h3>
+                    <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                            <label className="text-sm font-medium text-slate-700">Limit to One Submission</label>
+                            <p className="text-xs text-slate-500">Prevent students from changing their answer.</p>
+                        </div>
+                        <input
+                            type="checkbox"
+                            className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                            disabled={disabled}
+                            checked={limitSubmissions}
+                            onChange={(e) => updateField('limitSubmissions', e.target.checked)}
+                        />
+                    </div>
+                </div>
+            );
+        }
+
+        if (slide.type === 'multiple-choice') {
+            return (
+                <div className="space-y-4 rounded-lg border bg-white p-4">
+                    <h3 className="flex items-center gap-2 font-medium text-slate-800">
+                        <Settings className="h-4 w-4" /> Configuration
+                    </h3>
+
+                    <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                            <div className="space-y-0.5">
+                                <label className="text-sm font-medium text-slate-700">Allow Multiple Selection</label>
+                                <p className="text-xs text-slate-500">Students can select more than one option.</p>
+                            </div>
+                            <input
+                                type="checkbox"
+                                className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                                disabled={disabled}
+                                checked={allowMultipleSelection}
+                                onChange={(e) => updateField('allowMultipleSelection', e.target.checked)}
+                            />
+                        </div>
+
+                        <div className="flex items-center justify-between">
+                            <div className="space-y-0.5">
+                                <label className="text-sm font-medium text-slate-700">Limit to One Submission</label>
+                                <p className="text-xs text-slate-500">Prevent students from changing their answer.</p>
+                            </div>
+                            <input
+                                type="checkbox"
+                                className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                                disabled={disabled}
+                                checked={limitSubmissions}
+                                onChange={(e) => updateField('limitSubmissions', e.target.checked)}
+                            />
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        return (
+            <div className="rounded-lg border bg-white p-4 text-sm text-slate-500">
+                <p>This slide has no additional settings.</p>
+            </div>
+        );
+    };
+
     return (
         <div className="h-full flex flex-col bg-slate-50">
             <div aria-live="polite" className="shrink-0">
-                <div className={`h-0.5 w-full transition-all duration-300 ${autoSaveFeedback.phase === 'idle' ? 'opacity-0' : 'opacity-100'} ${autoSaveFeedback.phase === 'saving' ? 'bg-blue-500 animate-pulse' : autoSaveFeedback.phase === 'success' ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+                <div className={`h-0.5 w-full transition-all duration-300 ${autoSaveFeedback.phase === 'idle' ? 'opacity-0' : 'opacity-100'} ${autoSaveFeedback.phase === 'saving' || autoSaveFeedback.phase === 'queued' ? 'bg-blue-500 animate-pulse' : autoSaveFeedback.phase === 'success' ? 'bg-emerald-500' : 'bg-rose-500'}`} />
                 {autoSaveFeedback.phase === 'error' && autoSaveFeedback.message && (
                     <div className="border-b border-rose-200 bg-rose-50 px-4 py-2 text-xs text-rose-700">
                         Auto-save paused. {autoSaveFeedback.message}
+                    </div>
+                )}
+                {autoSaveFeedback.phase === 'queued' && autoSaveFeedback.message && (
+                    <div className="border-b border-blue-200 bg-blue-50 px-4 py-2 text-xs text-blue-700">
+                        {autoSaveFeedback.message}
                     </div>
                 )}
             </div>
@@ -594,9 +764,7 @@ export function SlideEditorPanel({ slide, onUpdate, onSave, onSyncStatusChange, 
                     </TabsContent>
 
                     <TabsContent value="settings" forceMount className="space-y-6 mt-0 data-[state=inactive]:hidden">
-                        <div className="text-sm text-slate-500 p-4">
-                            <p>Settings for this slide type are included in the Content tab.</p>
-                        </div>
+                        {renderSettingsContent()}
                     </TabsContent>
                 </div>
             </Tabs>

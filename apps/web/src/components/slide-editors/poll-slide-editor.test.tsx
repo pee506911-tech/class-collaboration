@@ -93,7 +93,7 @@ describe('PollSlideEditor', () => {
         );
     });
 
-    it('renders chart type buttons', () => {
+    it('does not render configuration controls in the content editor', () => {
         const onChange = vi.fn();
         render(
             <PollSlideEditor
@@ -103,38 +103,8 @@ describe('PollSlideEditor', () => {
             />,
         );
 
-        expect(screen.getByRole('button', { name: /bar chart/i })).toBeTruthy();
-        expect(screen.getByRole('button', { name: /pie chart/i })).toBeTruthy();
-    });
-
-    it('calls onChange when chart type changes', () => {
-        const onChange = vi.fn();
-        render(
-            <PollSlideEditor
-                content={makeContent({ chartType: 'bar' })}
-                onChange={onChange}
-                disabled={false}
-            />,
-        );
-
-        const pieBtn = screen.getByRole('button', { name: /pie chart/i });
-        fireEvent.click(pieBtn);
-
-        expect(onChange).toHaveBeenCalledWith(
-            expect.objectContaining({ chartType: 'pie' }),
-        );
-    });
-
-    it('renders limit submissions toggle', () => {
-        const onChange = vi.fn();
-        render(
-            <PollSlideEditor
-                content={makeContent()}
-                onChange={onChange}
-                disabled={false}
-            />,
-        );
-
-        expect(screen.getByText(/limit to one submission/i)).toBeTruthy();
+        expect(screen.queryByRole('button', { name: /bar chart/i })).toBeNull();
+        expect(screen.queryByRole('button', { name: /pie chart/i })).toBeNull();
+        expect(screen.queryByText(/limit to one submission/i)).toBeNull();
     });
 });
