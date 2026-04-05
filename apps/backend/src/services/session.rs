@@ -321,7 +321,16 @@ impl SessionService {
 
         let slides_fut = self.repository.get_slides(session_id);
         let questions_fut = self.repository.get_questions(session_id);
-        let vote_counts_fut = self.repository.get_vote_counts(session_id);
+        let vote_counts_fut = async {
+            match header.current_slide_id.as_deref() {
+                Some(current_slide_id) => {
+                    self.repository
+                        .get_vote_counts_for_slide(session_id, current_slide_id)
+                        .await
+                }
+                None => Ok(Vec::new()),
+            }
+        };
 
         let (slides, questions, vote_counts_raw) =
             tokio::try_join!(slides_fut, questions_fut, vote_counts_fut)?;
@@ -475,6 +484,7 @@ mod tests {
         questions_result: Option<Vec<Question>>,
         participants_result: Option<Vec<Participant>>,
         vote_counts_result: Option<Vec<(String, String, i64)>>,
+        vote_counts_for_slide_result: Option<Vec<(String, String, i64)>>,
         sequences_result: Option<SessionSequences>,
         find_by_creator_calls: Vec<String>,
         find_by_creator_with_slide_count_calls: Vec<String>,
@@ -489,6 +499,7 @@ mod tests {
         get_questions_calls: Vec<String>,
         get_participants_calls: Vec<String>,
         get_vote_counts_calls: Vec<String>,
+        get_vote_counts_for_slide_calls: Vec<(String, String)>,
         get_sequences_calls: Vec<String>,
     }
 
@@ -633,7 +644,7 @@ mod tests {
             }));
             state.slides_result = Some(vec![]);
             state.questions_result = Some(vec![]);
-            state.vote_counts_result = Some(vec![]);
+            state.vote_counts_for_slide_result = Some(vec![]);
         })
         .await;
 
@@ -659,7 +670,7 @@ mod tests {
             }));
             state.slides_result = Some(vec![]);
             state.questions_result = Some(vec![]);
-            state.vote_counts_result = Some(vec![]);
+            state.vote_counts_for_slide_result = Some(vec![]);
         })
         .await;
 
@@ -800,6 +811,21 @@ mod tests {
                 .vote_counts_result
                 .clone()
                 .expect("vote_counts_result not configured"))
+        }
+
+        async fn get_vote_counts_for_slide(
+            &self,
+            session_id: &str,
+            slide_id: &str,
+        ) -> Result<Vec<(String, String, i64)>> {
+            let mut state = self.state.lock().await;
+            state
+                .get_vote_counts_for_slide_calls
+                .push((session_id.to_string(), slide_id.to_string()));
+            Ok(state
+                .vote_counts_for_slide_result
+                .clone()
+                .expect("vote_counts_for_slide_result not configured"))
         }
 
         async fn get_sequences(&self, session_id: &str) -> Result<SessionSequences> {
@@ -1062,11 +1088,8 @@ mod tests {
             }));
             state.slides_result = Some(vec![slide_a.clone(), slide_b.clone()]);
             state.questions_result = Some(vec![question.clone()]);
-            state.vote_counts_result = Some(vec![
-                (slide_a.id.clone(), "opt-red".to_string(), 4),
-                (slide_a.id.clone(), "opt-blue".to_string(), 1),
-                (slide_b.id.clone(), "opt-green".to_string(), 9),
-            ]);
+            state.vote_counts_for_slide_result =
+                Some(vec![(slide_b.id.clone(), "opt-green".to_string(), 9)]);
         })
         .await;
         let service = build_service(&repo, Duration::from_secs(60));
@@ -1084,9 +1107,14 @@ mod tests {
         assert_eq!(result.qa_sequence, 23);
         assert_eq!(result.slides.len(), 2);
         assert_eq!(result.questions.len(), 1);
-        assert_eq!(result.vote_counts["slide-a"]["opt-red"], 4);
-        assert_eq!(result.vote_counts["slide-a"]["opt-blue"], 1);
         assert_eq!(result.vote_counts["slide-b"]["opt-green"], 9);
+
+        let state = repo.snapshot().await;
+        assert!(state.get_vote_counts_calls.is_empty());
+        assert_eq!(
+            state.get_vote_counts_for_slide_calls,
+            vec![("session-1".to_string(), "slide-b".to_string())]
+        );
     }
 
     #[tokio::test]
@@ -1115,6 +1143,7 @@ mod tests {
         assert!(state.get_slides_calls.is_empty());
         assert!(state.get_questions_calls.is_empty());
         assert!(state.get_vote_counts_calls.is_empty());
+        assert!(state.get_vote_counts_for_slide_calls.is_empty());
         assert!(state.get_participants_calls.is_empty());
     }
 

@@ -398,6 +398,41 @@ impl SessionRepository for SqlxSessionRepository {
         Ok(counts)
     }
 
+    async fn get_vote_counts_for_slide(
+        &self,
+        session_id: &str,
+        slide_id: &str,
+    ) -> Result<Vec<(String, String, i64)>> {
+        let pool = self.get_pool().await?;
+        let counts = if crate::tidb_ru::should_sample() {
+            let mut conn = pool.acquire().await?;
+            let counts = sqlx::query_as(
+                "SELECT slide_id, option_id, CAST(SUM(vote_count) AS SIGNED) as count
+                 FROM vote_count_shards
+                 WHERE session_id = ? AND slide_id = ? AND vote_count > 0
+                 GROUP BY slide_id, option_id",
+            )
+            .bind(session_id)
+            .bind(slide_id)
+            .fetch_all(&mut *conn)
+            .await?;
+            crate::tidb_ru::log_last_query_info("votes.counts_by_session_slide", &mut *conn).await;
+            counts
+        } else {
+            sqlx::query_as(
+                "SELECT slide_id, option_id, CAST(SUM(vote_count) AS SIGNED) as count
+                 FROM vote_count_shards
+                 WHERE session_id = ? AND slide_id = ? AND vote_count > 0
+                 GROUP BY slide_id, option_id",
+            )
+            .bind(session_id)
+            .bind(slide_id)
+            .fetch_all(&pool)
+            .await?
+        };
+        Ok(counts)
+    }
+
     async fn get_sequences(&self, session_id: &str) -> Result<SessionSequences> {
         let pool = self.get_pool().await?;
         let sequences: Option<(u64, u64)> = sqlx::query_as(

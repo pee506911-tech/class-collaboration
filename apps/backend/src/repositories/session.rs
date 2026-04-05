@@ -43,6 +43,11 @@ pub trait SessionRepository: Send + Sync {
         session_id: &str,
     ) -> Result<Vec<crate::models::student::Participant>>;
     async fn get_vote_counts(&self, session_id: &str) -> Result<Vec<(String, String, i64)>>; // (slide_id, option_id, count)
+    async fn get_vote_counts_for_slide(
+        &self,
+        session_id: &str,
+        slide_id: &str,
+    ) -> Result<Vec<(String, String, i64)>>; // (slide_id, option_id, count)
     async fn get_sequences(&self, session_id: &str) -> Result<SessionSequences>;
 }
 
