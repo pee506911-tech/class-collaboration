@@ -28,8 +28,8 @@ mod middleware;
 mod models;
 mod repositories;
 mod services;
-mod ws;
 mod tidb_ru;
+mod ws;
 
 use config::Config;
 use db::{DbPoolSettings, LazyDbPool};
@@ -162,7 +162,10 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Waiting for database to be ready before accepting requests...");
     match lazy_pool.pool().await {
         Ok(_) => {
-            tracing::info!("Database is ready (total startup: {:?})", startup_time.elapsed());
+            tracing::info!(
+                "Database is ready (total startup: {:?})",
+                startup_time.elapsed()
+            );
         }
         Err(e) => {
             tracing::error!("Failed to initialize database: {}", e);

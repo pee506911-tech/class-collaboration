@@ -176,7 +176,10 @@ mod tests {
 
         assert_eq!(new_state_version, 6);
         // Not initial_state_version + slides_to_create
-        assert_ne!(new_state_version, initial_state_version + slides_to_create as i64);
+        assert_ne!(
+            new_state_version,
+            initial_state_version + slides_to_create as i64
+        );
     }
 
     #[test]
@@ -205,11 +208,7 @@ mod tests {
         // After deletion, remaining slides should be reordered
         const ORDER_STEP: i32 = 1024;
 
-        let mut slides_with_order = vec![
-            ("slide-a", 1024),
-            ("slide-b", 2048),
-            ("slide-c", 3072),
-        ];
+        let mut slides_with_order = vec![("slide-a", 1024), ("slide-b", 2048), ("slide-c", 3072)];
 
         // Delete slide-b
         slides_with_order.retain(|(id, _)| *id != "slide-b");
@@ -383,9 +382,6 @@ mod tests {
         stored_responses.insert(key1, response1);
         stored_responses.insert(key2, response2);
 
-        assert_ne!(
-            stored_responses.get(key1),
-            stored_responses.get(key2)
-        );
+        assert_ne!(stored_responses.get(key1), stored_responses.get(key2));
     }
 }

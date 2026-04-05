@@ -1547,10 +1547,7 @@ async fn t13_slide_update_idempotency_replays_committed_result() {
         )
         .await
         .expect("first update request failed");
-    assert!(
-        first.status().is_success(),
-        "first update should succeed"
-    );
+    assert!(first.status().is_success(), "first update should succeed");
     let first_body: Value = first
         .json()
         .await
@@ -1662,7 +1659,7 @@ async fn t14_slide_update_enqueues_outbox_event() {
     // Verify outbox event was created
     let outbox_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM outbox_events
-         WHERE session_id = ? AND event_type = 'SLIDES_UPDATE' AND status = 'pending'"
+         WHERE session_id = ? AND event_type = 'SLIDES_UPDATE' AND status = 'pending'",
     )
     .bind(&fixture.session_id)
     .fetch_one(&*fixture.pool)
@@ -1678,7 +1675,7 @@ async fn t14_slide_update_enqueues_outbox_event() {
     let outbox_payload: sqlx::types::Json<Value> = sqlx::query_scalar(
         "SELECT payload FROM outbox_events
          WHERE session_id = ? AND event_type = 'SLIDES_UPDATE' AND status = 'pending'
-         ORDER BY created_at DESC LIMIT 1"
+         ORDER BY created_at DESC LIMIT 1",
     )
     .bind(&fixture.session_id)
     .fetch_one(&*fixture.pool)
@@ -1749,7 +1746,12 @@ async fn t15_vote_rejects_deleted_option() {
 
     let initial_version = fixture.get_slide_version(&fixture.slide_id).await;
     let update_response = fixture
-        .update_slide(&fixture.slide_id, slide_content, Some(initial_version), None)
+        .update_slide(
+            &fixture.slide_id,
+            slide_content,
+            Some(initial_version),
+            None,
+        )
         .await
         .expect("slide update request failed");
     assert!(
@@ -1804,7 +1806,12 @@ async fn t16_vote_accepts_valid_option_after_content_change() {
 
     let initial_version = fixture.get_slide_version(&fixture.slide_id).await;
     let update_response = fixture
-        .update_slide(&fixture.slide_id, slide_content, Some(initial_version), None)
+        .update_slide(
+            &fixture.slide_id,
+            slide_content,
+            Some(initial_version),
+            None,
+        )
         .await
         .expect("slide update request failed");
     assert!(

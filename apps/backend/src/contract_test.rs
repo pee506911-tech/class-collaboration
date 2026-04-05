@@ -307,7 +307,10 @@ mod tests {
         for response in error_responses {
             assert_eq!(response["success"], false, "success should be false");
             assert!(response["error"].is_string(), "error should be a string");
-            assert!(response.get("data").is_some(), "data field should be present");
+            assert!(
+                response.get("data").is_some(),
+                "data field should be present"
+            );
         }
     }
 }

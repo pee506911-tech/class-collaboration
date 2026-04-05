@@ -68,10 +68,7 @@ mod tests {
     }
 
     fn build_parts_no_auth(config: Arc<Config>) -> Request<()> {
-        Request::builder()
-            .extension(config)
-            .body(())
-            .unwrap()
+        Request::builder().extension(config).body(()).unwrap()
     }
 
     async fn extract_auth(req: Request<()>) -> Result<AuthUser, AppError> {

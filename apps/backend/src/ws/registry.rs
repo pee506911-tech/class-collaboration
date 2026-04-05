@@ -231,7 +231,10 @@ mod tests {
         let registry = InMemoryRegistry::new();
         let msg = serde_json::json!({ "type": "STATE_UPDATE" });
 
-        let delivered = registry.broadcast("nonexistent-session", &msg).await.unwrap();
+        let delivered = registry
+            .broadcast("nonexistent-session", &msg)
+            .await
+            .unwrap();
         assert_eq!(delivered, 0);
     }
 
@@ -347,9 +350,7 @@ mod tests {
 
         for _ in 0..10 {
             let reg = registry.clone();
-            handles.push(tokio::spawn(async move {
-                reg.register("session-1").await
-            }));
+            handles.push(tokio::spawn(async move { reg.register("session-1").await }));
         }
 
         let receivers: Vec<_> = futures_util::future::join_all(handles)

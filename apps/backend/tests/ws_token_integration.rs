@@ -52,13 +52,13 @@ async fn register_and_login(client: &Client, base: &str) -> (String, String) {
         .send()
         .await
         .expect("login failed");
-    
+
     let body: Value = resp.json().await.expect("login body not json");
     let token = body["token"]
         .as_str()
         .unwrap_or_else(|| panic!("login response has no token, got: {}", body))
         .to_string();
-    
+
     (token, email)
 }
 
@@ -67,16 +67,13 @@ async fn register_and_login(client: &Client, base: &str) -> (String, String) {
 async fn ws_token_returns_valid_jwt_with_auth() {
     let client = Client::new();
     let base = server_url();
-    
+
     let (auth_token, _email) = register_and_login(&client, &base).await;
-    
+
     let session_id = "test-session-ws-token-1";
     let resp = client
         .get(format!("{}/api/auth/ws-token", base))
-        .query(&[
-            ("sessionId", session_id),
-            ("role", "student"),
-        ])
+        .query(&[("sessionId", session_id), ("role", "student")])
         .header("Authorization", bearer(&auth_token))
         .send()
         .await
@@ -94,7 +91,7 @@ async fn ws_token_returns_valid_jwt_with_auth() {
         .expect("ws-token response missing token field");
 
     assert!(!token.is_empty(), "token should not be empty");
-    
+
     // Token should be a valid JWT (contains 3 parts separated by dots)
     let parts: Vec<&str> = token.split('.').collect();
     assert_eq!(parts.len(), 3, "JWT should have 3 parts");
@@ -105,7 +102,7 @@ async fn ws_token_returns_valid_jwt_with_auth() {
 async fn ws_token_allows_unauthenticated_student() {
     let client = Client::new();
     let base = server_url();
-    
+
     let resp = client
         .get(format!("{}/api/auth/ws-token", base))
         .query(&[
@@ -132,10 +129,7 @@ async fn ws_token_rejects_unauthenticated_staff() {
 
     let resp = client
         .get(format!("{}/api/auth/ws-token", base))
-        .query(&[
-            ("sessionId", "test-session"),
-            ("role", "staff"),
-        ])
+        .query(&[("sessionId", "test-session"), ("role", "staff")])
         .send()
         .await
         .expect("ws-token request failed");
@@ -152,9 +146,9 @@ async fn ws_token_rejects_unauthenticated_staff() {
 async fn ws_token_rejects_missing_session_id() {
     let client = Client::new();
     let base = server_url();
-    
+
     let (auth_token, _email) = register_and_login(&client, &base).await;
-    
+
     let resp = client
         .get(format!("{}/api/auth/ws-token", base))
         .query(&[("role", "student")])
@@ -175,25 +169,18 @@ async fn ws_token_rejects_missing_session_id() {
 async fn ws_token_rejects_invalid_role() {
     let client = Client::new();
     let base = server_url();
-    
+
     let (auth_token, _email) = register_and_login(&client, &base).await;
-    
+
     let resp = client
         .get(format!("{}/api/auth/ws-token", base))
-        .query(&[
-            ("sessionId", "test-session"),
-            ("role", "invalid_role"),
-        ])
+        .query(&[("sessionId", "test-session"), ("role", "invalid_role")])
         .header("Authorization", bearer(&auth_token))
         .send()
         .await
         .expect("ws-token request failed");
 
-    assert_eq!(
-        resp.status(),
-        400,
-        "ws-token should reject invalid role"
-    );
+    assert_eq!(resp.status(), 400, "ws-token should reject invalid role");
 }
 
 #[tokio::test]
@@ -201,16 +188,13 @@ async fn ws_token_rejects_invalid_role() {
 async fn ws_token_accepts_all_valid_roles() {
     let client = Client::new();
     let base = server_url();
-    
+
     let (auth_token, _email) = register_and_login(&client, &base).await;
-    
+
     for role in &["staff", "student", "projector"] {
         let mut req = client
             .get(format!("{}/api/auth/ws-token", base))
-            .query(&[
-                ("sessionId", "test-session"),
-                ("role", role),
-            ]);
+            .query(&[("sessionId", "test-session"), ("role", role)]);
 
         if *role == "student" {
             req = req.query(&[("participantId", "participant-123")]);
@@ -243,9 +227,9 @@ async fn ws_token_accepts_all_valid_roles() {
 async fn ws_token_accepts_optional_participant_id() {
     let client = Client::new();
     let base = server_url();
-    
+
     let (auth_token, _email) = register_and_login(&client, &base).await;
-    
+
     let resp = client
         .get(format!("{}/api/auth/ws-token", base))
         .query(&[
@@ -273,10 +257,7 @@ async fn ws_token_rejects_student_without_participant_id() {
 
     let resp = client
         .get(format!("{}/api/auth/ws-token", base))
-        .query(&[
-            ("sessionId", "test-session"),
-            ("role", "student"),
-        ])
+        .query(&[("sessionId", "test-session"), ("role", "student")])
         .send()
         .await
         .expect("ws-token request failed");

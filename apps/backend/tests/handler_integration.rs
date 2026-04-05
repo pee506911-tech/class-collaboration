@@ -635,11 +635,7 @@ async fn i10_health_endpoint_db_ready() {
         .unwrap();
     let base = server_url();
 
-    let resp = client
-        .get(format!("{}/health", base))
-        .send()
-        .await
-        .unwrap();
+    let resp = client.get(format!("{}/health", base)).send().await.unwrap();
     assert!(
         resp.status().is_success(),
         "health check failed: {}",

@@ -1,13 +1,13 @@
 use axum::{
-    http::{header::AUTHORIZATION, HeaderMap},
     extract::{Query, State},
+    http::{header::AUTHORIZATION, HeaderMap},
     Extension, Json,
 };
 use axum_extra::extract::cookie::CookieJar;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::{SystemTime, Duration};
+use std::time::{Duration, SystemTime};
 
 use crate::config::Config;
 use crate::error::AppError;
@@ -73,12 +73,13 @@ pub async fn get_ws_token(
 
     // Validate role
     if !["staff", "student", "projector"].contains(&role.as_str()) {
-        return Err(AppError::Input(format!("Invalid role: {}. Must be staff, student, or projector", role)));
+        return Err(AppError::Input(format!(
+            "Invalid role: {}. Must be staff, student, or projector",
+            role
+        )));
     }
 
-    let participant_id = params
-        .participant_id
-        .filter(|p| !p.trim().is_empty());
+    let participant_id = params.participant_id.filter(|p| !p.trim().is_empty());
 
     if role == "student" && participant_id.is_none() {
         return Err(AppError::Input(
@@ -249,15 +250,24 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer token-123"));
 
-        assert_eq!(extract_auth_token(&jar, &headers).as_deref(), Some("token-123"));
+        assert_eq!(
+            extract_auth_token(&jar, &headers).as_deref(),
+            Some("token-123")
+        );
     }
 
     #[test]
     fn extract_auth_token_prefers_cookie() {
         let jar = CookieJar::new().add(Cookie::new("token", "cookie-token"));
         let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer header-token"));
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer header-token"),
+        );
 
-        assert_eq!(extract_auth_token(&jar, &headers).as_deref(), Some("cookie-token"));
+        assert_eq!(
+            extract_auth_token(&jar, &headers).as_deref(),
+            Some("cookie-token")
+        );
     }
 }

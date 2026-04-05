@@ -57,10 +57,7 @@ mod config_parsing_logic_tests {
     #[test]
     fn allowed_origins_comma_split_trims_whitespace() {
         let input = "http://localhost:3000, http://example.com , http://test.com";
-        let origins: Vec<String> = input
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .collect();
+        let origins: Vec<String> = input.split(',').map(|s| s.trim().to_string()).collect();
         assert_eq!(origins.len(), 3);
         assert_eq!(origins[0], "http://localhost:3000");
         assert_eq!(origins[1], "http://example.com");
@@ -70,10 +67,7 @@ mod config_parsing_logic_tests {
     #[test]
     fn allowed_origins_single_value() {
         let input = "http://localhost:3000";
-        let origins: Vec<String> = input
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .collect();
+        let origins: Vec<String> = input.split(',').map(|s| s.trim().to_string()).collect();
         assert_eq!(origins, vec!["http://localhost:3000"]);
     }
 
@@ -108,8 +102,8 @@ mod config_parsing_logic_tests {
     #[test]
     fn api_concurrency_limit_clamping() {
         let calc = |db_max_conn: u32| (db_max_conn as usize * 8).clamp(64, 512);
-        assert_eq!(calc(5), 64);   // 40 → clamped to min 64
-        assert_eq!(calc(8), 64);   // At min boundary
+        assert_eq!(calc(5), 64); // 40 → clamped to min 64
+        assert_eq!(calc(8), 64); // At min boundary
         assert_eq!(calc(20), 160); // Normal
         assert_eq!(calc(64), 512); // At max
         assert_eq!(calc(100), 512); // Above max → clamped
@@ -118,7 +112,7 @@ mod config_parsing_logic_tests {
     #[test]
     fn api_buffer_size_clamping() {
         let calc = |concurrency: usize| (concurrency * 8).clamp(256, 4096);
-        assert_eq!(calc(8), 256);  // 64 → clamped to min 256
+        assert_eq!(calc(8), 256); // 64 → clamped to min 256
         assert_eq!(calc(32), 256); // At min boundary
         assert_eq!(calc(160), 1280); // Normal
         assert_eq!(calc(512), 4096); // At max
@@ -128,24 +122,37 @@ mod config_parsing_logic_tests {
     #[test]
     fn session_state_cache_ttl_default_development() {
         let environment = "development";
-        let default = if environment == "production" { 1_000 } else { 0 };
+        let default = if environment == "production" {
+            1_000
+        } else {
+            0
+        };
         assert_eq!(default, 0); // disabled in dev
     }
 
     #[test]
     fn session_state_cache_ttl_default_production() {
         let environment = "production";
-        let default = if environment == "production" { 1_000 } else { 0 };
+        let default = if environment == "production" {
+            1_000
+        } else {
+            0
+        };
         assert_eq!(default, 1_000); // 1 second in prod
     }
 
     #[test]
     fn perf_test_token_trimmed_and_filtered() {
         let parse_token = |input: Option<&str>| -> Option<String> {
-            input.map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+            input
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
         };
 
-        assert_eq!(parse_token(Some("  my-token  ")), Some("my-token".to_string()));
+        assert_eq!(
+            parse_token(Some("  my-token  ")),
+            Some("my-token".to_string())
+        );
         assert_eq!(parse_token(Some("   ")), None);
         assert_eq!(parse_token(Some("")), None);
         assert_eq!(parse_token(None), None);

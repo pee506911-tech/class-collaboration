@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::ws::registry::{Broadcaster, BroadcastError};
+use crate::ws::registry::{BroadcastError, Broadcaster};
 
 /// Test double for the Broadcaster trait.
 ///
@@ -74,7 +74,9 @@ impl Broadcaster for BroadcasterSpy {
     async fn broadcast(&self, session_id: &str, message: &Value) -> Result<usize, BroadcastError> {
         if self.should_fail {
             self.failure_count.fetch_add(1, Ordering::SeqCst);
-            Err(BroadcastError::Internal("Spy configured to fail".to_string()))
+            Err(BroadcastError::Internal(
+                "Spy configured to fail".to_string(),
+            ))
         } else {
             self.calls
                 .lock()
@@ -123,12 +125,18 @@ mod tests {
     async fn spy_returns_messages_for_specific_session() {
         let spy = BroadcasterSpy::new();
 
-        spy.broadcast("session-1", &json!({ "type": "STATE_UPDATE", "version": 1 }))
-            .await
-            .unwrap();
-        spy.broadcast("session-1", &json!({ "type": "STATE_UPDATE", "version": 2 }))
-            .await
-            .unwrap();
+        spy.broadcast(
+            "session-1",
+            &json!({ "type": "STATE_UPDATE", "version": 1 }),
+        )
+        .await
+        .unwrap();
+        spy.broadcast(
+            "session-1",
+            &json!({ "type": "STATE_UPDATE", "version": 2 }),
+        )
+        .await
+        .unwrap();
         spy.broadcast("session-2", &json!({ "type": "VOTE_UPDATE" }))
             .await
             .unwrap();

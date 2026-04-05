@@ -78,7 +78,10 @@ mod tests {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
-        assert!(!default_value, "general rate limit should be disabled by default");
+        assert!(
+            !default_value,
+            "general rate limit should be disabled by default"
+        );
     }
 
     #[test]

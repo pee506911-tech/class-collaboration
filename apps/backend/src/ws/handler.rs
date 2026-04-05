@@ -1,19 +1,19 @@
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::response::IntoResponse;
 use axum::{
     extract::{ConnectInfo, Query, State},
     Extension,
 };
-use axum::extract::ws::{WebSocketUpgrade, Message, WebSocket};
-use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use serde_json::Value;
 
-use crate::ws::registry::InMemoryRegistry;
 use crate::config::Config;
+use crate::ws::registry::InMemoryRegistry;
 
 /// Query parameters for the WebSocket upgrade endpoint.
 #[derive(Deserialize)]
@@ -68,7 +68,9 @@ pub async fn ws_handler(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
     let client_ip = addr.to_string();
-    ws.on_upgrade(move |socket| handle_socket(socket, config, app_state.registry, params.token, client_ip))
+    ws.on_upgrade(move |socket| {
+        handle_socket(socket, config, app_state.registry, params.token, client_ip)
+    })
 }
 
 /// Handle an upgraded WebSocket connection.
@@ -92,7 +94,11 @@ async fn handle_socket(
         }
     };
 
-    let client_id = resolve_client_id(&claims.session_id, &claims.role, claims.participant_id.as_deref());
+    let client_id = resolve_client_id(
+        &claims.session_id,
+        &claims.role,
+        claims.participant_id.as_deref(),
+    );
 
     tracing::info!(
         session_id = %claims.session_id,
@@ -270,18 +276,12 @@ mod tests {
 
     #[test]
     fn resolve_client_id_uses_participant_id_when_present() {
-        assert_eq!(
-            resolve_client_id("s1", "student", Some("p-001")),
-            "p-001"
-        );
+        assert_eq!(resolve_client_id("s1", "student", Some("p-001")), "p-001");
     }
 
     #[test]
     fn resolve_client_id_falls_back_to_role_session() {
-        assert_eq!(
-            resolve_client_id("s1", "student", None),
-            "student-s1"
-        );
+        assert_eq!(resolve_client_id("s1", "student", None), "student-s1");
     }
 
     #[test]
@@ -302,9 +302,6 @@ mod tests {
             resolve_client_id("abc", "projector", Some("proj-1")),
             "proj-1"
         );
-        assert_eq!(
-            resolve_client_id("abc", "projector", None),
-            "projector-abc"
-        );
+        assert_eq!(resolve_client_id("abc", "projector", None), "projector-abc");
     }
 }

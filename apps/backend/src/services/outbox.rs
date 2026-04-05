@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{MySql, Pool};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::MissedTickBehavior;
 use tokio::sync::watch;
+use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
 use crate::ws::registry::Broadcaster;
@@ -181,12 +181,10 @@ pub async fn process_pending_batch(
             .execute(pool)
             .await?;
         } else {
-            sqlx::query(
-                "UPDATE outbox_events SET retry_count = retry_count + 1 WHERE id = ?",
-            )
-            .bind(&event.id)
-            .execute(pool)
-            .await?;
+            sqlx::query("UPDATE outbox_events SET retry_count = retry_count + 1 WHERE id = ?")
+                .bind(&event.id)
+                .execute(pool)
+                .await?;
         }
     }
 
@@ -195,12 +193,11 @@ pub async fn process_pending_batch(
 
 /// Clean up events older than the configured retention period
 pub async fn cleanup_old_events(pool: &Pool<MySql>) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(
-        "DELETE FROM outbox_events WHERE created_at < NOW() - INTERVAL ? HOUR",
-    )
-    .bind(CLEANUP_AGE_HOURS)
-    .execute(pool)
-    .await?;
+    let result =
+        sqlx::query("DELETE FROM outbox_events WHERE created_at < NOW() - INTERVAL ? HOUR")
+            .bind(CLEANUP_AGE_HOURS)
+            .execute(pool)
+            .await?;
 
     Ok(result.rows_affected())
 }
@@ -372,16 +369,13 @@ mod tests {
         let spy = BroadcasterSpy::new();
         let payload = serde_json::json!({ "currentSlideId": "slide-1" });
 
-        let success = publish_event(
-            &spy,
-            "session-123",
-            "STATE_UPDATE",
-            &payload,
-        )
-        .await;
+        let success = publish_event(&spy, "session-123", "STATE_UPDATE", &payload).await;
 
         assert!(success);
-        assert_eq!(spy.success_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            spy.success_count.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
 
         let messages = spy.messages_for_session("session-123").await;
         assert_eq!(messages.len(), 1);
@@ -427,7 +421,10 @@ mod tests {
         let messages = spy.messages_for_session("session-789").await;
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["type"], "QA_UPDATE");
-        assert_eq!(messages[0]["payload"]["questions"][0]["text"], "What is Rust?");
+        assert_eq!(
+            messages[0]["payload"]["questions"][0]["text"],
+            "What is Rust?"
+        );
         assert_eq!(messages[0]["sequence"], 5);
     }
 
@@ -459,7 +456,10 @@ mod tests {
         let success = publish_event(&spy, "session-123", "STATE_UPDATE", &payload).await;
 
         assert!(!success);
-        assert_eq!(spy.failure_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            spy.failure_count.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 
     #[tokio::test]
@@ -470,7 +470,10 @@ mod tests {
         let success = publish_event(&spy, "session-123", "UNKNOWN_TYPE", &payload).await;
 
         assert!(!success);
-        assert_eq!(spy.success_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            spy.success_count.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
     }
 
     #[tokio::test]
@@ -482,8 +485,7 @@ mod tests {
             "sequence": 99
         });
 
-        publish_event(&spy, "session-123", "VOTE_UPDATE", &payload)
-            .await;
+        publish_event(&spy, "session-123", "VOTE_UPDATE", &payload).await;
 
         let messages = spy.messages_for_session("session-123").await;
         assert_eq!(messages[0]["sequence"], 99);

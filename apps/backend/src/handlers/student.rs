@@ -4,8 +4,8 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use sqlx::{MySql, Transaction};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
@@ -336,10 +336,15 @@ pub async fn submit_vote(
     };
 
     // Validate options against slide content and settings (pure function)
-    let (option_ids, _limit_submissions) = match validate_vote_options(raw_option_ids, &slide_type, &slide_content) {
-        VoteValidationResult::Valid { option_ids, limit_submissions, .. } => (option_ids, limit_submissions),
-        VoteValidationResult::Invalid(msg) => return Err(AppError::Input(msg)),
-    };
+    let (option_ids, _limit_submissions) =
+        match validate_vote_options(raw_option_ids, &slide_type, &slide_content) {
+            VoteValidationResult::Valid {
+                option_ids,
+                limit_submissions,
+                ..
+            } => (option_ids, limit_submissions),
+            VoteValidationResult::Invalid(msg) => return Err(AppError::Input(msg)),
+        };
 
     let client_request_id = resolve_client_request_id(&headers)?;
     let response_payload = serde_json::json!({ "message": "Vote submitted successfully" });
@@ -367,7 +372,9 @@ pub async fn submit_vote(
                 participant_id: payload.participant_id.clone(),
                 option_ids: option_ids.clone(),
             })
-            .map_err(|error| AppError::Internal(format!("Failed to encode vote WAL payload: {error}")))?,
+            .map_err(|error| {
+                AppError::Internal(format!("Failed to encode vote WAL payload: {error}"))
+            })?,
             response_payload: response_payload.clone(),
             priority: 2,
         })
@@ -380,7 +387,11 @@ pub async fn submit_vote(
         }
     };
 
-    Ok((StatusCode::ACCEPTED, Json(ApiResponse::success(response_payload))).into_response())
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ApiResponse::success(response_payload)),
+    )
+        .into_response())
 }
 
 // ============================================
@@ -741,7 +752,9 @@ mod tests {
             "options": [{"id": "opt-x", "text": "X"}]
         });
         match validate_vote_options(vec!["opt-x".to_string()], "poll", &content) {
-            VoteValidationResult::Valid { limit_submissions, .. } => {
+            VoteValidationResult::Valid {
+                limit_submissions, ..
+            } => {
                 assert!(limit_submissions)
             }
             other => panic!("Expected Valid, got {:?}", other),
@@ -786,7 +799,9 @@ mod tests {
     #[test]
     fn validate_vote_options_accepts_exactly_max_option_ids() {
         // MAX_OPTION_IDS = 10; exactly 10 valid options should pass
-        let options: Vec<_> = (0..10).map(|i| json!({"id": format!("opt-{}", i)})).collect();
+        let options: Vec<_> = (0..10)
+            .map(|i| json!({"id": format!("opt-{}", i)}))
+            .collect();
         let content = json!({ "options": options, "limitSubmissions": true });
         let ids: Vec<String> = (0..10).map(|i| format!("opt-{}", i)).collect();
         match validate_vote_options(ids, "poll", &content) {
@@ -938,9 +953,12 @@ pub async fn submit_question(
                 slide_id: question.slide_id.clone(),
                 content: question.content.clone(),
             })
-            .map_err(|error| AppError::Internal(format!("Failed to encode question WAL payload: {error}")))?,
-            response_payload: serde_json::to_value(&question)
-                .map_err(|error| AppError::Internal(format!("Failed to encode queued question: {error}")))?,
+            .map_err(|error| {
+                AppError::Internal(format!("Failed to encode question WAL payload: {error}"))
+            })?,
+            response_payload: serde_json::to_value(&question).map_err(|error| {
+                AppError::Internal(format!("Failed to encode queued question: {error}"))
+            })?,
             priority: 2,
         })
         .await?;
@@ -1012,7 +1030,9 @@ pub async fn upvote_question(
                 question_id: question_id.clone(),
                 participant_id,
             })
-            .map_err(|error| AppError::Internal(format!("Failed to encode upvote WAL payload: {error}")))?,
+            .map_err(|error| {
+                AppError::Internal(format!("Failed to encode upvote WAL payload: {error}"))
+            })?,
             response_payload: response.clone(),
             priority: 2,
         })

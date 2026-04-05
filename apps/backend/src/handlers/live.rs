@@ -3,7 +3,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{MySql, Transaction, query_as};
+use sqlx::{query_as, MySql, Transaction};
 
 use crate::error::{AppError, Result};
 use crate::middleware::auth::AuthUser;
@@ -49,6 +49,7 @@ pub async fn set_current_slide(
 
     let mut tx = pool.begin().await?;
     verify_session_ownership(&mut tx, &session_id, &user_id).await?;
+    validate_target_slide_exists(&mut tx, &session_id, payload.slide_id.as_deref()).await?;
 
     let update_result = sqlx::query(
         "UPDATE sessions SET current_slide_id = ?, state_version = state_version + 1 WHERE id = ? AND NOT (current_slide_id <=> ?)"
@@ -62,8 +63,13 @@ pub async fn set_current_slide(
     let session = fetch_session(&mut tx, &session_id).await?;
     if update_result.rows_affected() > 0 {
         let state_payload = build_state_payload(&session);
-        outbox::enqueue_event(&mut tx, &session_id, OutboxEventType::StateUpdate, &state_payload)
-            .await?;
+        outbox::enqueue_event(
+            &mut tx,
+            &session_id,
+            OutboxEventType::StateUpdate,
+            &state_payload,
+        )
+        .await?;
     }
 
     tx.commit().await?;
@@ -95,8 +101,13 @@ pub async fn set_results_visibility(
     let session = fetch_session(&mut tx, &session_id).await?;
     if update_result.rows_affected() > 0 {
         let state_payload = build_state_payload(&session);
-        outbox::enqueue_event(&mut tx, &session_id, OutboxEventType::StateUpdate, &state_payload)
-            .await?;
+        outbox::enqueue_event(
+            &mut tx,
+            &session_id,
+            OutboxEventType::StateUpdate,
+            &state_payload,
+        )
+        .await?;
     }
 
     tx.commit().await?;
@@ -131,8 +142,13 @@ pub async fn update_slide_visibility(
 
     let session = fetch_session(&mut tx, &session_id).await?;
     let state_payload = build_state_payload(&session);
-    outbox::enqueue_event(&mut tx, &session_id, OutboxEventType::StateUpdate, &state_payload)
-        .await?;
+    outbox::enqueue_event(
+        &mut tx,
+        &session_id,
+        OutboxEventType::StateUpdate,
+        &state_payload,
+    )
+    .await?;
 
     tx.commit().await?;
 
@@ -162,8 +178,13 @@ pub async fn go_live(
     let session = fetch_session(&mut tx, &session_id).await?;
     if update_result.rows_affected() > 0 {
         let state_payload = build_state_payload(&session);
-        outbox::enqueue_event(&mut tx, &session_id, OutboxEventType::StateUpdate, &state_payload)
-            .await?;
+        outbox::enqueue_event(
+            &mut tx,
+            &session_id,
+            OutboxEventType::StateUpdate,
+            &state_payload,
+        )
+        .await?;
     }
 
     tx.commit().await?;
@@ -192,8 +213,13 @@ pub async fn stop_live(
     let session = fetch_session(&mut tx, &session_id).await?;
     if update_result.rows_affected() > 0 {
         let state_payload = build_state_payload(&session);
-        outbox::enqueue_event(&mut tx, &session_id, OutboxEventType::StateUpdate, &state_payload)
-            .await?;
+        outbox::enqueue_event(
+            &mut tx,
+            &session_id,
+            OutboxEventType::StateUpdate,
+            &state_payload,
+        )
+        .await?;
     }
 
     tx.commit().await?;
@@ -238,5 +264,30 @@ async fn verify_session_ownership(
         Ok(())
     } else {
         Err(AppError::Auth("Unauthorized access to session".to_string()))
+    }
+}
+
+async fn validate_target_slide_exists(
+    tx: &mut Transaction<'_, MySql>,
+    session_id: &str,
+    slide_id: Option<&str>,
+) -> Result<()> {
+    let Some(slide_id) = slide_id.filter(|value| !value.trim().is_empty()) else {
+        return Ok(());
+    };
+
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM slides WHERE id = ? AND session_id = ?)")
+            .bind(slide_id)
+            .bind(session_id)
+            .fetch_one(&mut **tx)
+            .await?;
+
+    if exists {
+        Ok(())
+    } else {
+        Err(AppError::Input(
+            "Invalid slide: slide does not exist or does not belong to this session".to_string(),
+        ))
     }
 }

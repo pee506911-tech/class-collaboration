@@ -244,19 +244,15 @@ mod tests {
     #[test]
     fn invalid_bearer_format_fails() {
         let bad_formats = vec![
-            "Token abc123",     // wrong prefix
-            "Bearer",           // no token
-            "Bearer ",          // empty token
-            "Basic abc123",     // wrong scheme
+            "Token abc123", // wrong prefix
+            "Bearer",       // no token
+            "Bearer ",      // empty token
+            "Basic abc123", // wrong scheme
         ];
 
         for format in bad_formats {
             let is_valid_bearer = format.starts_with("Bearer ") && format.len() > 7;
-            assert!(
-                !is_valid_bearer,
-                "format '{}' should be rejected",
-                format
-            );
+            assert!(!is_valid_bearer, "format '{}' should be rejected", format);
         }
     }
 }

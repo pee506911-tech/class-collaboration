@@ -102,7 +102,8 @@ impl CircuitBreaker {
     /// if the threshold is reached.
     pub fn record_failure(&self) {
         let failures = self.failures.fetch_add(1, Ordering::SeqCst) + 1;
-        self.last_failure_nanos.store(self.nanos_since_creation(), Ordering::SeqCst);
+        self.last_failure_nanos
+            .store(self.nanos_since_creation(), Ordering::SeqCst);
 
         if failures >= self.failure_threshold {
             self.state.store(STATE_OPEN, Ordering::SeqCst);

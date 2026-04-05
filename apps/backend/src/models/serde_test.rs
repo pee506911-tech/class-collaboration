@@ -16,7 +16,11 @@ mod user_serde_tests {
             password_hash: "secret_hash_that_should_be_skipped".to_string(),
             name: "Test User".to_string(),
             role: "student".to_string(),
-            created_at: Some(DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap().with_timezone(&Utc)),
+            created_at: Some(
+                DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            ),
         }
     }
 
@@ -180,8 +184,16 @@ mod session_serde_roundtrip_tests {
             state_version: 1,
             allow_questions: true,
             require_name: false,
-            created_at: Some(DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap().with_timezone(&Utc)),
-            updated_at: Some(DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z").unwrap().with_timezone(&Utc)),
+            created_at: Some(
+                DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            ),
+            updated_at: Some(
+                DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            ),
         }
     }
 
@@ -349,7 +361,8 @@ mod api_response_serde_tests {
 
     #[test]
     fn error_response_serializes_with_error() {
-        let response = ApiResponse::error("Something went wrong".to_string(), serde_json::json!(null));
+        let response =
+            ApiResponse::error("Something went wrong".to_string(), serde_json::json!(null));
         let json = serde_json::to_value(&response).expect("should serialize");
 
         assert_eq!(json["success"], false);

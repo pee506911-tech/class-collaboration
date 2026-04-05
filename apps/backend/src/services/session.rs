@@ -1193,7 +1193,9 @@ mod tests {
         let service = build_service(&repo, Duration::from_secs(60));
 
         let result = service.delete_session("session-1", "user-1").await;
-        assert!(matches!(result, Err(AppError::NotFound(msg)) if msg.contains("Session not found")));
+        assert!(
+            matches!(result, Err(AppError::NotFound(msg)) if msg.contains("Session not found"))
+        );
     }
 
     // --- archive_session tests ---
@@ -1320,7 +1322,9 @@ mod tests {
         let service = build_service(&repo, Duration::from_secs(60));
 
         let result = service.get_session("session-1", "user-1").await;
-        assert!(matches!(result, Err(AppError::NotFound(msg)) if msg.contains("Session not found")));
+        assert!(
+            matches!(result, Err(AppError::NotFound(msg)) if msg.contains("Session not found"))
+        );
     }
 
     #[tokio::test]

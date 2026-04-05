@@ -1,13 +1,13 @@
 //! Phase 1.2: Cache-Control Header Tests
 //!
-//! These tests verify that read endpoints set proper Cache-Control headers
-//! to enable CDN edge caching and reduce cold start latency on Render free tier.
+//! These tests verify that public read endpoints set the intended Cache-Control headers.
 //!
-//! Expected header: `Cache-Control: public, s-maxage=10, stale-if-error=300`
+//! Public session metadata header: `Cache-Control: public, s-maxage=10, stale-if-error=300`
+//! Realtime session state header: `Cache-Control: no-store`
 //!
 //! Rationale:
-//! - `public`: Allows CDNs (Fastly, Cloudflare) to cache the response
-//! - `s-maxage=10`: CDN cache TTL of 10 seconds (session state changes on the order of seconds)
+//! - Public session metadata can tolerate a short CDN TTL
+//! - Realtime session state must not be cached because follow-up writes are expected immediately
 //! - `stale-if-error=300`: Serve stale data for 5 minutes if backend is slow/down
 //!   (critical for Render free tier cold starts)
 //!
@@ -17,10 +17,16 @@
 
 use axum::http::HeaderValue;
 
-/// Build the standard Cache-Control header for read-only session endpoints
-/// This mirrors the implementation in handlers/public.rs
-pub fn session_read_cache_control() -> HeaderValue {
+/// Build the Cache-Control header for public session metadata.
+/// This mirrors the implementation in handlers/public.rs.
+pub fn public_session_cache_control() -> HeaderValue {
     HeaderValue::from_static("public, s-maxage=10, stale-if-error=300")
+}
+
+/// Build the Cache-Control header for real-time session state.
+/// This mirrors the implementation in handlers/public.rs.
+pub fn realtime_state_cache_control() -> HeaderValue {
+    HeaderValue::from_static("no-store")
 }
 
 /// **Feature: performance-audit, Finding 2: No HTTP Caching on Read Endpoints**
@@ -35,8 +41,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cache_control_header_has_correct_values() {
-        let header = session_read_cache_control();
+    fn public_session_cache_control_has_correct_values() {
+        let header = public_session_cache_control();
         let header_str = header.to_str().unwrap();
 
         assert!(
@@ -54,12 +60,22 @@ mod tests {
     }
 
     #[test]
-    fn cache_control_header_is_static_and_reusable() {
+    fn public_session_cache_control_is_static_and_reusable() {
         // Ensure the header can be created multiple times without issues
-        let header1 = session_read_cache_control();
-        let header2 = session_read_cache_control();
-        
+        let header1 = public_session_cache_control();
+        let header2 = public_session_cache_control();
+
         assert_eq!(header1, header2);
-        assert_eq!(header1.to_str().unwrap(), "public, s-maxage=10, stale-if-error=300");
+        assert_eq!(
+            header1.to_str().unwrap(),
+            "public, s-maxage=10, stale-if-error=300"
+        );
+    }
+
+    #[test]
+    fn realtime_state_cache_control_disables_caching() {
+        let header = realtime_state_cache_control();
+
+        assert_eq!(header.to_str().unwrap(), "no-store");
     }
 }

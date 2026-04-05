@@ -5,17 +5,23 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
-use sqlx::{MySql, query_as};
+use sqlx::{query_as, MySql};
 
 use crate::error::Result;
 use crate::models::response::ApiResponse;
 use crate::models::session::Session;
 use crate::services::outbox::{self, OutboxEventType};
 
-/// Standard Cache-Control header for read-only session endpoints
-/// Allows CDN edge caching with 10-second TTL and 5-minute stale-if-error fallback
-fn cache_control_read() -> HeaderValue {
+/// Cache policy for read-mostly public session metadata.
+/// Allows CDN edge caching with 10-second TTL and 5-minute stale-if-error fallback.
+fn cache_control_public_session() -> HeaderValue {
     HeaderValue::from_static("public, s-maxage=10, stale-if-error=300")
+}
+
+/// Cache policy for real-time session state.
+/// `/state` must always reflect the latest visible session state and must not be cached by CDNs.
+fn cache_control_state() -> HeaderValue {
+    HeaderValue::from_static("no-store")
 }
 
 /// Get session by share token (public endpoint)
@@ -25,9 +31,9 @@ pub async fn get_session_by_share_token(
     Path(token): Path<String>,
 ) -> Result<impl IntoResponse> {
     let response = app_state.session_service.get_public_session(&token).await?;
-    
+
     Ok((
-        [("Cache-Control", cache_control_read())],
+        [("Cache-Control", cache_control_public_session())],
         Json(ApiResponse::success(response)),
     ))
 }
@@ -42,11 +48,8 @@ pub async fn get_session_state(
         .session_service
         .get_session_state(&session_id)
         .await?;
-    
-    Ok((
-        [("Cache-Control", cache_control_read())],
-        Json(state),
-    ))
+
+    Ok(([("Cache-Control", cache_control_state())], Json(state)))
 }
 
 // ============ Public Clicker Endpoints ============
@@ -82,6 +85,7 @@ pub async fn public_set_current_slide(
     let pool = app_state.db_pool.pool_fast_fail().await?;
 
     let mut tx = pool.begin().await?;
+    validate_target_slide_exists(&mut tx, &session_id, payload.slide_id.as_deref()).await?;
 
     let update_result = sqlx::query(
         "UPDATE sessions SET current_slide_id = ?, state_version = state_version + 1 WHERE id = ? AND NOT (current_slide_id <=> ?)"
@@ -95,8 +99,13 @@ pub async fn public_set_current_slide(
     let session = fetch_session(&mut *tx, &session_id).await?;
     if update_result.rows_affected() > 0 {
         let state_payload = build_state_payload(&session);
-        outbox::enqueue_event(&mut tx, &session_id, OutboxEventType::StateUpdate, &state_payload)
-            .await?;
+        outbox::enqueue_event(
+            &mut tx,
+            &session_id,
+            OutboxEventType::StateUpdate,
+            &state_payload,
+        )
+        .await?;
     }
 
     tx.commit().await?;
@@ -128,8 +137,13 @@ pub async fn public_set_results_visibility(
     let session = fetch_session(&mut *tx, &session_id).await?;
     if update_result.rows_affected() > 0 {
         let state_payload = build_state_payload(&session);
-        outbox::enqueue_event(&mut tx, &session_id, OutboxEventType::StateUpdate, &state_payload)
-            .await?;
+        outbox::enqueue_event(
+            &mut tx,
+            &session_id,
+            OutboxEventType::StateUpdate,
+            &state_payload,
+        )
+        .await?;
     }
 
     tx.commit().await?;
@@ -160,4 +174,29 @@ where
         .await?;
 
     Ok(session)
+}
+
+async fn validate_target_slide_exists(
+    tx: &mut sqlx::Transaction<'_, MySql>,
+    session_id: &str,
+    slide_id: Option<&str>,
+) -> Result<()> {
+    let Some(slide_id) = slide_id.filter(|value| !value.trim().is_empty()) else {
+        return Ok(());
+    };
+
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM slides WHERE id = ? AND session_id = ?)")
+            .bind(slide_id)
+            .bind(session_id)
+            .fetch_one(&mut **tx)
+            .await?;
+
+    if exists {
+        Ok(())
+    } else {
+        Err(crate::error::AppError::Input(
+            "Invalid slide: slide does not exist or does not belong to this session".to_string(),
+        ))
+    }
 }

@@ -13,7 +13,10 @@ use uuid::Uuid;
 use crate::error::{AppError, Result};
 use crate::middleware::auth::AuthUser;
 use crate::models::response::ApiResponse;
-use crate::models::slide::{CreateSlideRequest, CreateSlidesBatchRequest, CreateSlidesBatchResponse, ReorderSlidesRequest, Slide, UpdateSlideRequest};
+use crate::models::slide::{
+    CreateSlideRequest, CreateSlidesBatchRequest, CreateSlidesBatchResponse, ReorderSlidesRequest,
+    Slide, UpdateSlideRequest,
+};
 
 const ORDER_STEP: i32 = 1024;
 const CLIENT_REQUEST_ID_HEADER: &str = "x-client-request-id";
@@ -107,7 +110,8 @@ pub async fn create_slide(
     let pool = app_state.db_pool.pool_fast_fail().await?;
     verify_session_ownership(&pool, &session_id, &user_id).await?;
 
-    let client_request_id = resolved_client_request_id(payload.client_request_id.clone(), Some(&headers))?;
+    let client_request_id =
+        resolved_client_request_id(payload.client_request_id.clone(), Some(&headers))?;
     if let Some(existing_slide) = crate::services::wal::fetch_replay_response::<Slide>(
         &pool,
         &session_id,
@@ -120,36 +124,36 @@ pub async fn create_slide(
     }
 
     if let Some(insert_after_slide_id) = payload.insert_after_slide_id.as_deref() {
-        let exists: i64 = query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM slides WHERE id = ? AND session_id = ?)",
-        )
-        .bind(insert_after_slide_id)
-        .bind(&session_id)
-        .fetch_one(&pool)
-        .await?;
+        let exists: i64 =
+            query_scalar("SELECT EXISTS(SELECT 1 FROM slides WHERE id = ? AND session_id = ?)")
+                .bind(insert_after_slide_id)
+                .bind(&session_id)
+                .fetch_one(&pool)
+                .await?;
 
         if exists == 0 {
             return Err(AppError::Input("Insert-after slide not found".to_string()));
         }
     }
 
-    let predicted_order_index = if let Some(insert_after_slide_id) = payload.insert_after_slide_id.as_deref() {
-        let insert_after_order_index: i32 = query_scalar(
-            "SELECT order_index FROM slides WHERE id = ? AND session_id = ?",
-        )
-        .bind(insert_after_slide_id)
-        .bind(&session_id)
-        .fetch_one(&pool)
-        .await?;
-        insert_after_order_index.saturating_add(1)
-    } else {
-        let max_order_index =
-            query_scalar::<_, Option<i32>>("SELECT MAX(order_index) FROM slides WHERE session_id = ?")
-                .bind(&session_id)
-                .fetch_one(&pool)
-                .await?;
-        compute_append_order_index(max_order_index)
-    };
+    let predicted_order_index =
+        if let Some(insert_after_slide_id) = payload.insert_after_slide_id.as_deref() {
+            let insert_after_order_index: i32 =
+                query_scalar("SELECT order_index FROM slides WHERE id = ? AND session_id = ?")
+                    .bind(insert_after_slide_id)
+                    .bind(&session_id)
+                    .fetch_one(&pool)
+                    .await?;
+            insert_after_order_index.saturating_add(1)
+        } else {
+            let max_order_index = query_scalar::<_, Option<i32>>(
+                "SELECT MAX(order_index) FROM slides WHERE session_id = ?",
+            )
+            .bind(&session_id)
+            .fetch_one(&pool)
+            .await?;
+            compute_append_order_index(max_order_index)
+        };
 
     let slide = Slide {
         id: Uuid::new_v4().to_string(),
@@ -174,9 +178,12 @@ pub async fn create_slide(
                 content: slide.content.0.clone(),
                 insert_after_slide_id: payload.insert_after_slide_id.clone(),
             })
-            .map_err(|error| AppError::Internal(format!("Failed to encode WAL payload: {error}")))?,
-            response_payload: serde_json::to_value(&slide)
-                .map_err(|error| AppError::Internal(format!("Failed to encode queued slide: {error}")))?,
+            .map_err(|error| {
+                AppError::Internal(format!("Failed to encode WAL payload: {error}"))
+            })?,
+            response_payload: serde_json::to_value(&slide).map_err(|error| {
+                AppError::Internal(format!("Failed to encode queued slide: {error}"))
+            })?,
             priority: 3,
         })
         .await?;
@@ -210,19 +217,22 @@ pub async fn create_slides_batch(
         return Err(AppError::Input("No slides to create".to_string()));
     }
     if payload.slides.len() > MAX_BATCH_SLIDE_COUNT {
-        return Err(AppError::Input(
-            format!("Too many slides in batch (max {})", MAX_BATCH_SLIDE_COUNT)
-        ));
+        return Err(AppError::Input(format!(
+            "Too many slides in batch (max {})",
+            MAX_BATCH_SLIDE_COUNT
+        )));
     }
 
-    let client_request_id = resolved_client_request_id(payload.client_request_id.clone(), Some(&headers))?;
-    if let Some(existing) = crate::services::wal::fetch_replay_response::<CreateSlidesBatchResponse>(
-        &pool,
-        &session_id,
-        crate::services::wal::WalOpType::CreateSlidesBatch,
-        &client_request_id,
-    )
-    .await?
+    let client_request_id =
+        resolved_client_request_id(payload.client_request_id.clone(), Some(&headers))?;
+    if let Some(existing) =
+        crate::services::wal::fetch_replay_response::<CreateSlidesBatchResponse>(
+            &pool,
+            &session_id,
+            crate::services::wal::WalOpType::CreateSlidesBatch,
+            &client_request_id,
+        )
+        .await?
     {
         return crate::services::wal::queued_success_response(&existing);
     }
@@ -253,10 +263,11 @@ pub async fn create_slides_batch(
         })
         .collect();
 
-    let state_version = sqlx::query_scalar::<_, i64>("SELECT state_version FROM sessions WHERE id = ?")
-        .bind(&session_id)
-        .fetch_one(&pool)
-        .await?;
+    let state_version =
+        sqlx::query_scalar::<_, i64>("SELECT state_version FROM sessions WHERE id = ?")
+            .bind(&session_id)
+            .fetch_one(&pool)
+            .await?;
 
     let response = CreateSlidesBatchResponse {
         slides: created_slides,
@@ -281,9 +292,12 @@ pub async fn create_slides_batch(
                     })
                     .collect(),
             })
-            .map_err(|error| AppError::Internal(format!("Failed to encode batch WAL payload: {error}")))?,
-            response_payload: serde_json::to_value(&response)
-                .map_err(|error| AppError::Internal(format!("Failed to encode batch response: {error}")))?,
+            .map_err(|error| {
+                AppError::Internal(format!("Failed to encode batch WAL payload: {error}"))
+            })?,
+            response_payload: serde_json::to_value(&response).map_err(|error| {
+                AppError::Internal(format!("Failed to encode batch response: {error}"))
+            })?,
             priority: 3,
         })
         .await?;
@@ -339,9 +353,8 @@ async fn store_batch_client_request_id(
     if slides.is_empty() {
         return Ok(());
     }
-    let response_slide = serde_json::to_value(slides).map_err(|e| {
-        AppError::Internal(format!("Failed to serialize batch response: {}", e))
-    })?;
+    let response_slide = serde_json::to_value(slides)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize batch response: {}", e)))?;
     let request_payload = serde_json::json!({"batch": true, "slideCount": slides.len()});
 
     sqlx::query(
@@ -520,7 +533,10 @@ pub async fn update_slide(
 
     if let Some(base_version) = payload.base_version {
         if base_version != existing_slide.version {
-            return Err(build_slide_version_conflict(&slide_id, existing_slide.version));
+            return Err(build_slide_version_conflict(
+                &slide_id,
+                existing_slide.version,
+            ));
         }
     }
 
@@ -561,9 +577,12 @@ pub async fn update_slide(
                 content: payload.content.clone(),
                 base_version: payload.base_version,
             })
-            .map_err(|error| AppError::Internal(format!("Failed to encode update WAL payload: {error}")))?,
-            response_payload: serde_json::to_value(&updated_slide)
-                .map_err(|error| AppError::Internal(format!("Failed to encode updated slide: {error}")))?,
+            .map_err(|error| {
+                AppError::Internal(format!("Failed to encode update WAL payload: {error}"))
+            })?,
+            response_payload: serde_json::to_value(&updated_slide).map_err(|error| {
+                AppError::Internal(format!("Failed to encode updated slide: {error}"))
+            })?,
             priority: 1,
         })
         .await?;
@@ -613,11 +632,12 @@ pub async fn delete_slide(
         return crate::services::wal::queued_success_response(&existing);
     }
 
-    let slide_exists: i64 = query_scalar("SELECT EXISTS(SELECT 1 FROM slides WHERE id = ? AND session_id = ?)")
-        .bind(&slide_id)
-        .bind(&session_id)
-        .fetch_one(&pool)
-        .await?;
+    let slide_exists: i64 =
+        query_scalar("SELECT EXISTS(SELECT 1 FROM slides WHERE id = ? AND session_id = ?)")
+            .bind(&slide_id)
+            .bind(&session_id)
+            .fetch_one(&pool)
+            .await?;
     if slide_exists == 0 {
         return Err(AppError::NotFound("Slide not found".to_string()));
     }
@@ -632,7 +652,9 @@ pub async fn delete_slide(
             payload: serde_json::to_value(crate::services::wal::DeleteSlideWalPayload {
                 slide_id: slide_id.clone(),
             })
-            .map_err(|error| AppError::Internal(format!("Failed to encode delete WAL payload: {error}")))?,
+            .map_err(|error| {
+                AppError::Internal(format!("Failed to encode delete WAL payload: {error}"))
+            })?,
             response_payload: response.clone(),
             priority: 3,
         })
@@ -720,7 +742,9 @@ pub async fn reorder_slides(
             payload: serde_json::to_value(crate::services::wal::ReorderSlidesWalPayload {
                 slide_ids: payload.slide_ids.clone(),
             })
-            .map_err(|error| AppError::Internal(format!("Failed to encode reorder WAL payload: {error}")))?,
+            .map_err(|error| {
+                AppError::Internal(format!("Failed to encode reorder WAL payload: {error}"))
+            })?,
             response_payload: response.clone(),
             priority: 3,
         })
@@ -1128,7 +1152,10 @@ mod tests {
     #[test]
     fn extract_client_request_id_returns_trimmed_value() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-client-request-id", HeaderValue::from_static("  req-123  "));
+        headers.insert(
+            "x-client-request-id",
+            HeaderValue::from_static("  req-123  "),
+        );
         let result = extract_client_request_id(&headers);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Some("req-123".to_string()));
@@ -1165,10 +1192,7 @@ mod tests {
     #[test]
     fn extract_client_request_id_filters_empty_after_trim() {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-client-request-id",
-            HeaderValue::from_static("   "),
-        );
+        headers.insert("x-client-request-id", HeaderValue::from_static("   "));
         let result = extract_client_request_id(&headers);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None);

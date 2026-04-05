@@ -200,18 +200,9 @@ mod tests {
     #[test]
     fn all_error_responses_have_consistent_status_codes() {
         let test_cases = vec![
-            (
-                AppError::NotFound("x".to_string()),
-                StatusCode::NOT_FOUND,
-            ),
-            (
-                AppError::Input("x".to_string()),
-                StatusCode::BAD_REQUEST,
-            ),
-            (
-                AppError::Auth("x".to_string()),
-                StatusCode::UNAUTHORIZED,
-            ),
+            (AppError::NotFound("x".to_string()), StatusCode::NOT_FOUND),
+            (AppError::Input("x".to_string()), StatusCode::BAD_REQUEST),
+            (AppError::Auth("x".to_string()), StatusCode::UNAUTHORIZED),
             (
                 AppError::Internal("x".to_string()),
                 StatusCode::INTERNAL_SERVER_ERROR,

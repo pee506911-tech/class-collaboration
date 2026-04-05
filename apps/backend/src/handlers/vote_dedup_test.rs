@@ -139,7 +139,11 @@ mod tests {
         ];
 
         let unique_votes: std::collections::HashSet<_> = votes.iter().collect();
-        assert_eq!(unique_votes.len(), 2, "votes on different slides are unique");
+        assert_eq!(
+            unique_votes.len(),
+            2,
+            "votes on different slides are unique"
+        );
     }
 
     #[test]
@@ -193,10 +197,7 @@ mod tests {
             }
         }
 
-        assert_eq!(
-            sequence, 2,
-            "only unique votes should bump sequence"
-        );
+        assert_eq!(sequence, 2, "only unique votes should bump sequence");
     }
 
     // --- Limit Submissions Tests ---

@@ -156,18 +156,14 @@ mod tests {
         // The backend uses a simple check: contains('@') && contains('.')
         // These emails fail that check
         let invalid_emails = vec![
-            "plainaddress",     // no @ or .
-            "username@domain",  // no dot
-            "",                 // empty
+            "plainaddress",    // no @ or .
+            "username@domain", // no dot
+            "",                // empty
         ];
 
         for email in invalid_emails {
             let is_valid = email.contains('@') && email.contains('.');
-            assert!(
-                !is_valid,
-                "email '{}' should fail validation",
-                email
-            );
+            assert!(!is_valid, "email '{}' should fail validation", email);
         }
     }
 

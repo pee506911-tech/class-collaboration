@@ -258,7 +258,8 @@ impl WalStore {
 
     #[cfg(test)]
     async fn open_test() -> Result<Self> {
-        let test_path = std::env::temp_dir().join(format!("classcolab-wal-test-{}.sqlite", Uuid::new_v4()));
+        let test_path =
+            std::env::temp_dir().join(format!("classcolab-wal-test-{}.sqlite", Uuid::new_v4()));
         Self::open_file(test_path).await
     }
 
@@ -276,10 +277,13 @@ impl WalStore {
         }
 
         let created_at = Utc::now().to_rfc3339();
-        let payload_json = serde_json::to_string(&entry.payload)
-            .map_err(|error| AppError::Internal(format!("Failed to encode WAL payload: {error}")))?;
-        let response_payload_json = serde_json::to_string(&entry.response_payload)
-            .map_err(|error| AppError::Internal(format!("Failed to encode WAL response payload: {error}")))?;
+        let payload_json = serde_json::to_string(&entry.payload).map_err(|error| {
+            AppError::Internal(format!("Failed to encode WAL payload: {error}"))
+        })?;
+        let response_payload_json =
+            serde_json::to_string(&entry.response_payload).map_err(|error| {
+                AppError::Internal(format!("Failed to encode WAL response payload: {error}"))
+            })?;
 
         let insert_result = sqlx::query(
             "INSERT INTO wal_entries
@@ -321,11 +325,12 @@ impl WalStore {
                 };
 
                 let response_payload: String = row.try_get("response_payload")?;
-                let response_payload = serde_json::from_str(&response_payload).map_err(|error| {
-                    AppError::Internal(format!(
-                        "Failed to decode existing WAL response payload: {error}"
-                    ))
-                })?;
+                let response_payload =
+                    serde_json::from_str(&response_payload).map_err(|error| {
+                        AppError::Internal(format!(
+                            "Failed to decode existing WAL response payload: {error}"
+                        ))
+                    })?;
 
                 Ok(AppendWalResult::Existing { response_payload })
             }
@@ -467,7 +472,9 @@ impl WalStore {
         .rows_affected();
 
         if deleted > 0 {
-            sqlx::query("PRAGMA incremental_vacuum").execute(&self.pool).await?;
+            sqlx::query("PRAGMA incremental_vacuum")
+                .execute(&self.pool)
+                .await?;
         }
 
         Ok(deleted)
@@ -636,10 +643,15 @@ pub async fn flush_pending_batch(
     Ok(processed)
 }
 
-fn group_entries_by_session(entries: Vec<PendingWalEntry>) -> BTreeMap<String, Vec<PendingWalEntry>> {
+fn group_entries_by_session(
+    entries: Vec<PendingWalEntry>,
+) -> BTreeMap<String, Vec<PendingWalEntry>> {
     let mut grouped = BTreeMap::new();
     for entry in entries {
-        grouped.entry(entry.session_id.clone()).or_insert_with(Vec::new).push(entry);
+        grouped
+            .entry(entry.session_id.clone())
+            .or_insert_with(Vec::new)
+            .push(entry);
     }
     grouped
 }
@@ -654,7 +666,14 @@ async fn flush_session_group(
     lock_session(&mut tx, session_id).await?;
 
     for entry in entries {
-        if replay_exists(&mut tx, &entry.session_id, entry.op_type, &entry.client_request_id).await? {
+        if replay_exists(
+            &mut tx,
+            &entry.session_id,
+            entry.op_type,
+            &entry.client_request_id,
+        )
+        .await?
+        {
             continue;
         }
 
@@ -727,7 +746,9 @@ async fn replay_entry(
     }
 }
 
-fn decode_payload<T: DeserializeOwned>(entry: &PendingWalEntry) -> std::result::Result<T, ReplayDisposition> {
+fn decode_payload<T: DeserializeOwned>(
+    entry: &PendingWalEntry,
+) -> std::result::Result<T, ReplayDisposition> {
     serde_json::from_value(entry.payload.clone()).map_err(|error| {
         ReplayDisposition::PermanentFailure(format!("Failed to decode WAL payload: {error}"))
     })
@@ -739,9 +760,11 @@ async fn replay_create_slide(
 ) -> std::result::Result<(), ReplayDisposition> {
     let payload: CreateSlideWalPayload = decode_payload(entry)?;
     let order_index = match payload.insert_after_slide_id.as_deref() {
-        Some(insert_after_slide_id) => slide::allocate_order_after(tx, &entry.session_id, insert_after_slide_id)
-            .await
-            .map_err(classify_app_error)?,
+        Some(insert_after_slide_id) => {
+            slide::allocate_order_after(tx, &entry.session_id, insert_after_slide_id)
+                .await
+                .map_err(classify_app_error)?
+        }
         None => slide::get_append_order_index(tx, &entry.session_id)
             .await
             .map_err(classify_app_error)?,
@@ -796,7 +819,11 @@ async fn replay_create_slides_batch(
         .await
         .map_err(classify_sqlx_error)?;
 
-        slides.push(load_slide(tx, &item.slide_id, &entry.session_id).await.map_err(classify_app_error)?);
+        slides.push(
+            load_slide(tx, &item.slide_id, &entry.session_id)
+                .await
+                .map_err(classify_app_error)?,
+        );
     }
 
     sqlx::query("UPDATE sessions SET state_version = state_version + 1 WHERE id = ?")
@@ -942,9 +969,11 @@ async fn replay_reorder_slides(
         return Ok(());
     }
 
-    let changed_slide_ids = slide::collect_changed_slide_ids(&session_slide_ids, &payload.slide_ids);
+    let changed_slide_ids =
+        slide::collect_changed_slide_ids(&session_slide_ids, &payload.slide_ids);
     let temporary_assignments = slide::build_temporary_order_assignments(&changed_slide_ids);
-    let final_assignments = slide::build_final_order_assignments(&session_slide_ids, &payload.slide_ids);
+    let final_assignments =
+        slide::build_final_order_assignments(&session_slide_ids, &payload.slide_ids);
 
     slide::apply_order_assignments(tx, &entry.session_id, &temporary_assignments)
         .await
@@ -990,17 +1019,20 @@ async fn replay_submit_vote(
         ));
     }
 
-    let (option_ids, limit_submissions) =
-        match student::validate_vote_options(payload.option_ids.clone(), &slide_type, &slide_content) {
-            student::VoteValidationResult::Valid {
-                option_ids,
-                limit_submissions,
-                ..
-            } => (option_ids, limit_submissions),
-            student::VoteValidationResult::Invalid(message) => {
-                return Err(ReplayDisposition::PermanentFailure(message))
-            }
-        };
+    let (option_ids, limit_submissions) = match student::validate_vote_options(
+        payload.option_ids.clone(),
+        &slide_type,
+        &slide_content,
+    ) {
+        student::VoteValidationResult::Valid {
+            option_ids,
+            limit_submissions,
+            ..
+        } => (option_ids, limit_submissions),
+        student::VoteValidationResult::Invalid(message) => {
+            return Err(ReplayDisposition::PermanentFailure(message))
+        }
+    };
 
     if limit_submissions {
         let reserve_result = sqlx::query(
@@ -1067,9 +1099,14 @@ async fn replay_submit_vote(
         "results": results,
         "sequence": sequence
     });
-    crate::services::outbox::enqueue_event(tx, &entry.session_id, OutboxEventType::VoteUpdate, &vote_payload)
-        .await
-        .map_err(classify_sqlx_error)?;
+    crate::services::outbox::enqueue_event(
+        tx,
+        &entry.session_id,
+        OutboxEventType::VoteUpdate,
+        &vote_payload,
+    )
+    .await
+    .map_err(classify_sqlx_error)?;
 
     Ok(())
 }
@@ -1102,9 +1139,14 @@ async fn replay_submit_question(
         },
         "sequence": sequence
     });
-    crate::services::outbox::enqueue_event(tx, &entry.session_id, OutboxEventType::QaUpdate, &qa_payload)
-        .await
-        .map_err(classify_sqlx_error)?;
+    crate::services::outbox::enqueue_event(
+        tx,
+        &entry.session_id,
+        OutboxEventType::QaUpdate,
+        &qa_payload,
+    )
+    .await
+    .map_err(classify_sqlx_error)?;
     Ok(())
 }
 
@@ -1145,9 +1187,14 @@ async fn replay_upvote_question(
         },
         "sequence": sequence
     });
-    crate::services::outbox::enqueue_event(tx, &entry.session_id, OutboxEventType::QaUpdate, &qa_payload)
-        .await
-        .map_err(classify_sqlx_error)?;
+    crate::services::outbox::enqueue_event(
+        tx,
+        &entry.session_id,
+        OutboxEventType::QaUpdate,
+        &qa_payload,
+    )
+    .await
+    .map_err(classify_sqlx_error)?;
     Ok(())
 }
 
@@ -1217,7 +1264,9 @@ fn is_transient_sqlx_error(error: &sqlx::Error) -> bool {
     }
 }
 
-pub fn queued_success_response<T>(data: &T) -> Result<(axum::http::StatusCode, axum::Json<ApiResponse<T>>)>
+pub fn queued_success_response<T>(
+    data: &T,
+) -> Result<(axum::http::StatusCode, axum::Json<ApiResponse<T>>)>
 where
     T: Clone + Serialize,
 {
@@ -1282,7 +1331,10 @@ mod tests {
         }
 
         let pending = store.fetch_pending(10).await.expect("pending");
-        let ordered_ids: Vec<_> = pending.into_iter().map(|entry| entry.client_request_id).collect();
+        let ordered_ids: Vec<_> = pending
+            .into_iter()
+            .map(|entry| entry.client_request_id)
+            .collect();
         assert_eq!(ordered_ids, vec!["req-2", "req-3", "req-1"]);
     }
 
