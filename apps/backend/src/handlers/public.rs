@@ -69,7 +69,7 @@ pub struct PublicSetResultsRequest {
     visible: bool,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub struct StateUpdatePayload {
     current_slide_id: Option<String>,
@@ -101,6 +101,17 @@ impl ClickerWritePathTimings {
     }
 }
 
+fn should_validate_slide_in_update(slide_id: Option<&str>) -> bool {
+    slide_id.is_some_and(|value| !value.trim().is_empty())
+}
+
+fn requested_slide_matches_current_state(
+    current_slide_id: Option<&str>,
+    requested_slide_id: Option<&str>,
+) -> bool {
+    current_slide_id == requested_slide_id
+}
+
 /// Public endpoint to set current slide (for mobile clicker)
 pub async fn public_set_current_slide(
     State(app_state): State<crate::AppState>,
@@ -111,6 +122,7 @@ pub async fn public_set_current_slide(
     let request_id = resolve_public_client_request_id(&headers);
     let started_at = std::time::Instant::now();
     let requested_slide_id = payload.slide_id.clone();
+    let requested_slide_id_for_validation = payload.slide_id.as_deref();
 
     tracing::info!(
         request_id = %request_id,
@@ -124,24 +136,55 @@ pub async fn public_set_current_slide(
     let mut tx = pool.begin().await?;
     let tx_started_at = std::time::Instant::now();
 
-    validate_target_slide_exists(&mut tx, &session_id, payload.slide_id.as_deref()).await?;
-    let validated_at = std::time::Instant::now();
-
-    let update_result = sqlx::query(
-        "UPDATE sessions SET current_slide_id = ?, state_version = state_version + 1 WHERE id = ? AND NOT (current_slide_id <=> ?)"
-    )
+    let mut validated_at = tx_started_at;
+    let update_result = if should_validate_slide_in_update(requested_slide_id_for_validation) {
+        sqlx::query(
+            "UPDATE sessions
+             SET current_slide_id = ?, state_version = state_version + 1
+             WHERE id = ?
+               AND NOT (current_slide_id <=> ?)
+               AND EXISTS (
+                 SELECT 1 FROM slides WHERE id = ? AND session_id = ?
+               )",
+        )
         .bind(&payload.slide_id)
         .bind(&session_id)
         .bind(&payload.slide_id)
+        .bind(&payload.slide_id)
+        .bind(&session_id)
         .execute(&mut *tx)
-        .await?;
+        .await?
+    } else {
+        validate_target_slide_exists(&mut tx, &session_id, requested_slide_id_for_validation)
+            .await?;
+        validated_at = std::time::Instant::now();
+
+        sqlx::query(
+            "UPDATE sessions SET current_slide_id = ?, state_version = state_version + 1 WHERE id = ? AND NOT (current_slide_id <=> ?)"
+        )
+            .bind(&payload.slide_id)
+            .bind(&session_id)
+            .bind(&payload.slide_id)
+            .execute(&mut *tx)
+            .await?
+    };
     let updated_at = std::time::Instant::now();
 
-    let session = fetch_session(&mut *tx, &session_id).await?;
+    let state_payload = fetch_state_payload(&mut *tx, &session_id).await?;
     let session_fetched_at = std::time::Instant::now();
+    if update_result.rows_affected() == 0
+        && should_validate_slide_in_update(requested_slide_id_for_validation)
+        && !requested_slide_matches_current_state(
+            state_payload.current_slide_id.as_deref(),
+            requested_slide_id_for_validation,
+        )
+    {
+        validate_target_slide_exists(&mut tx, &session_id, requested_slide_id_for_validation)
+            .await?;
+    }
+
     let should_flush_outbox = update_result.rows_affected() > 0;
     if should_flush_outbox {
-        let state_payload = build_state_payload(&session);
         outbox::enqueue_event(
             &mut tx,
             &session_id,
@@ -155,12 +198,8 @@ pub async fn public_set_current_slide(
     tx.commit().await?;
     let committed_at = std::time::Instant::now();
     if should_flush_outbox {
-        broadcast_state_update_fast_lane(
-            app_state.registry.as_ref(),
-            &session_id,
-            &build_state_payload(&session),
-        )
-        .await;
+        broadcast_state_update_fast_lane(app_state.registry.as_ref(), &session_id, &state_payload)
+            .await;
         app_state.outbox_flush_notify.notify_one();
     }
     let post_commit_finished_at = std::time::Instant::now();
@@ -184,8 +223,8 @@ pub async fn public_set_current_slide(
         request_id = %request_id,
         session_id = %session_id,
         requested_slide_id = ?requested_slide_id,
-        applied_slide_id = ?session.current_slide_id,
-        state_version = session.state_version,
+        applied_slide_id = ?state_payload.current_slide_id,
+        state_version = state_payload.state_version,
         outbox_enqueued = should_flush_outbox,
         pool_acquire_ms = timings.pool_acquire_ms,
         begin_tx_ms = timings.begin_tx_ms,
@@ -200,7 +239,7 @@ pub async fn public_set_current_slide(
         "Clicker slide update committed"
     );
 
-    Ok(Json(ApiResponse::success(build_state_payload(&session))))
+    Ok(Json(ApiResponse::success(state_payload)))
 }
 
 /// Public endpoint to set results visibility (for mobile clicker)
@@ -252,6 +291,22 @@ fn build_state_payload(session: &Session) -> StateUpdatePayload {
         is_results_visible: session.is_results_visible,
         state_version: session.state_version,
     }
+}
+
+async fn fetch_state_payload<'c, E>(executor: E, session_id: &str) -> Result<StateUpdatePayload>
+where
+    E: sqlx::Executor<'c, Database = MySql>,
+{
+    let payload = query_as::<_, StateUpdatePayload>(
+        "SELECT current_slide_id, is_presentation_active, is_results_visible, state_version
+         FROM sessions
+         WHERE id = ?",
+    )
+    .bind(session_id)
+    .fetch_one(executor)
+    .await?;
+
+    Ok(payload)
 }
 
 async fn broadcast_state_update_fast_lane(
@@ -392,5 +447,30 @@ mod tests {
 
         assert_eq!(timings.total_db_path_ms(), 90);
         assert_eq!(timings.post_commit_ms, 29);
+    }
+
+    #[test]
+    fn should_validate_slide_in_update_only_for_non_empty_targets() {
+        assert!(should_validate_slide_in_update(Some("slide-123")));
+        assert!(!should_validate_slide_in_update(Some("")));
+        assert!(!should_validate_slide_in_update(Some("   ")));
+        assert!(!should_validate_slide_in_update(None));
+    }
+
+    #[test]
+    fn requested_slide_matches_current_state_uses_null_safe_semantics() {
+        assert!(requested_slide_matches_current_state(
+            Some("slide-123"),
+            Some("slide-123")
+        ));
+        assert!(requested_slide_matches_current_state(None, None));
+        assert!(!requested_slide_matches_current_state(
+            Some("slide-123"),
+            Some("slide-456")
+        ));
+        assert!(!requested_slide_matches_current_state(
+            None,
+            Some("slide-123")
+        ));
     }
 }
