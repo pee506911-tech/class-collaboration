@@ -28,6 +28,7 @@ import { SlideListItem } from '@/components/slide-list-item';
 import { getSlideEditorLockState } from '@/lib/slide-editor-lock';
 import { reorderSlidesWithRollback } from '@/lib/slide-reorder';
 import { getNextPreviewSlideId, resolveDeleteRollbackPreviewId } from '@/lib/slide-preview-selection';
+import { useDebouncedValue } from '@/lib/use-debounced-slide-refetch';
 
 function getDefaultSlideContent(type: Slide['type']) {
     if (type === 'static') return { title: 'New Slide', body: 'Content here' };
@@ -52,7 +53,7 @@ function toSlide(slide: EditorSlide): Slide {
 }
 
 function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSession }: { baseSlides: Slide[], setBaseSlides: Dispatch<SetStateAction<Slide[]>>, loadSlides: () => Promise<void>, session: Session | null, loadSession: () => void }) {
-    const { sendMessage, state, activeParticipants, updateState, initialStateLoaded } = useWebSocket();
+    const { sendMessage, state, activeParticipants, updateState, initialStateLoaded, lastSlideUpdate } = useWebSocket();
     const params = useParams();
     const id = params?.id as string;
     const [showTypeSelector, setShowTypeSelector] = useState(false);
@@ -99,6 +100,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
         clearInlineError,
         clearSessionInlineError,
         resolveOptimisticId,
+        requestRefreshAfterDrain,
         hasPendingStructuralMutations,
         sessionInlineError,
     } = useOptimisticSlideQueue({
@@ -114,6 +116,8 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
             }));
         },
     });
+
+    useDebouncedValue(lastSlideUpdate, 200, requestRefreshAfterDrain);
 
     useEffect(() => {
         if (session) setEditTitle(session.title);

@@ -158,6 +158,68 @@ describe('SlideEditorPanel', () => {
         });
     });
 
+    it('keeps the local draft visible when a conflicting server snapshot arrives mid-save', async () => {
+        vi.useFakeTimers();
+
+        const firstSave = deferred<void>();
+        const onUpdate = vi.fn().mockReturnValueOnce(firstSave.promise);
+        const onSave = vi.fn();
+
+        const { rerender } = render(
+            <SlideEditorPanel
+                slide={makeSlide()}
+                onUpdate={onUpdate}
+                onSave={onSave}
+            />,
+        );
+
+        const input = screen.getByDisplayValue('Original');
+
+        await act(async () => {
+            fireEvent.change(input, { target: { value: 'Local draft' } });
+            fireEvent.blur(input);
+        });
+
+        expect(onUpdate).toHaveBeenCalledWith({
+            title: 'Local draft',
+            body: 'Body',
+        });
+
+        // Keep the first save unresolved so the panel stays in its in-flight state
+        // while a newer server snapshot arrives, matching the real conflict window.
+        await act(async () => {
+            rerender(
+                <SlideEditorPanel
+                    slide={makeSlide({
+                        version: 2,
+                        content: { title: 'Remote title', body: 'Server body' },
+                    })}
+                    onUpdate={onUpdate}
+                    onSave={onSave}
+                />,
+            );
+        });
+
+        expect(screen.getByDisplayValue('Local draft')).toBeInTheDocument();
+
+        await act(async () => {
+            firstSave.reject(new Error(
+                'A newer version of this slide was saved elsewhere. Your draft is still in the editor; review and save again.',
+            ));
+            try {
+                await firstSave.promise;
+            } catch {
+                // expected rejection
+            }
+        });
+
+        expect(screen.getByDisplayValue('Local draft')).toBeInTheDocument();
+        expect(screen.getByText('Save failed.')).toBeInTheDocument();
+        expect(
+            screen.getByText('A newer version of this slide was saved elsewhere. Your draft is still in the editor; review and save again.'),
+        ).toBeInTheDocument();
+    });
+
     it('cancels pending save and does not flush when unmounting (slide deleted)', async () => {
         vi.useFakeTimers();
 

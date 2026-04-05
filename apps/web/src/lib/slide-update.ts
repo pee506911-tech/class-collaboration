@@ -25,6 +25,9 @@ export class SlideVersionConflictError extends Error {
     }
 }
 
+const CONFLICT_DRAFT_PRESERVED_MESSAGE =
+    'A newer version of this slide was saved elsewhere. Your draft is still in the editor; review and save again.';
+
 export async function saveSlideUpdate({
     sessionId,
     slideId,
@@ -71,7 +74,7 @@ export async function saveSlideUpdate({
         if (isSlideVersionConflict(error)) {
             await refreshSlides();
             throw new SlideVersionConflictError(
-                error.message || 'Slide has changed on the server',
+                CONFLICT_DRAFT_PRESERVED_MESSAGE,
             );
         }
 

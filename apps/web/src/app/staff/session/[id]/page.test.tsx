@@ -25,6 +25,14 @@ const queueMockState = vi.hoisted(() => ({
 
 const wsMockState = vi.hoisted(() => ({
     initialState: null as null | Record<string, unknown>,
+    lastSlideUpdate: 0,
+    setLastSlideUpdate: null as null | ((value: number) => void),
+}));
+
+const debounceMockState = vi.hoisted(() => ({
+    lastValue: 0,
+    lastDelayMs: 0,
+    callback: null as null | ((value: number) => void),
 }));
 
 // Mock next/navigation
@@ -36,10 +44,21 @@ const mockEnqueueDeleteSlide = vi.fn(() => ({ accepted: false }));
 const mockClearInlineError = vi.fn();
 const mockClearSessionInlineError = vi.fn();
 const mockResolveOptimisticId = vi.fn((id: string | null) => id);
+const mockRequestRefreshAfterDrain = vi.fn();
 vi.mock('next/navigation', () => ({
     useParams: () => ({ id: 'test-session-id' }),
     useRouter: () => ({ push: mockPush }),
 }));
+
+vi.mock('@/lib/use-debounced-slide-refetch', async () => {
+    return {
+        useDebouncedValue: (value: number, delayMs: number, callback: (value: number) => void) => {
+            debounceMockState.lastValue = value;
+            debounceMockState.lastDelayMs = delayMs;
+            debounceMockState.callback = callback;
+        },
+    };
+});
 
 vi.mock('@hello-pangea/dnd', () => ({
     DragDropContext: ({ children, onDragEnd }: { children: React.ReactNode; onDragEnd: (result: any) => void | Promise<void> }) => {
@@ -129,6 +148,14 @@ vi.mock('@/lib/websocket', async () => {
         WebSocketProvider: ({ children }: { children: React.ReactNode }) => children,
         useWebSocket: () => {
             const [state, setState] = ReactModule.useState(wsMockState.initialState);
+            const [lastSlideUpdate, setLastSlideUpdate] = ReactModule.useState(wsMockState.lastSlideUpdate);
+
+            ReactModule.useEffect(() => {
+                wsMockState.setLastSlideUpdate = setLastSlideUpdate;
+                return () => {
+                    wsMockState.setLastSlideUpdate = null;
+                };
+            }, []);
 
             return {
                 sendMessage: vi.fn(),
@@ -137,6 +164,7 @@ vi.mock('@/lib/websocket', async () => {
                 updateState: (updates: Record<string, unknown>) => {
                     setState((prev: Record<string, unknown> | null) => ({ ...(prev ?? {}), ...updates }));
                 },
+                lastSlideUpdate,
                 initialStateLoaded: true,
             };
         },
@@ -164,7 +192,7 @@ vi.mock('@/lib/use-optimistic-slide-queue', () => ({
             clearInlineError: mockClearInlineError,
             clearSessionInlineError: mockClearSessionInlineError,
             resolveOptimisticId: mockResolveOptimisticId,
-            requestRefreshAfterDrain: refreshBaseSlides,
+            requestRefreshAfterDrain: mockRequestRefreshAfterDrain,
             hasPendingStructuralMutations: queueMockState.hasPendingStructuralMutations,
             sessionInlineError: null,
         };
@@ -187,6 +215,7 @@ describe('SlideEditor session loading', () => {
         mockEnqueueDeleteSlide.mockClear();
         mockClearInlineError.mockReset();
         mockClearSessionInlineError.mockReset();
+        mockRequestRefreshAfterDrain.mockReset();
         mockResolveOptimisticId.mockClear();
         apiMockState.reorderSlides.mockReset();
         dndState.dragEndHandlers = [];
@@ -199,6 +228,11 @@ describe('SlideEditor session loading', () => {
         queueMockState.stageTempSlideContent.mockReturnValue({ accepted: true });
         queueMockState.discardTempSlide.mockReturnValue({ accepted: true });
         wsMockState.initialState = null;
+        wsMockState.lastSlideUpdate = 0;
+        wsMockState.setLastSlideUpdate = null;
+        debounceMockState.lastValue = 0;
+        debounceMockState.lastDelayMs = 0;
+        debounceMockState.callback = null;
         mockSaveSlideUpdate.mockResolvedValue({ status: 'saved' });
         apiMockState.reorderSlides.mockResolvedValue(undefined);
         vi.mocked(httpFetch).mockReset();
@@ -1184,5 +1218,80 @@ describe('SlideEditor session loading', () => {
         const wrapInput = await screen.findByDisplayValue('Wrap up');
         expect(wrapInput).not.toBeDisabled();
         expect(screen.queryByText('This slide is temporarily locked while structural changes are syncing.')).not.toBeInTheDocument();
+    });
+
+    it('debounces websocket slide updates into an authoritative refresh request', async () => {
+        mockStorage.set('token', 'valid-token');
+
+        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
+            if (url.includes('/sessions/test-session-id') && !url.includes('/slides')) {
+                return {
+                    response: {
+                        ok: true,
+                        json: async () => ({
+                            success: true,
+                            data: {
+                                id: 'test-session-id',
+                                title: 'Test Session',
+                                status: 'draft',
+                                createdAt: '2024-01-01T00:00:00Z',
+                                allowQuestions: false,
+                                requireName: false,
+                                createdBy: 'user-1',
+                            },
+                        }),
+                    },
+                };
+            }
+
+            if (url.includes('/slides')) {
+                return {
+                    response: {
+                        ok: true,
+                        json: async () => ({
+                            success: true,
+                            data: [
+                                {
+                                    id: 'slide-agenda',
+                                    sessionId: 'test-session-id',
+                                    type: 'static',
+                                    content: {
+                                        title: 'Agenda',
+                                        body: 'First slide',
+                                    },
+                                    orderIndex: 0,
+                                    isHidden: false,
+                                    version: 1,
+                                },
+                            ],
+                        }),
+                    },
+                };
+            }
+
+            return { response: { ok: true, json: async () => ({ success: true, data: null }) } };
+        });
+
+        const { default: SlideEditor } = await import('./page');
+        render(<SlideEditor />);
+
+        await screen.findByDisplayValue('Agenda');
+        expect(mockRequestRefreshAfterDrain).not.toHaveBeenCalled();
+        expect(debounceMockState.lastValue).toBe(0);
+        expect(debounceMockState.lastDelayMs).toBe(200);
+
+        act(() => {
+            wsMockState.lastSlideUpdate = 1_234;
+            wsMockState.setLastSlideUpdate?.(1_234);
+        });
+
+        expect(debounceMockState.lastValue).toBe(1_234);
+        expect(debounceMockState.lastDelayMs).toBe(200);
+        expect(mockRequestRefreshAfterDrain).not.toHaveBeenCalled();
+
+        act(() => {
+            debounceMockState.callback?.(1_234);
+        });
+        expect(mockRequestRefreshAfterDrain).toHaveBeenCalledTimes(1);
     });
 });

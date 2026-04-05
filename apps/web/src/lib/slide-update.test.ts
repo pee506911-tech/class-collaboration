@@ -72,7 +72,9 @@ describe('saveSlideUpdate', () => {
                 saveSlide,
                 refreshSlides,
             }),
-        ).rejects.toThrow(SlideVersionConflictError);
+        ).rejects.toThrow(
+            'A newer version of this slide was saved elsewhere. Your draft is still in the editor; review and save again.',
+        );
 
         expect(refreshSlides).toHaveBeenCalledTimes(1);
         expect(slides[0]).toMatchObject({
