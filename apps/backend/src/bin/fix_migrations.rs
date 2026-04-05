@@ -55,6 +55,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 20241209000000")
         .execute(&pool)
         .await?;
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 20260405103000")
+        .execute(&pool)
+        .await?;
 
     // Drop FK constraints and tables
     println!("Dropping FK constraints and tables...");
