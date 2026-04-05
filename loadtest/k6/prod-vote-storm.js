@@ -130,6 +130,10 @@ function buildOptionId(index) {
   return `opt-${index}`;
 }
 
+function buildVoteClientRequestId(sessionId, participantId, optionId) {
+  return `vote:${sessionId}:${participantId}:${optionId}`;
+}
+
 function createPollSlideBody() {
   const options = [];
   for (let index = 1; index <= CONCURRENCY; index += 1) {
@@ -214,10 +218,19 @@ function fetchVerificationSnapshot(data) {
   const finalStats = parseJsonResponse(finalStatsRes, 'final stats');
 
   const voteCounts = getSlideVoteCounts(finalState, data.slideId);
+  const targetSlideStats = Array.isArray(finalStats.slides)
+    ? finalStats.slides.find((slide) => slide.id === data.slideId) || null
+    : null;
+  const statsVoteCounts = targetSlideStats && targetSlideStats.votes ? targetSlideStats.votes : {};
+  const statsInteractions = Array.isArray(targetSlideStats?.interactions)
+    ? targetSlideStats.interactions
+    : [];
   const expectedVoteSequence = data.baselineVoteSequence + CONCURRENCY;
   const observedVoteSequence = Number(finalState.voteSequence || 0);
   const totalVotes = sumVoteCounts(voteCounts);
   const uniqueOptionsHit = countUniqueHitOptions(voteCounts);
+  const statsTotalVotes = sumVoteCounts(statsVoteCounts);
+  const statsUniqueOptionsHit = countUniqueHitOptions(statsVoteCounts);
   const participantCount = Array.isArray(finalStats.participants) ? finalStats.participants.length : 0;
   const myVotesSamples = [];
 
@@ -239,10 +252,14 @@ function fetchVerificationSnapshot(data) {
     finalState,
     finalStats,
     voteCounts,
+    statsVoteCounts,
+    statsInteractions,
     expectedVoteSequence,
     observedVoteSequence,
     totalVotes,
     uniqueOptionsHit,
+    statsTotalVotes,
+    statsUniqueOptionsHit,
     participantCount,
     myVotesSamples,
   };
@@ -446,7 +463,7 @@ export function studentVote(data) {
   const index = buildStudentIndex();
   const participantId = buildParticipantId(index);
   const optionId = buildOptionId(index);
-  const clientRequestId = randId(`vote-${participantId}`);
+  const clientRequestId = buildVoteClientRequestId(data.sessionId, participantId, optionId);
 
   const voteRes = http.post(
     `${BASE_URL}/api/sessions/${data.sessionId}/vote`,
@@ -465,6 +482,8 @@ export function studentVote(data) {
       JSON.stringify({
         scenario: 'prod-vote-storm',
         phase: 'vote-failure',
+        clientRequestId,
+        index,
         participantId,
         optionId,
         status: voteRes.status,
@@ -476,6 +495,8 @@ export function studentVote(data) {
       JSON.stringify({
         scenario: 'prod-vote-storm',
         phase: 'vote-success',
+        clientRequestId,
+        index,
         participantId,
         optionId,
         status: voteRes.status,
@@ -497,6 +518,8 @@ export function verifyResults(data) {
     const converged =
       snapshot.totalVotes === CONCURRENCY &&
       snapshot.uniqueOptionsHit === CONCURRENCY &&
+      snapshot.statsTotalVotes === CONCURRENCY &&
+      snapshot.statsUniqueOptionsHit === CONCURRENCY &&
       snapshot.participantCount === CONCURRENCY;
 
     console.log(
@@ -506,6 +529,10 @@ export function verifyResults(data) {
         attempt,
         totalVotes: snapshot.totalVotes,
         uniqueOptionsHit: snapshot.uniqueOptionsHit,
+        statsTotalVotes: snapshot.statsTotalVotes,
+        statsUniqueOptionsHit: snapshot.statsUniqueOptionsHit,
+        statsInteractionCount: snapshot.statsInteractions.length,
+        statsInteractionSamples: snapshot.statsInteractions.slice(0, 5),
         participantCount: snapshot.participantCount,
         expectedVoteSequence: snapshot.expectedVoteSequence,
         observedVoteSequence: snapshot.observedVoteSequence,
@@ -523,10 +550,14 @@ export function verifyResults(data) {
   const {
     finalState,
     voteCounts,
+    statsVoteCounts,
+    statsInteractions,
     expectedVoteSequence,
     observedVoteSequence,
     totalVotes,
     uniqueOptionsHit,
+    statsTotalVotes,
+    statsUniqueOptionsHit,
     participantCount,
     myVotesSamples,
   } = snapshot;
@@ -536,12 +567,19 @@ export function verifyResults(data) {
   assert(finalState.currentSlideId === data.slideId, `current slide mismatch (expected=${data.slideId} got=${finalState.currentSlideId})`);
   assert(totalVotes === CONCURRENCY, `vote total mismatch after polling (expected=${CONCURRENCY} got=${totalVotes})`);
   assert(uniqueOptionsHit === CONCURRENCY, `unique option hit mismatch after polling (expected=${CONCURRENCY} got=${uniqueOptionsHit})`);
+  assert(statsTotalVotes === CONCURRENCY, `stats vote total mismatch after polling (expected=${CONCURRENCY} got=${statsTotalVotes})`);
+  assert(
+    statsUniqueOptionsHit === CONCURRENCY,
+    `stats unique option hit mismatch after polling (expected=${CONCURRENCY} got=${statsUniqueOptionsHit})`
+  );
   assert(participantCount === CONCURRENCY, `participant count mismatch after polling (expected=${CONCURRENCY} got=${participantCount})`);
 
   for (let index = 1; index <= CONCURRENCY; index += 1) {
     const optionId = buildOptionId(index);
     const count = Number(voteCounts[optionId] || 0);
+    const statsCount = Number(statsVoteCounts[optionId] || 0);
     assert(count === 1, `option ${optionId} should have exactly 1 vote (got=${count})`);
+    assert(statsCount === 1, `stats option ${optionId} should have exactly 1 vote (got=${statsCount})`);
   }
 
   console.log(
@@ -555,6 +593,9 @@ export function verifyResults(data) {
       participantCount,
       totalVotes,
       uniqueOptionsHit,
+      statsTotalVotes,
+      statsUniqueOptionsHit,
+      statsInteractionCount: statsInteractions.length,
       expectedVoteSequence,
       observedVoteSequence,
       voteSequenceMatched: observedVoteSequence === expectedVoteSequence,

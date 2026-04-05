@@ -480,6 +480,16 @@ impl WalStore {
         Ok(deleted)
     }
 
+    pub async fn delete_entries_for_session(&self, session_id: &str) -> Result<u64> {
+        let deleted = sqlx::query("DELETE FROM wal_entries WHERE session_id = ?")
+            .bind(session_id)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+
+        Ok(deleted)
+    }
+
     pub fn db_path(&self) -> Option<&Path> {
         self.db_path.as_deref()
     }
@@ -632,6 +642,17 @@ pub async fn flush_pending_batch(
                 if flushed_count > 0 {
                     session_service.invalidate_session_cache(&session_id).await;
                     processed += flushed_count;
+                }
+            }
+            Err(AppError::NotFound(message)) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    pending_entries = session_entries.len(),
+                    "Dropping WAL session group for deleted session: {}",
+                    message
+                );
+                for entry in &session_entries {
+                    wal_store.mark_failed(entry.wal_id, &message).await?;
                 }
             }
             Err(error) => {

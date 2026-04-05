@@ -3,6 +3,7 @@ use sqlx::query_scalar;
 
 use crate::db::DbPool;
 use crate::error::{AppError, Result};
+use crate::services::wal::WalStore;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -10,13 +11,16 @@ pub struct PerfCleanupResponse {
     pub session_id: String,
     pub creator_id: String,
     pub deleted_creator_user: bool,
+    pub deleted_wal_entries: u64,
 }
 
 pub async fn cleanup_perf_session(
     pool: &DbPool,
+    wal_store: &WalStore,
     session_id: &str,
     delete_creator_user: bool,
 ) -> Result<PerfCleanupResponse> {
+    let deleted_wal_entries = wal_store.delete_entries_for_session(session_id).await?;
     let mut tx = pool.begin().await?;
 
     let creator_id: String = query_scalar("SELECT creator_id FROM sessions WHERE id = ?")
@@ -91,5 +95,6 @@ pub async fn cleanup_perf_session(
         session_id: session_id.to_string(),
         creator_id,
         deleted_creator_user,
+        deleted_wal_entries,
     })
 }
