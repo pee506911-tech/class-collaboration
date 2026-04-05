@@ -128,7 +128,7 @@ async fn fetch_vote_results(
     slide_id: &str,
 ) -> Result<serde_json::Map<String, serde_json::Value>, sqlx::Error> {
     let vote_counts: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT option_id, SUM(vote_count) as count
+        "SELECT option_id, CAST(SUM(vote_count) AS SIGNED) as count
          FROM vote_count_shards
          WHERE slide_id = ? AND vote_count > 0
          GROUP BY option_id",

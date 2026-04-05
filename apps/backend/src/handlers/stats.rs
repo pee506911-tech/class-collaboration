@@ -167,7 +167,7 @@ pub async fn get_session_stats(
 
     let vote_counts_fut = async {
         sqlx::query_as::<_, VoteCount>(
-            "SELECT slide_id, option_id, SUM(vote_count) as count
+            "SELECT slide_id, option_id, CAST(SUM(vote_count) AS SIGNED) as count
              FROM vote_count_shards
              WHERE session_id = ? AND vote_count > 0
              GROUP BY slide_id, option_id",
@@ -358,7 +358,7 @@ pub async fn get_public_session_stats(
 
     let vote_counts_fut = async {
         sqlx::query_as::<_, VoteCount>(
-            "SELECT slide_id, option_id, SUM(vote_count) as count
+            "SELECT slide_id, option_id, CAST(SUM(vote_count) AS SIGNED) as count
              FROM vote_count_shards
              WHERE session_id = ? AND vote_count > 0
              GROUP BY slide_id, option_id",
