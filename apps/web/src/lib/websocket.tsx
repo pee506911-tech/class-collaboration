@@ -149,6 +149,8 @@ export function WebSocketProvider({
     const isMountedRef = useRef<boolean>(true);
     const isRefreshingRef = useRef<boolean>(false); // Track if auto-refresh is in progress
     const initialStateLoadedRef = useRef<boolean>(false); // Track if initial state fetched
+    const hasOpenedSocketRef = useRef<boolean>(false);
+    const refreshStateRef = useRef<((options?: { includeMyVotes?: boolean }) => Promise<SendAck>) | null>(null);
 
     // Message buffer for failover gap
     const messageBufferRef = useRef<Array<{ name: string; data: any; timestamp: number }>>([]);
@@ -440,6 +442,16 @@ export function WebSocketProvider({
                 setIsConnected(true);
                 setIsConnecting(false);
                 setConnectionError(null);
+
+                const hasOpenedBefore = hasOpenedSocketRef.current;
+                hasOpenedSocketRef.current = true;
+
+                if (hasOpenedBefore && refreshStateRef.current && !isRefreshingRef.current) {
+                    isRefreshingRef.current = true;
+                    void refreshStateRef.current({ includeMyVotes: false }).finally(() => {
+                        isRefreshingRef.current = false;
+                    });
+                }
 
                 // End failover mode and process buffered messages
                 if (isInFailoverRef.current) {
@@ -909,6 +921,10 @@ export function WebSocketProvider({
             return { ok: false, requestId: rid, message, status, kind, error: e };
         }
     }, [role, sessionId]);
+
+    useEffect(() => {
+        refreshStateRef.current = refreshState;
+    }, [refreshState]);
 
     // Auto-refresh state when connection is stale (no updates for 15 seconds)
     useEffect(() => {

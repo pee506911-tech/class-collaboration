@@ -423,6 +423,31 @@ impl WalStore {
             })
     }
 
+    pub async fn has_pending_create_slide_resource(
+        &self,
+        session_id: &str,
+        slide_id: &str,
+    ) -> Result<bool> {
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(
+                 SELECT 1
+                 FROM wal_entries
+                 WHERE flushed = 0
+                   AND flush_error IS NULL
+                   AND session_id = ?
+                   AND resource_id = ?
+                   AND op_type = ?
+             )",
+        )
+        .bind(session_id)
+        .bind(slide_id)
+        .bind(WalOpType::CreateSlide.to_string())
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(exists == 1)
+    }
+
     pub async fn mark_flushed(&self, wal_id: i64) -> Result<()> {
         sqlx::query(
             "UPDATE wal_entries
@@ -1271,6 +1296,30 @@ mod tests {
             }
             other => panic!("expected existing response payload, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn pending_create_slide_resource_is_visible_before_flush() {
+        let store = WalStore::open_test().await.expect("wal store");
+        store
+            .append_or_get_existing(AppendWalEntry {
+                op_type: WalOpType::CreateSlide,
+                session_id: "session-1".to_string(),
+                client_request_id: "req-pending".to_string(),
+                resource_id: Some("slide-pending".to_string()),
+                payload: serde_json::json!({"slideId": "slide-pending"}),
+                response_payload: serde_json::json!({"id": "slide-pending"}),
+                priority: 3,
+            })
+            .await
+            .expect("append");
+
+        let is_pending = store
+            .has_pending_create_slide_resource("session-1", "slide-pending")
+            .await
+            .expect("pending resource lookup");
+
+        assert!(is_pending);
     }
 
     #[tokio::test]

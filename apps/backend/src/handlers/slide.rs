@@ -7,7 +7,7 @@ use axum::{
     Json,
 };
 use serde::de::DeserializeOwned;
-use sqlx::{query_as, query_scalar, MySql, QueryBuilder, Transaction};
+use sqlx::{query_as, query_scalar, MySql, Pool, QueryBuilder, Transaction};
 use uuid::Uuid;
 
 use crate::error::{AppError, Result};
@@ -22,6 +22,11 @@ const ORDER_STEP: i32 = 1024;
 const CLIENT_REQUEST_ID_HEADER: &str = "x-client-request-id";
 const MAX_CLIENT_REQUEST_ID_LEN: usize = 64;
 const MAX_BATCH_SLIDE_COUNT: usize = 50;
+
+enum InsertAfterTarget {
+    Materialized(i32),
+    Pending,
+}
 
 fn deserialize_wal_response<T: DeserializeOwned>(value: serde_json::Value) -> Result<T> {
     serde_json::from_value(value).map_err(|error| {
@@ -99,6 +104,35 @@ pub async fn get_slides(
     Ok(Json(ApiResponse::success(slides)))
 }
 
+async fn resolve_insert_after_target(
+    app_state: &crate::AppState,
+    pool: &Pool<MySql>,
+    session_id: &str,
+    insert_after_slide_id: &str,
+) -> Result<Option<InsertAfterTarget>> {
+    let order_index = query_scalar::<_, i32>(
+        "SELECT order_index FROM slides WHERE id = ? AND session_id = ?",
+    )
+    .bind(insert_after_slide_id)
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(order_index) = order_index {
+        return Ok(Some(InsertAfterTarget::Materialized(order_index)));
+    }
+
+    if app_state
+        .wal_store
+        .has_pending_create_slide_resource(session_id, insert_after_slide_id)
+        .await?
+    {
+        return Ok(Some(InsertAfterTarget::Pending));
+    }
+
+    Ok(None)
+}
+
 /// Create a new slide
 pub async fn create_slide(
     State(app_state): State<crate::AppState>,
@@ -123,28 +157,25 @@ pub async fn create_slide(
         return crate::services::wal::queued_success_response(&existing_slide);
     }
 
-    if let Some(insert_after_slide_id) = payload.insert_after_slide_id.as_deref() {
-        let exists: i64 =
-            query_scalar("SELECT EXISTS(SELECT 1 FROM slides WHERE id = ? AND session_id = ?)")
-                .bind(insert_after_slide_id)
-                .bind(&session_id)
-                .fetch_one(&pool)
-                .await?;
-
-        if exists == 0 {
-            return Err(AppError::Input("Insert-after slide not found".to_string()));
-        }
-    }
-
     let predicted_order_index =
         if let Some(insert_after_slide_id) = payload.insert_after_slide_id.as_deref() {
-            let insert_after_order_index: i32 =
-                query_scalar("SELECT order_index FROM slides WHERE id = ? AND session_id = ?")
-                    .bind(insert_after_slide_id)
+            match resolve_insert_after_target(&app_state, &pool, &session_id, insert_after_slide_id)
+                .await?
+            {
+                Some(InsertAfterTarget::Materialized(insert_after_order_index)) => {
+                    insert_after_order_index.saturating_add(1)
+                }
+                Some(InsertAfterTarget::Pending) => {
+                    let max_order_index = query_scalar::<_, Option<i32>>(
+                        "SELECT MAX(order_index) FROM slides WHERE session_id = ?",
+                    )
                     .bind(&session_id)
                     .fetch_one(&pool)
                     .await?;
-            insert_after_order_index.saturating_add(1)
+                    compute_append_order_index(max_order_index)
+                }
+                None => return Err(AppError::Input("Insert-after slide not found".to_string())),
+            }
         } else {
             let max_order_index = query_scalar::<_, Option<i32>>(
                 "SELECT MAX(order_index) FROM slides WHERE session_id = ?",

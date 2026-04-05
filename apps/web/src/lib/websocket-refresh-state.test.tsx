@@ -1,5 +1,5 @@
 import React from "react";
-import { render, waitFor } from "@testing-library/react";
+import { act, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/http", async (importOriginal) => {
@@ -31,6 +31,7 @@ const mockHttp = httpFetch as unknown as ReturnType<typeof vi.fn>;
 class MockWebSocket {
   static OPEN = 1;
   static CLOSED = 3;
+  static instances: MockWebSocket[] = [];
 
   readyState = MockWebSocket.OPEN;
   onopen: ((event: Event) => void) | null = null;
@@ -39,6 +40,7 @@ class MockWebSocket {
   onerror: (() => void) | null = null;
 
   constructor(_url: string) {
+    MockWebSocket.instances.push(this);
     setTimeout(() => {
       this.onopen?.(new Event("open"));
     }, 0);
@@ -46,6 +48,15 @@ class MockWebSocket {
 
   close(_code?: number, _reason?: string) {
     this.readyState = MockWebSocket.CLOSED;
+  }
+
+  emitClose(code = 1006, reason = "connection lost") {
+    this.readyState = MockWebSocket.CLOSED;
+    this.onclose?.({ code, reason } as CloseEvent);
+  }
+
+  static reset() {
+    MockWebSocket.instances = [];
   }
 }
 
@@ -69,6 +80,7 @@ describe("WebSocketProvider refreshState vote fetch policy", () => {
   beforeEach(() => {
     mockHttp.mockReset();
     globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+    MockWebSocket.reset();
     vi.stubEnv("NEXT_PUBLIC_API_URL", "http://localhost:8080/api");
 
     mockHttp.mockImplementation(async (url: string) => {
@@ -93,6 +105,7 @@ describe("WebSocketProvider refreshState vote fetch policy", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
     globalThis.WebSocket = originalWebSocket;
+    MockWebSocket.reset();
   });
 
   it("keeps manual student refresh fetching my-votes by default", async () => {
@@ -140,6 +153,57 @@ describe("WebSocketProvider refreshState vote fetch policy", () => {
     expect(mockHttp).toHaveBeenCalledTimes(1);
     expect(mockHttp.mock.calls[0]?.[0]).toBe(
       "http://localhost:8080/api/sessions/sess-stale-refresh/state"
+    );
+  });
+
+  it("refreshes the authoritative state immediately after student reconnect", async () => {
+    let ctx: any = null;
+    let stateFetchCount = 0;
+    mockHttp.mockImplementation(async (url: string) => {
+      if (url.includes("/my-votes")) {
+        return {
+          response: mockResponse(true, { data: { votes: { "slide-1": ["opt-1"] } } }),
+          requestId: "req-my-votes",
+        };
+      }
+
+      stateFetchCount += 1;
+      return {
+        response: mockResponse(true, {
+          currentSlideId: stateFetchCount === 1 ? "slide-1" : "slide-2",
+          stateVersion: stateFetchCount,
+          isPresentationActive: true,
+        }),
+        requestId: `req-state-${stateFetchCount}`,
+      };
+    });
+
+    render(
+      <WebSocketProvider sessionId="sess-reconnect-refresh" role="student">
+        <ContextCapturer onCapture={(value) => { ctx = value; }} />
+      </WebSocketProvider>
+    );
+
+    await waitFor(() => {
+      expect(ctx?.initialStateLoaded).toBe(true);
+      expect(MockWebSocket.instances).toHaveLength(1);
+    });
+
+    mockHttp.mockClear();
+
+    await act(async () => {
+      MockWebSocket.instances[0]?.onopen?.(new Event("open"));
+    });
+
+    await waitFor(() => {
+      expect(mockHttp).toHaveBeenCalledTimes(1);
+    });
+
+    expect(mockHttp).toHaveBeenCalledWith(
+      "http://localhost:8080/api/sessions/sess-reconnect-refresh/state",
+      expect.objectContaining({
+        idempotent: true,
+      }),
     );
   });
 });
