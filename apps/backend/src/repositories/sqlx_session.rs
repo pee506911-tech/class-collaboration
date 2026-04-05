@@ -374,9 +374,9 @@ impl SessionRepository for SqlxSessionRepository {
         let counts = if crate::tidb_ru::should_sample() {
             let mut conn = pool.acquire().await?;
             let counts = sqlx::query_as(
-                "SELECT slide_id, option_id, CAST(SUM(vote_count) AS SIGNED) as count
-                 FROM vote_count_shards
-                 WHERE session_id = ? AND vote_count > 0
+                "SELECT slide_id, option_id, CAST(COUNT(*) AS SIGNED) as count
+                 FROM votes
+                 WHERE session_id = ?
                  GROUP BY slide_id, option_id",
             )
             .bind(session_id)
@@ -386,9 +386,9 @@ impl SessionRepository for SqlxSessionRepository {
             counts
         } else {
             sqlx::query_as(
-                "SELECT slide_id, option_id, CAST(SUM(vote_count) AS SIGNED) as count
-                 FROM vote_count_shards
-                 WHERE session_id = ? AND vote_count > 0
+                "SELECT slide_id, option_id, CAST(COUNT(*) AS SIGNED) as count
+                 FROM votes
+                 WHERE session_id = ?
                  GROUP BY slide_id, option_id",
             )
             .bind(session_id)
@@ -407,9 +407,9 @@ impl SessionRepository for SqlxSessionRepository {
         let counts = if crate::tidb_ru::should_sample() {
             let mut conn = pool.acquire().await?;
             let counts = sqlx::query_as(
-                "SELECT slide_id, option_id, CAST(SUM(vote_count) AS SIGNED) as count
-                 FROM vote_count_shards
-                 WHERE session_id = ? AND slide_id = ? AND vote_count > 0
+                "SELECT slide_id, option_id, CAST(COUNT(*) AS SIGNED) as count
+                 FROM votes
+                 WHERE session_id = ? AND slide_id = ?
                  GROUP BY slide_id, option_id",
             )
             .bind(session_id)
@@ -420,9 +420,9 @@ impl SessionRepository for SqlxSessionRepository {
             counts
         } else {
             sqlx::query_as(
-                "SELECT slide_id, option_id, CAST(SUM(vote_count) AS SIGNED) as count
-                 FROM vote_count_shards
-                 WHERE session_id = ? AND slide_id = ? AND vote_count > 0
+                "SELECT slide_id, option_id, CAST(COUNT(*) AS SIGNED) as count
+                 FROM votes
+                 WHERE session_id = ? AND slide_id = ?
                  GROUP BY slide_id, option_id",
             )
             .bind(session_id)

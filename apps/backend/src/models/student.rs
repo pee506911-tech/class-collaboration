@@ -174,9 +174,9 @@ impl Vote {
 
     pub async fn get_vote_counts(pool: &DbPool, slide_id: &str) -> Result<Vec<(String, i64)>> {
         let counts: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT option_id, CAST(SUM(vote_count) AS SIGNED) as count
-             FROM vote_count_shards
-             WHERE slide_id = ? AND vote_count > 0
+            "SELECT option_id, CAST(COUNT(*) AS SIGNED) as count
+             FROM votes
+             WHERE slide_id = ?
              GROUP BY option_id",
         )
         .bind(slide_id)
