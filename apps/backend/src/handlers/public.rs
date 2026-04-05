@@ -12,6 +12,7 @@ use crate::error::Result;
 use crate::models::response::ApiResponse;
 use crate::models::session::Session;
 use crate::services::outbox::{self, OutboxEventType};
+use crate::ws::registry::Broadcaster;
 
 /// Cache policy for read-mostly public session metadata.
 /// Allows CDN edge caching with 10-second TTL and 5-minute stale-if-error fallback.
@@ -124,6 +125,7 @@ pub async fn public_set_current_slide(
 
     tx.commit().await?;
     if should_flush_outbox {
+        broadcast_state_update_fast_lane(app_state.registry.as_ref(), &session_id, &build_state_payload(&session)).await;
         app_state.outbox_flush_notify.notify_one();
     }
 
@@ -192,6 +194,38 @@ fn build_state_payload(session: &Session) -> StateUpdatePayload {
     }
 }
 
+async fn broadcast_state_update_fast_lane(
+    broadcaster: &dyn Broadcaster,
+    session_id: &str,
+    payload: &StateUpdatePayload,
+) {
+    let message = serde_json::json!({
+        "type": "STATE_UPDATE",
+        "payload": payload,
+    });
+
+    match broadcaster.broadcast(session_id, &message).await {
+        Ok(receiver_count) => {
+            tracing::info!(
+                session_id = %session_id,
+                receiver_count,
+                current_slide_id = ?payload.current_slide_id,
+                state_version = payload.state_version,
+                "Fast-lane STATE_UPDATE broadcast after commit"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                session_id = %session_id,
+                current_slide_id = ?payload.current_slide_id,
+                state_version = payload.state_version,
+                error = %error,
+                "Fast-lane STATE_UPDATE broadcast failed; outbox fallback remains available"
+            );
+        }
+    }
+}
+
 fn resolve_public_client_request_id(headers: &HeaderMap) -> String {
     headers
         .get("x-client-request-id")
@@ -238,5 +272,49 @@ async fn validate_target_slide_exists(
         Err(crate::error::AppError::Input(
             "Invalid slide: slide does not exist or does not belong to this session".to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::broadcaster_spy::BroadcasterSpy;
+
+    #[tokio::test]
+    async fn fast_lane_state_update_broadcasts_immediately_to_registry() {
+        let spy = BroadcasterSpy::new();
+        let payload = StateUpdatePayload {
+            current_slide_id: Some("slide-123".to_string()),
+            is_presentation_active: true,
+            is_results_visible: false,
+            state_version: 42,
+        };
+
+        broadcast_state_update_fast_lane(&spy, "session-fast-lane", &payload).await;
+
+        let messages = spy.messages_for_session("session-fast-lane").await;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["type"], "STATE_UPDATE");
+        assert_eq!(messages[0]["payload"]["currentSlideId"], "slide-123");
+        assert_eq!(messages[0]["payload"]["stateVersion"], 42);
+    }
+
+    #[tokio::test]
+    async fn fast_lane_state_update_tolerates_broadcast_failures() {
+        let spy = BroadcasterSpy::failing();
+        let payload = StateUpdatePayload {
+            current_slide_id: Some("slide-456".to_string()),
+            is_presentation_active: true,
+            is_results_visible: true,
+            state_version: 99,
+        };
+
+        broadcast_state_update_fast_lane(&spy, "session-fast-lane", &payload).await;
+
+        assert_eq!(
+            spy.failure_count
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
     }
 }
