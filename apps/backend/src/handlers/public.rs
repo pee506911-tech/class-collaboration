@@ -184,15 +184,6 @@ pub async fn public_set_current_slide(
     }
 
     let should_flush_outbox = update_result.rows_affected() > 0;
-    if should_flush_outbox {
-        outbox::enqueue_event(
-            &mut tx,
-            &session_id,
-            OutboxEventType::StateUpdate,
-            &state_payload,
-        )
-        .await?;
-    }
     let outbox_enqueued_at = std::time::Instant::now();
 
     tx.commit().await?;
@@ -200,7 +191,6 @@ pub async fn public_set_current_slide(
     if should_flush_outbox {
         broadcast_state_update_fast_lane(app_state.registry.as_ref(), &session_id, &state_payload)
             .await;
-        app_state.outbox_flush_notify.notify_one();
     }
     let post_commit_finished_at = std::time::Instant::now();
 
@@ -225,7 +215,7 @@ pub async fn public_set_current_slide(
         requested_slide_id = ?requested_slide_id,
         applied_slide_id = ?state_payload.current_slide_id,
         state_version = state_payload.state_version,
-        outbox_enqueued = should_flush_outbox,
+        outbox_enqueued = false,
         pool_acquire_ms = timings.pool_acquire_ms,
         begin_tx_ms = timings.begin_tx_ms,
         validate_slide_ms = timings.validate_slide_ms,
