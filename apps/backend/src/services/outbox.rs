@@ -123,6 +123,63 @@ fn vote_results_from_payload(
     })
 }
 
+fn vote_projection_from_payload(payload: &serde_json::Value) -> Option<(u32, Vec<String>)> {
+    let projection = payload.get("projection")?;
+    let shard_id = projection.get("shardId")?.as_u64()? as u32;
+    let option_ids = projection
+        .get("optionIds")?
+        .as_array()?
+        .iter()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+
+    Some((shard_id, option_ids))
+}
+
+async fn apply_vote_projection(pool: &Pool<MySql>, event: &OutboxEvent) -> Result<(), sqlx::Error> {
+    let Some((shard_id, option_ids)) = vote_projection_from_payload(&event.payload) else {
+        return Ok(());
+    };
+
+    if option_ids.is_empty() {
+        return Ok(());
+    }
+
+    let slide_id = event.payload["slideId"].as_str().unwrap_or("");
+    if slide_id.is_empty() {
+        return Ok(());
+    }
+
+    let mut tx = pool.begin().await?;
+    let projection_marker =
+        sqlx::query("INSERT IGNORE INTO vote_projection_applied (outbox_event_id) VALUES (?)")
+            .bind(&event.id)
+            .execute(&mut *tx)
+            .await?;
+
+    if projection_marker.rows_affected() == 0 {
+        tx.commit().await?;
+        return Ok(());
+    }
+
+    for option_id in option_ids {
+        sqlx::query(
+            "INSERT INTO vote_count_shards (session_id, slide_id, option_id, shard_id, vote_count)
+             VALUES (?, ?, ?, ?, 1)
+             ON DUPLICATE KEY UPDATE vote_count = vote_count + 1",
+        )
+        .bind(&event.session_id)
+        .bind(slide_id)
+        .bind(&option_id)
+        .bind(shard_id as i64)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
 async fn fetch_vote_results(
     pool: &Pool<MySql>,
     slide_id: &str,
@@ -150,7 +207,10 @@ async fn build_vote_update_message(
     let slide_id = event.payload["slideId"].as_str().unwrap_or("");
     let results = match vote_results_from_payload(&event.payload) {
         Some(results) => results,
-        None => fetch_vote_results(pool, slide_id).await?,
+        None => {
+            apply_vote_projection(pool, event).await?;
+            fetch_vote_results(pool, slide_id).await?
+        }
     };
     let sequence = event.payload["sequence"]
         .as_u64()
@@ -808,5 +868,30 @@ mod tests {
         let results = vote_results_from_payload(&payload).expect("results should be present");
         assert_eq!(results["opt-a"], 4);
         assert_eq!(results["opt-b"], 2);
+    }
+
+    #[test]
+    fn vote_projection_from_payload_extracts_delta_when_present() {
+        let payload = serde_json::json!({
+            "slideId": "slide-123",
+            "projection": {
+                "shardId": 3,
+                "optionIds": ["opt-a", "opt-b"]
+            }
+        });
+
+        let (shard_id, option_ids) =
+            vote_projection_from_payload(&payload).expect("projection should exist");
+        assert_eq!(shard_id, 3);
+        assert_eq!(option_ids, vec!["opt-a".to_string(), "opt-b".to_string()]);
+    }
+
+    #[test]
+    fn vote_projection_from_payload_returns_none_for_legacy_payloads() {
+        let payload = serde_json::json!({
+            "slideId": "slide-123"
+        });
+
+        assert!(vote_projection_from_payload(&payload).is_none());
     }
 }

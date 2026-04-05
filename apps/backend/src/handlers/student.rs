@@ -150,28 +150,6 @@ async fn get_votes_for_participant_by_slide_ids(
     Ok(votes)
 }
 
-pub(crate) async fn increment_vote_count(
-    tx: &mut Transaction<'_, MySql>,
-    session_id: &str,
-    slide_id: &str,
-    option_id: &str,
-    shard_id: u32,
-) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO vote_count_shards (session_id, slide_id, option_id, shard_id, vote_count)
-         VALUES (?, ?, ?, ?, 1)
-         ON DUPLICATE KEY UPDATE vote_count = vote_count + 1",
-    )
-    .bind(session_id)
-    .bind(slide_id)
-    .bind(option_id)
-    .bind(shard_id as i64)
-    .execute(&mut **tx)
-    .await?;
-
-    Ok(())
-}
-
 pub(crate) fn vote_count_shard_id(participant_id: &str) -> u32 {
     let mut hash = 0x811c9dc5u32;
     for byte in participant_id.as_bytes() {
@@ -181,9 +159,17 @@ pub(crate) fn vote_count_shard_id(participant_id: &str) -> u32 {
     hash % VOTE_COUNT_SHARD_COUNT
 }
 
-pub(crate) fn build_vote_update_payload(slide_id: &str) -> serde_json::Value {
+pub(crate) fn build_vote_update_payload(
+    slide_id: &str,
+    shard_id: u32,
+    option_ids: &[String],
+) -> serde_json::Value {
     serde_json::json!({
-        "slideId": slide_id
+        "slideId": slide_id,
+        "projection": {
+            "shardId": shard_id,
+            "optionIds": option_ids,
+        }
     })
 }
 
@@ -241,15 +227,12 @@ pub(crate) async fn commit_vote_submission(
     }
 
     let shard_id = vote_count_shard_id(participant_id);
-    for option_id in &inserted_option_ids {
-        increment_vote_count(tx, session_id, slide_id, option_id, shard_id).await?;
-    }
 
     crate::services::outbox::enqueue_event(
         tx,
         session_id,
         crate::services::outbox::OutboxEventType::VoteUpdate,
-        &build_vote_update_payload(slide_id),
+        &build_vote_update_payload(slide_id, shard_id, &inserted_option_ids),
     )
     .await?;
 
@@ -917,9 +900,13 @@ mod tests {
 
     #[test]
     fn build_vote_update_payload_keeps_vote_snapshot_out_of_the_write_path() {
-        let payload = build_vote_update_payload("slide-123");
+        let payload =
+            build_vote_update_payload("slide-123", 7, &["opt-a".to_string(), "opt-b".to_string()]);
 
         assert_eq!(payload["slideId"], "slide-123");
+        assert_eq!(payload["projection"]["shardId"], 7);
+        assert_eq!(payload["projection"]["optionIds"][0], "opt-a");
+        assert_eq!(payload["projection"]["optionIds"][1], "opt-b");
         assert!(payload.get("results").is_none());
     }
 
