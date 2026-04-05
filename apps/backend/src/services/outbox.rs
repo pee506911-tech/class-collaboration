@@ -12,6 +12,15 @@ const MAX_RETRIES: u32 = 5;
 const POLL_INTERVAL_MS: u64 = 100;
 const BATCH_SIZE: usize = 50;
 const CLEANUP_AGE_HOURS: i64 = 24;
+const PENDING_EVENTS_QUERY: &str = "
+        SELECT id, sequence_id, session_id, event_type, payload, status, retry_count
+        FROM outbox_events
+        WHERE status = 'pending' AND retry_count < ?
+        ORDER BY
+            CASE WHEN event_type = 'STATE_UPDATE' THEN 0 ELSE 1 END,
+            sequence_id
+        LIMIT ?
+    ";
 
 #[derive(Debug, PartialEq, Eq)]
 enum OutboxWorkerSignal {
@@ -195,13 +204,7 @@ pub async fn process_pending_batch(
     pool: &Pool<MySql>,
     broadcaster: &dyn Broadcaster,
 ) -> Result<usize, sqlx::Error> {
-    let events: Vec<OutboxEvent> = sqlx::query_as(
-        "SELECT id, sequence_id, session_id, event_type, payload, status, retry_count
-         FROM outbox_events
-         WHERE status = 'pending' AND retry_count < ?
-         ORDER BY sequence_id
-         LIMIT ?",
-    )
+    let events: Vec<OutboxEvent> = sqlx::query_as(PENDING_EVENTS_QUERY)
     .bind(MAX_RETRIES as i32)
     .bind(BATCH_SIZE as i64)
     .fetch_all(pool)
@@ -517,6 +520,24 @@ mod tests {
         assert_eq!(prioritized[0].sequence_id, 3);
         assert_eq!(prioritized[1].sequence_id, 1);
         assert_eq!(prioritized[2].sequence_id, 2);
+    }
+
+    #[test]
+    fn pending_events_query_prioritizes_state_updates_before_sequence_order() {
+        assert!(PENDING_EVENTS_QUERY.contains("CASE WHEN event_type = 'STATE_UPDATE' THEN 0 ELSE 1 END"));
+        assert!(PENDING_EVENTS_QUERY.contains("sequence_id"));
+
+        let state_priority_index = PENDING_EVENTS_QUERY
+            .find("CASE WHEN event_type = 'STATE_UPDATE' THEN 0 ELSE 1 END")
+            .expect("query should prioritize STATE_UPDATE");
+        let sequence_index = PENDING_EVENTS_QUERY
+            .rfind("sequence_id")
+            .expect("query should preserve sequence ordering within priority");
+
+        assert!(
+            state_priority_index < sequence_index,
+            "STATE_UPDATE priority must be applied before sequence ordering"
+        );
     }
 
     // === Outbox dispatch tests with BroadcasterSpy ===
