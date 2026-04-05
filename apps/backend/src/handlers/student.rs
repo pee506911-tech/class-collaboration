@@ -188,6 +188,81 @@ pub(crate) async fn current_vote_counts(
     Ok(results)
 }
 
+pub(crate) async fn commit_vote_submission(
+    tx: &mut Transaction<'_, MySql>,
+    session_id: &str,
+    slide_id: &str,
+    participant_id: &str,
+    option_ids: &[String],
+    limit_submissions: bool,
+) -> Result<bool> {
+    if limit_submissions {
+        let reserve_result = sqlx::query(
+            "INSERT INTO vote_submissions (slide_id, participant_id, session_id) VALUES (?, ?, ?)",
+        )
+        .bind(slide_id)
+        .bind(participant_id)
+        .bind(session_id)
+        .execute(&mut **tx)
+        .await;
+
+        match reserve_result {
+            Ok(_) => {}
+            Err(error) if is_mysql_duplicate_key(&error) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    let mut inserted_option_ids = Vec::new();
+    for option_id in option_ids {
+        let insert_result = sqlx::query(
+            "INSERT IGNORE INTO votes (id, session_id, slide_id, participant_id, option_id)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(session_id)
+        .bind(slide_id)
+        .bind(participant_id)
+        .bind(option_id)
+        .execute(&mut **tx)
+        .await;
+
+        match insert_result {
+            Ok(result) => {
+                if result.rows_affected() > 0 {
+                    inserted_option_ids.push(option_id.clone());
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    if should_skip_vote_snapshot(limit_submissions, inserted_option_ids.len() as u64) {
+        return Ok(false);
+    }
+
+    for option_id in &inserted_option_ids {
+        increment_vote_count(tx, session_id, slide_id, option_id).await?;
+    }
+
+    let sequence = next_vote_sequence(tx, session_id).await?;
+    let results = current_vote_counts(tx, slide_id).await?;
+    let vote_payload = serde_json::json!({
+        "slideId": slide_id,
+        "results": results,
+        "sequence": sequence
+    });
+    crate::services::outbox::enqueue_event(
+        tx,
+        session_id,
+        crate::services::outbox::OutboxEventType::VoteUpdate,
+        &vote_payload,
+    )
+    .await?;
+
+    Ok(true)
+}
+
 /// Helper function: Atomically increment vote_sequence and fetch the new value.
 pub(crate) async fn next_vote_sequence(
     tx: &mut Transaction<'_, MySql>,
@@ -357,41 +432,68 @@ pub async fn submit_vote(
     )
     .await?
     {
-        return Ok((StatusCode::ACCEPTED, Json(ApiResponse::success(existing))).into_response());
+        return Ok((StatusCode::OK, Json(ApiResponse::success(existing))).into_response());
     }
 
-    let append_result = app_state
-        .wal_store
-        .append_or_get_existing(crate::services::wal::AppendWalEntry {
-            op_type: crate::services::wal::WalOpType::SubmitVote,
-            session_id: session_id.clone(),
-            client_request_id,
-            resource_id: Some(payload.slide_id.clone()),
-            payload: serde_json::to_value(crate::services::wal::SubmitVoteWalPayload {
-                slide_id: payload.slide_id.clone(),
-                participant_id: payload.participant_id.clone(),
-                option_ids: option_ids.clone(),
-            })
-            .map_err(|error| {
-                AppError::Internal(format!("Failed to encode vote WAL payload: {error}"))
-            })?,
-            response_payload: response_payload.clone(),
-            priority: 2,
-        })
-        .await?;
+    for attempt in 0..=MAX_DEADLOCK_RETRIES {
+        let mut tx = pool.begin().await?;
 
-    let response_payload = match append_result {
-        crate::services::wal::AppendWalResult::Appended => response_payload,
-        crate::services::wal::AppendWalResult::Existing { response_payload } => {
-            decode_wal_response::<serde_json::Value>(response_payload)?
+        match commit_vote_submission(
+            &mut tx,
+            &session_id,
+            &payload.slide_id,
+            &payload.participant_id,
+            &option_ids,
+            _limit_submissions,
+        )
+        .await
+        {
+            Ok(_) => {
+                sqlx::query(
+                    "INSERT IGNORE INTO wal_request_replays (session_id, op_type, client_request_id, response_payload)
+                     VALUES (?, ?, ?, ?)",
+                )
+                .bind(&session_id)
+                .bind(crate::services::wal::WalOpType::SubmitVote.to_string())
+                .bind(&client_request_id)
+                .bind(sqlx::types::Json(&response_payload))
+                .execute(&mut *tx)
+                .await?;
+
+                tx.commit().await?;
+                app_state
+                    .session_service
+                    .invalidate_session_cache(&session_id)
+                    .await;
+
+                tracing::info!(
+                    session_id,
+                    slide_id = %payload.slide_id,
+                    participant_id = %payload.participant_id,
+                    client_request_id = %client_request_id,
+                    "Vote committed synchronously"
+                );
+
+                return Ok((
+                    StatusCode::OK,
+                    Json(ApiResponse::success(response_payload.clone())),
+                )
+                    .into_response());
+            }
+            Err(error) if is_app_error_deadlock(&error) && attempt < MAX_DEADLOCK_RETRIES => {
+                tx.rollback().await?;
+                tokio::time::sleep(std::time::Duration::from_millis(10 * (1_u64 << attempt))).await;
+            }
+            Err(error) => {
+                tx.rollback().await?;
+                return Err(error);
+            }
         }
-    };
+    }
 
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(ApiResponse::success(response_payload)),
-    )
-        .into_response())
+    Err(AppError::ServiceUnavailable(
+        "Vote submission hit repeated database contention, please retry".to_string(),
+    ))
 }
 
 // ============================================

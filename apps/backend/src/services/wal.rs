@@ -3,6 +3,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::error::{AppError, Result};
+use crate::handlers::{slide, student};
+use crate::models::response::ApiResponse;
+use crate::models::slide::{Slide, UpdateSlideRequest};
+use crate::services::outbox::OutboxEventType;
+use crate::services::session::SessionService;
 use chrono::Utc;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -11,14 +17,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use sqlx::{MySql, Pool, Row, Sqlite, Transaction};
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
+#[cfg(test)]
 use uuid::Uuid;
-
-use crate::error::{AppError, Result};
-use crate::handlers::{slide, student};
-use crate::models::response::ApiResponse;
-use crate::models::slide::{Slide, UpdateSlideRequest};
-use crate::services::outbox::OutboxEventType;
-use crate::services::session::SessionService;
 
 const SQLITE_INIT_STATEMENTS: &[&str] = &[
     "PRAGMA journal_mode = WAL",
@@ -1055,81 +1055,22 @@ async fn replay_submit_vote(
         }
     };
 
-    if limit_submissions {
-        let reserve_result = sqlx::query(
-            "INSERT INTO vote_submissions (slide_id, participant_id, session_id) VALUES (?, ?, ?)",
-        )
-        .bind(&payload.slide_id)
-        .bind(&payload.participant_id)
-        .bind(&entry.session_id)
-        .execute(&mut **tx)
-        .await;
-
-        match reserve_result {
-            Ok(_) => {}
-            Err(error) if is_duplicate_key(&error) => {
-                return Err(ReplayDisposition::ProcessedNoMutation)
-            }
-            Err(error) => return Err(classify_sqlx_error(error)),
-        }
-    }
-
-    let mut inserted_option_ids = Vec::new();
-    for option_id in option_ids {
-        let insert_result = sqlx::query(
-            "INSERT IGNORE INTO votes (id, session_id, slide_id, participant_id, option_id)
-             VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(Uuid::new_v4().to_string())
-        .bind(&entry.session_id)
-        .bind(&payload.slide_id)
-        .bind(&payload.participant_id)
-        .bind(&option_id)
-        .execute(&mut **tx)
-        .await;
-
-        match insert_result {
-            Ok(result) => {
-                if result.rows_affected() > 0 {
-                    inserted_option_ids.push(option_id);
-                }
-            }
-            Err(error) => return Err(classify_sqlx_error(error)),
-        }
-    }
-
-    if student::should_skip_vote_snapshot(limit_submissions, inserted_option_ids.len() as u64) {
-        return Ok(());
-    }
-
-    for option_id in &inserted_option_ids {
-        student::increment_vote_count(tx, &entry.session_id, &payload.slide_id, option_id)
-            .await
-            .map_err(classify_app_error)?;
-    }
-
-    let sequence = student::next_vote_sequence(tx, &entry.session_id)
-        .await
-        .map_err(classify_app_error)?;
-    let results = student::current_vote_counts(tx, &payload.slide_id)
-        .await
-        .map_err(classify_app_error)?;
-
-    let vote_payload = serde_json::json!({
-        "slideId": payload.slide_id,
-        "results": results,
-        "sequence": sequence
-    });
-    crate::services::outbox::enqueue_event(
+    let mutated = student::commit_vote_submission(
         tx,
         &entry.session_id,
-        OutboxEventType::VoteUpdate,
-        &vote_payload,
+        &payload.slide_id,
+        &payload.participant_id,
+        &option_ids,
+        limit_submissions,
     )
     .await
-    .map_err(classify_sqlx_error)?;
+    .map_err(classify_app_error)?;
 
-    Ok(())
+    if mutated {
+        Ok(())
+    } else {
+        Err(ReplayDisposition::ProcessedNoMutation)
+    }
 }
 
 async fn replay_submit_question(
