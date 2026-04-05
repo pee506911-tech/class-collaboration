@@ -29,9 +29,9 @@ function ClickerContent() {
     // Use ref to track the latest index for rapid clicks
     const currentIndexRef = useRef(currentIndex);
     
-    // Track pending API call - debounce taps before they enter the serial commit queue.
+    // Track the latest pending navigation intent while the latest-only committer
+    // keeps network updates serialized.
     const pendingSlideRef = useRef<PendingSlideIntent | null>(null);
-    const apiTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const slideCommitterRef = useRef(createLatestOnlySlideCommitter<PendingSlideIntent>(async () => {}));
     const latestIntentSeqRef = useRef(0);
     const lastAckedStateRef = useRef<AuthoritativeSlideState>({
@@ -46,13 +46,6 @@ function ClickerContent() {
     useEffect(() => {
         const timer = setInterval(() => setCurrentTime(new Date()), 1000);
         return () => clearInterval(timer);
-    }, []);
-
-    useEffect(() => () => {
-        if (apiTimeoutRef.current) {
-            clearTimeout(apiTimeoutRef.current);
-            apiTimeoutRef.current = null;
-        }
     }, []);
 
     // Fetch slides and reload when they change
@@ -186,8 +179,8 @@ function ClickerContent() {
         }
     }, [currentIndex, state?.currentSlideId, visibleSlides]); // Re-run when slides change (visibility might change)
 
-    // Debounced API call - only sends the final slide after rapid clicks settle.
-    // Once a request starts, the queue keeps only the newest target until the in-flight call finishes.
+    // Send immediately. The latest-only committer coalesces rapid taps while
+    // preserving low latency for single-step navigation.
     const sendSlideToServer = useCallback((slideId: string) => {
         const nextIntent: PendingSlideIntent = {
             slideId,
@@ -196,19 +189,8 @@ function ClickerContent() {
 
         latestIntentSeqRef.current = nextIntent.intentSeq;
         pendingSlideRef.current = nextIntent;
-        
-        // Clear any pending API call
-        if (apiTimeoutRef.current) {
-            clearTimeout(apiTimeoutRef.current);
-        }
-        
-        // Debounce: wait 150ms before sending to server
-        // This batches rapid clicks and only sends the final destination
-        apiTimeoutRef.current = setTimeout(() => {
-            if (pendingSlideRef.current) {
-                slideCommitterRef.current.schedule(pendingSlideRef.current);
-            }
-        }, 150);
+
+        slideCommitterRef.current.schedule(nextIntent);
     }, []);
 
     const handleNext = useCallback(() => {

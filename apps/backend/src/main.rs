@@ -5,7 +5,7 @@ use axum::{
     Extension, Router,
 };
 use std::sync::Arc;
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 use tower::buffer::BufferLayer;
 use tower::limit::ConcurrencyLimitLayer;
 use tower::{BoxError, ServiceBuilder};
@@ -60,6 +60,7 @@ pub struct AppState {
     pub session_service: Arc<SessionService>,
     pub registry: Arc<ws::registry::InMemoryRegistry>,
     pub wal_store: services::wal::WalStore,
+    pub outbox_flush_notify: Arc<Notify>,
 }
 
 #[tokio::main]
@@ -124,11 +125,13 @@ async fn main() -> anyhow::Result<()> {
     // WebSocket session registry — in-memory broadcast registry for real-time
     // event delivery to connected WebSocket clients.
     let registry = Arc::new(ws::registry::InMemoryRegistry::new());
+    let outbox_flush_notify = Arc::new(Notify::new());
     // Spawn the outbox worker in the background once the DB pool is ready.
     // The worker accepts a shutdown signal so it can flush pending events before exit.
     let (outbox_shutdown_tx, outbox_shutdown_rx) = watch::channel(false);
     let registry_for_outbox = registry.clone();
     let pool_for_outbox = lazy_pool.clone();
+    let outbox_flush_notify_for_worker = outbox_flush_notify.clone();
 
     tokio::spawn(async move {
         match pool_for_outbox.pool().await {
@@ -136,6 +139,7 @@ async fn main() -> anyhow::Result<()> {
                 crate::services::outbox::run_outbox_worker(
                     pool,
                     registry_for_outbox,
+                    outbox_flush_notify_for_worker,
                     outbox_shutdown_rx,
                 )
                 .await;
@@ -191,6 +195,7 @@ async fn main() -> anyhow::Result<()> {
         session_service: session_service.clone(),
         registry: registry.clone(),
         wal_store: wal_store.clone(),
+        outbox_flush_notify: outbox_flush_notify.clone(),
     };
 
     let (wal_shutdown_tx, wal_shutdown_rx) = watch::channel(false);

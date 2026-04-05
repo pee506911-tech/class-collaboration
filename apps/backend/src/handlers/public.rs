@@ -97,7 +97,8 @@ pub async fn public_set_current_slide(
         .await?;
 
     let session = fetch_session(&mut *tx, &session_id).await?;
-    if update_result.rows_affected() > 0 {
+    let should_flush_outbox = update_result.rows_affected() > 0;
+    if should_flush_outbox {
         let state_payload = build_state_payload(&session);
         outbox::enqueue_event(
             &mut tx,
@@ -109,6 +110,9 @@ pub async fn public_set_current_slide(
     }
 
     tx.commit().await?;
+    if should_flush_outbox {
+        app_state.outbox_flush_notify.notify_one();
+    }
 
     Ok(Json(ApiResponse::success(build_state_payload(&session))))
 }
@@ -133,7 +137,8 @@ pub async fn public_set_results_visibility(
         .await?;
 
     let session = fetch_session(&mut *tx, &session_id).await?;
-    if update_result.rows_affected() > 0 {
+    let should_flush_outbox = update_result.rows_affected() > 0;
+    if should_flush_outbox {
         let state_payload = build_state_payload(&session);
         outbox::enqueue_event(
             &mut tx,
@@ -145,6 +150,9 @@ pub async fn public_set_results_visibility(
     }
 
     tx.commit().await?;
+    if should_flush_outbox {
+        app_state.outbox_flush_notify.notify_one();
+    }
 
     Ok(Json(ApiResponse::success(
         serde_json::json!({ "message": "Results visibility updated" }),

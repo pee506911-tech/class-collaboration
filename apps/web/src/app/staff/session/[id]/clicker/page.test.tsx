@@ -63,7 +63,7 @@ describe('ClickerPage', () => {
         };
     });
 
-    it('sends the slide change request after clicking next', async () => {
+    it('sends the slide change request immediately after clicking next', async () => {
         apiMockState.publicGetSlides.mockResolvedValue([
             {
                 id: 'slide-1',
@@ -106,7 +106,6 @@ describe('ClickerPage', () => {
         fireEvent.click(nextButton);
 
         await act(async () => {
-            await vi.advanceTimersByTimeAsync(200);
             await Promise.resolve();
         });
 

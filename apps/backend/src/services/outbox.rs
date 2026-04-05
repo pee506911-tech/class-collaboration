@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{MySql, Pool};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
@@ -12,6 +12,14 @@ const MAX_RETRIES: u32 = 5;
 const POLL_INTERVAL_MS: u64 = 100;
 const BATCH_SIZE: usize = 50;
 const CLEANUP_AGE_HOURS: i64 = 24;
+
+#[derive(Debug, PartialEq, Eq)]
+enum OutboxWorkerSignal {
+    PollTick,
+    CleanupTick,
+    FlushRequested,
+    ShutdownRequested,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[allow(clippy::enum_variant_names)]
@@ -205,11 +213,60 @@ pub async fn cleanup_old_events(pool: &Pool<MySql>) -> Result<u64, sqlx::Error> 
     Ok(result.rows_affected())
 }
 
+async fn next_worker_signal(
+    poll_interval: &mut tokio::time::Interval,
+    cleanup_interval: &mut tokio::time::Interval,
+    shutdown_rx: &mut watch::Receiver<bool>,
+    flush_notify: &Notify,
+) -> OutboxWorkerSignal {
+    loop {
+        tokio::select! {
+            _ = poll_interval.tick() => return OutboxWorkerSignal::PollTick,
+            _ = cleanup_interval.tick() => return OutboxWorkerSignal::CleanupTick,
+            _ = flush_notify.notified() => return OutboxWorkerSignal::FlushRequested,
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    return OutboxWorkerSignal::ShutdownRequested;
+                }
+            }
+        }
+    }
+}
+
+async fn flush_pending_events(
+    pool: &Pool<MySql>,
+    broadcaster: &dyn Broadcaster,
+    trigger: &'static str,
+) {
+    let started_at = std::time::Instant::now();
+    match process_pending_batch(pool, broadcaster).await {
+        Ok(0) => {
+            tracing::trace!(
+                trigger,
+                latency_ms = started_at.elapsed().as_millis(),
+                "Outbox worker found no pending events"
+            );
+        }
+        Ok(count) => {
+            tracing::info!(
+                trigger,
+                count,
+                latency_ms = started_at.elapsed().as_millis(),
+                "Outbox worker processed events"
+            );
+        }
+        Err(e) => {
+            tracing::error!(trigger, "Outbox worker error processing batch: {}", e);
+        }
+    }
+}
+
 /// Run the outbox worker loop. This function runs until a shutdown signal is received.
 /// On shutdown, it performs one final flush of pending events before exiting.
 pub async fn run_outbox_worker(
     pool: Pool<MySql>,
     broadcaster: Arc<dyn Broadcaster>,
+    flush_notify: Arc<Notify>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     tracing::info!("Outbox worker started");
@@ -219,29 +276,21 @@ pub async fn run_outbox_worker(
     cleanup_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
     loop {
-        tokio::select! {
-            _ = poll_interval.tick() => {
-                let started_at = std::time::Instant::now();
-                match process_pending_batch(&pool, broadcaster.as_ref()).await {
-                    Ok(0) => {
-                        tracing::trace!(
-                            latency_ms = started_at.elapsed().as_millis(),
-                            "Outbox worker poll found no pending events"
-                        );
-                    }
-                    Ok(count) => {
-                        tracing::info!(
-                            count,
-                            latency_ms = started_at.elapsed().as_millis(),
-                            "Outbox worker processed events"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!("Outbox worker error processing batch: {}", e);
-                    }
-                }
+        match next_worker_signal(
+            &mut poll_interval,
+            &mut cleanup_interval,
+            &mut shutdown_rx,
+            flush_notify.as_ref(),
+        )
+        .await
+        {
+            OutboxWorkerSignal::PollTick => {
+                flush_pending_events(&pool, broadcaster.as_ref(), "poll").await;
             }
-            _ = cleanup_interval.tick() => {
+            OutboxWorkerSignal::FlushRequested => {
+                flush_pending_events(&pool, broadcaster.as_ref(), "notify").await;
+            }
+            OutboxWorkerSignal::CleanupTick => {
                 match cleanup_old_events(&pool).await {
                     Ok(0) => {}
                     Ok(count) => {
@@ -252,16 +301,14 @@ pub async fn run_outbox_worker(
                     }
                 }
             }
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
-                    tracing::info!("Outbox worker received shutdown signal, flushing pending batch");
-                    match process_pending_batch(&pool, broadcaster.as_ref()).await {
-                        Ok(count) => tracing::info!(count, "Outbox worker final flush complete"),
-                        Err(e) => tracing::error!(error = %e, "Outbox worker final flush error"),
-                    }
-                    tracing::info!("Outbox worker shut down gracefully");
-                    return;
+            OutboxWorkerSignal::ShutdownRequested => {
+                tracing::info!("Outbox worker received shutdown signal, flushing pending batch");
+                match process_pending_batch(&pool, broadcaster.as_ref()).await {
+                    Ok(count) => tracing::info!(count, "Outbox worker final flush complete"),
+                    Err(e) => tracing::error!(error = %e, "Outbox worker final flush error"),
                 }
+                tracing::info!("Outbox worker shut down gracefully");
+                return;
             }
         }
     }
@@ -271,6 +318,7 @@ pub async fn run_outbox_worker(
 mod tests {
     use super::*;
     use crate::services::broadcaster_spy::BroadcasterSpy;
+    use tokio::sync::Notify;
 
     /// Verifies the watch channel mechanics used by the outbox worker shutdown.
     /// When the sender transmits `true`, the receiver's `changed()` must resolve.
@@ -320,6 +368,37 @@ mod tests {
 
         // The worker MUST have exited.
         assert!(exited.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn flush_signal_unblocks_worker_without_waiting_for_poll_tick() {
+        let flush_notify = Notify::new();
+        let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let mut poll_interval = tokio::time::interval(Duration::from_millis(POLL_INTERVAL_MS));
+        let mut cleanup_interval = tokio::time::interval(Duration::from_secs(60));
+        poll_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        cleanup_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+        poll_interval.tick().await;
+        cleanup_interval.tick().await;
+
+        let wait_for_signal = next_worker_signal(
+            &mut poll_interval,
+            &mut cleanup_interval,
+            &mut shutdown_rx,
+            &flush_notify,
+        );
+
+        tokio::pin!(wait_for_signal);
+
+        flush_notify.notify_one();
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_millis(20), wait_for_signal)
+                .await
+                .unwrap(),
+            OutboxWorkerSignal::FlushRequested
+        );
     }
 
     #[test]
