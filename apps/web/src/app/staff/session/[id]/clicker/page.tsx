@@ -19,7 +19,16 @@ import {
 type AuthoritativeSlideState = Pick<StateUpdatePayload, 'currentSlideId' | 'stateVersion'>;
 
 function ClickerContent() {
-    const { state, isConnected, lastSlideUpdate, updateState, initialStateLoaded } = useWebSocket();
+    const {
+        state,
+        isConnected,
+        isConnecting,
+        connectionError,
+        initialStateError,
+        lastSlideUpdate,
+        updateState,
+        initialStateLoaded,
+    } = useWebSocket();
     const params = useParams();
     const id = params?.id as string;
     const [slides, setSlides] = useState<Slide[]>([]);
@@ -227,10 +236,32 @@ function ClickerContent() {
     const hasPrev = currentIndex > 0;
     const hasNext = currentIndex < visibleSlides.length - 1;
 
-    if (!isConnected || !initialStateLoaded) {
+    if (!initialStateLoaded) {
         return (
             <div className="fixed inset-0 flex items-center justify-center bg-slate-900 text-white">
-                <div className="animate-pulse">{!initialStateLoaded ? 'Loading session state...' : 'Connecting to Clicker...'}</div>
+                <div className="animate-pulse">Loading session state...</div>
+            </div>
+        );
+    }
+
+    if (!isConnected) {
+        const blockingError = connectionError ?? initialStateError;
+
+        return (
+            <div className="fixed inset-0 flex items-center justify-center bg-slate-900 px-6 text-white">
+                <div className="max-w-sm text-center">
+                    <div className={blockingError ? 'text-lg font-semibold' : 'animate-pulse'}>
+                        {blockingError ? 'Unable to connect to Clicker' : isConnecting ? 'Connecting to Clicker...' : 'Disconnected from Clicker'}
+                    </div>
+                    {blockingError ? (
+                        <p className="mt-3 text-sm text-slate-300">{blockingError}</p>
+                    ) : null}
+                    <p className="mt-3 text-sm text-slate-400">
+                        {blockingError
+                            ? 'Reload this page or reopen the clicker link.'
+                            : 'Waiting for realtime updates...'}
+                    </p>
+                </div>
             </div>
         );
     }
@@ -308,7 +339,7 @@ export default function ClickerPage() {
     if (!id) return null;
 
     return (
-        <WebSocketProvider sessionId={id} role="staff">
+        <WebSocketProvider sessionId={id} role="projector">
             <ClickerContent />
         </WebSocketProvider>
     );
