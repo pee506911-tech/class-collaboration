@@ -78,6 +78,29 @@ pub struct StateUpdatePayload {
     state_version: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClickerWritePathTimings {
+    pool_acquire_ms: u128,
+    begin_tx_ms: u128,
+    validate_slide_ms: u128,
+    update_session_ms: u128,
+    fetch_session_ms: u128,
+    enqueue_outbox_ms: u128,
+    commit_ms: u128,
+    post_commit_ms: u128,
+}
+
+impl ClickerWritePathTimings {
+    fn total_db_path_ms(&self) -> u128 {
+        self.begin_tx_ms
+            + self.validate_slide_ms
+            + self.update_session_ms
+            + self.fetch_session_ms
+            + self.enqueue_outbox_ms
+            + self.commit_ms
+    }
+}
+
 /// Public endpoint to set current slide (for mobile clicker)
 pub async fn public_set_current_slide(
     State(app_state): State<crate::AppState>,
@@ -97,9 +120,12 @@ pub async fn public_set_current_slide(
     );
 
     let pool = app_state.db_pool.pool_fast_fail().await?;
-
+    let pool_ready_at = std::time::Instant::now();
     let mut tx = pool.begin().await?;
+    let tx_started_at = std::time::Instant::now();
+
     validate_target_slide_exists(&mut tx, &session_id, payload.slide_id.as_deref()).await?;
+    let validated_at = std::time::Instant::now();
 
     let update_result = sqlx::query(
         "UPDATE sessions SET current_slide_id = ?, state_version = state_version + 1 WHERE id = ? AND NOT (current_slide_id <=> ?)"
@@ -109,8 +135,10 @@ pub async fn public_set_current_slide(
         .bind(&payload.slide_id)
         .execute(&mut *tx)
         .await?;
+    let updated_at = std::time::Instant::now();
 
     let session = fetch_session(&mut *tx, &session_id).await?;
+    let session_fetched_at = std::time::Instant::now();
     let should_flush_outbox = update_result.rows_affected() > 0;
     if should_flush_outbox {
         let state_payload = build_state_payload(&session);
@@ -122,8 +150,10 @@ pub async fn public_set_current_slide(
         )
         .await?;
     }
+    let outbox_enqueued_at = std::time::Instant::now();
 
     tx.commit().await?;
+    let committed_at = std::time::Instant::now();
     if should_flush_outbox {
         broadcast_state_update_fast_lane(
             app_state.registry.as_ref(),
@@ -133,6 +163,22 @@ pub async fn public_set_current_slide(
         .await;
         app_state.outbox_flush_notify.notify_one();
     }
+    let post_commit_finished_at = std::time::Instant::now();
+
+    let timings = ClickerWritePathTimings {
+        pool_acquire_ms: pool_ready_at.duration_since(started_at).as_millis(),
+        begin_tx_ms: tx_started_at.duration_since(pool_ready_at).as_millis(),
+        validate_slide_ms: validated_at.duration_since(tx_started_at).as_millis(),
+        update_session_ms: updated_at.duration_since(validated_at).as_millis(),
+        fetch_session_ms: session_fetched_at.duration_since(updated_at).as_millis(),
+        enqueue_outbox_ms: outbox_enqueued_at
+            .duration_since(session_fetched_at)
+            .as_millis(),
+        commit_ms: committed_at.duration_since(outbox_enqueued_at).as_millis(),
+        post_commit_ms: post_commit_finished_at
+            .duration_since(committed_at)
+            .as_millis(),
+    };
 
     tracing::info!(
         request_id = %request_id,
@@ -141,6 +187,15 @@ pub async fn public_set_current_slide(
         applied_slide_id = ?session.current_slide_id,
         state_version = session.state_version,
         outbox_enqueued = should_flush_outbox,
+        pool_acquire_ms = timings.pool_acquire_ms,
+        begin_tx_ms = timings.begin_tx_ms,
+        validate_slide_ms = timings.validate_slide_ms,
+        update_session_ms = timings.update_session_ms,
+        fetch_session_ms = timings.fetch_session_ms,
+        enqueue_outbox_ms = timings.enqueue_outbox_ms,
+        commit_ms = timings.commit_ms,
+        post_commit_ms = timings.post_commit_ms,
+        db_path_ms = timings.total_db_path_ms(),
         latency_ms = started_at.elapsed().as_millis(),
         "Clicker slide update committed"
     );
@@ -320,5 +375,22 @@ mod tests {
             spy.failure_count.load(std::sync::atomic::Ordering::SeqCst),
             1
         );
+    }
+
+    #[test]
+    fn clicker_write_path_total_db_path_excludes_post_commit_work() {
+        let timings = ClickerWritePathTimings {
+            pool_acquire_ms: 4,
+            begin_tx_ms: 7,
+            validate_slide_ms: 11,
+            update_session_ms: 13,
+            fetch_session_ms: 17,
+            enqueue_outbox_ms: 19,
+            commit_ms: 23,
+            post_commit_ms: 29,
+        };
+
+        assert_eq!(timings.total_db_path_ms(), 90);
+        assert_eq!(timings.post_commit_ms, 29);
     }
 }
