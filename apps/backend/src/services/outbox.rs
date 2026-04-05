@@ -162,6 +162,19 @@ async fn publish_event(broadcaster: &dyn Broadcaster, event: &OutboxEvent) -> bo
     }
 }
 
+fn delivery_priority(event_type: &str) -> u8 {
+    match event_type {
+        // Clicker-driven slide navigation should not sit behind vote bursts.
+        "STATE_UPDATE" => 0,
+        _ => 1,
+    }
+}
+
+fn prioritize_events_for_delivery(mut events: Vec<OutboxEvent>) -> Vec<OutboxEvent> {
+    events.sort_by_key(|event| (delivery_priority(&event.event_type), event.sequence_id));
+    events
+}
+
 /// Process one batch of pending events. Returns the number of events processed.
 pub async fn process_pending_batch(
     pool: &Pool<MySql>,
@@ -179,6 +192,7 @@ pub async fn process_pending_batch(
     .fetch_all(pool)
     .await?;
 
+    let events = prioritize_events_for_delivery(events);
     let count = events.len();
 
     for event in events {
@@ -442,6 +456,52 @@ mod tests {
         assert_eq!(POLL_INTERVAL_MS, 100);
         assert_eq!(BATCH_SIZE, 50);
         assert_eq!(CLEANUP_AGE_HOURS, 24);
+    }
+
+    #[test]
+    fn prioritize_events_for_delivery_puts_state_updates_ahead_of_vote_bursts() {
+        let prioritized = prioritize_events_for_delivery(vec![
+            OutboxEvent {
+                id: "vote-1".to_string(),
+                sequence_id: 1,
+                session_id: "session-1".to_string(),
+                event_type: "VOTE_UPDATE".to_string(),
+                payload: serde_json::json!({}),
+                status: "pending".to_string(),
+                retry_count: 0,
+            },
+            OutboxEvent {
+                id: "vote-2".to_string(),
+                sequence_id: 2,
+                session_id: "session-1".to_string(),
+                event_type: "VOTE_UPDATE".to_string(),
+                payload: serde_json::json!({}),
+                status: "pending".to_string(),
+                retry_count: 0,
+            },
+            OutboxEvent {
+                id: "state-3".to_string(),
+                sequence_id: 3,
+                session_id: "session-1".to_string(),
+                event_type: "STATE_UPDATE".to_string(),
+                payload: serde_json::json!({ "currentSlideId": "slide-3" }),
+                status: "pending".to_string(),
+                retry_count: 0,
+            },
+        ]);
+
+        let ordered_types: Vec<&str> = prioritized
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect();
+
+        assert_eq!(
+            ordered_types,
+            vec!["STATE_UPDATE", "VOTE_UPDATE", "VOTE_UPDATE"]
+        );
+        assert_eq!(prioritized[0].sequence_id, 3);
+        assert_eq!(prioritized[1].sequence_id, 1);
+        assert_eq!(prioritized[2].sequence_id, 2);
     }
 
     // === Outbox dispatch tests with BroadcasterSpy ===
