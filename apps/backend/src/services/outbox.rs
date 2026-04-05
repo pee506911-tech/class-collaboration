@@ -73,24 +73,24 @@ pub async fn enqueue_event(
     payload: &impl Serialize,
 ) -> Result<EnqueuedOutboxEvent, sqlx::Error> {
     let id = Uuid::new_v4().to_string();
+    let sequence_id: u64 = sqlx::query_scalar("SELECT NEXTVAL(outbox_event_sequence)")
+        .fetch_one(&mut **tx)
+        .await?;
     let payload_json = serde_json::to_value(payload).map_err(|e| {
         tracing::error!("Failed to serialize outbox payload: {}", e);
         sqlx::Error::Protocol(format!("Failed to serialize outbox payload: {}", e))
     })?;
 
     sqlx::query(
-        "INSERT INTO outbox_events (id, session_id, event_type, payload) VALUES (?, ?, ?, ?)",
+        "INSERT INTO outbox_events (id, sequence_id, session_id, event_type, payload) VALUES (?, ?, ?, ?, ?)",
     )
     .bind(&id)
+    .bind(sequence_id)
     .bind(session_id)
     .bind(event_type.to_string())
     .bind(sqlx::types::Json(&payload_json))
     .execute(&mut **tx)
     .await?;
-
-    let sequence_id: u64 = sqlx::query_scalar("SELECT LAST_INSERT_ID()")
-        .fetch_one(&mut **tx)
-        .await?;
 
     Ok(EnqueuedOutboxEvent { id, sequence_id })
 }
