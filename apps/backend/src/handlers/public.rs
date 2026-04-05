@@ -1,11 +1,12 @@
 use axum::{
     extract::{Path, State},
-    http::HeaderValue,
+    http::{HeaderMap, HeaderValue},
     response::IntoResponse,
     Json,
 };
 use serde::Deserialize;
 use sqlx::{query_as, MySql};
+use uuid::Uuid;
 
 use crate::error::Result;
 use crate::models::response::ApiResponse;
@@ -79,9 +80,21 @@ pub struct StateUpdatePayload {
 /// Public endpoint to set current slide (for mobile clicker)
 pub async fn public_set_current_slide(
     State(app_state): State<crate::AppState>,
+    headers: HeaderMap,
     Path(session_id): Path<String>,
     Json(payload): Json<PublicSetSlideRequest>,
 ) -> Result<Json<ApiResponse<StateUpdatePayload>>> {
+    let request_id = resolve_public_client_request_id(&headers);
+    let started_at = std::time::Instant::now();
+    let requested_slide_id = payload.slide_id.clone();
+
+    tracing::info!(
+        request_id = %request_id,
+        session_id = %session_id,
+        requested_slide_id = ?requested_slide_id,
+        "Clicker slide update requested"
+    );
+
     let pool = app_state.db_pool.pool_fast_fail().await?;
 
     let mut tx = pool.begin().await?;
@@ -113,6 +126,17 @@ pub async fn public_set_current_slide(
     if should_flush_outbox {
         app_state.outbox_flush_notify.notify_one();
     }
+
+    tracing::info!(
+        request_id = %request_id,
+        session_id = %session_id,
+        requested_slide_id = ?requested_slide_id,
+        applied_slide_id = ?session.current_slide_id,
+        state_version = session.state_version,
+        outbox_enqueued = should_flush_outbox,
+        latency_ms = started_at.elapsed().as_millis(),
+        "Clicker slide update committed"
+    );
 
     Ok(Json(ApiResponse::success(build_state_payload(&session))))
 }
@@ -166,6 +190,16 @@ fn build_state_payload(session: &Session) -> StateUpdatePayload {
         is_results_visible: session.is_results_visible,
         state_version: session.state_version,
     }
+}
+
+fn resolve_public_client_request_id(headers: &HeaderMap) -> String {
+    headers
+        .get("x-client-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("clicker-{}", Uuid::new_v4()))
 }
 
 async fn fetch_session<'c, E>(executor: E, session_id: &str) -> Result<Session>

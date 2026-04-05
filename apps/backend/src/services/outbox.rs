@@ -106,12 +106,20 @@ pub async fn enqueue_event(
 
 /// Publish a single event to the Broadcaster based on its type
 async fn publish_event(broadcaster: &dyn Broadcaster, event: &OutboxEvent) -> bool {
-    let message = match event.event_type.parse::<OutboxEventType>() {
-        Ok(OutboxEventType::StateUpdate) => serde_json::json!({
+    let parsed_event_type = match event.event_type.parse::<OutboxEventType>() {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::error!("Unknown outbox event type: {}", e);
+            return false;
+        }
+    };
+
+    let message = match parsed_event_type {
+        OutboxEventType::StateUpdate => serde_json::json!({
             "type": "STATE_UPDATE",
             "payload": event.payload
         }),
-        Ok(OutboxEventType::VoteUpdate) => {
+        OutboxEventType::VoteUpdate => {
             let slide_id = event.payload["slideId"].as_str().unwrap_or("");
             let results = event.payload["results"]
                 .as_object()
@@ -131,7 +139,7 @@ async fn publish_event(broadcaster: &dyn Broadcaster, event: &OutboxEvent) -> bo
                 "sequence": sequence
             })
         }
-        Ok(OutboxEventType::QaUpdate) => {
+        OutboxEventType::QaUpdate => {
             let questions = event.payload["payload"]["questions"].clone();
             let sequence = event.payload["sequence"].as_u64().unwrap_or(0);
             serde_json::json!({
@@ -140,21 +148,28 @@ async fn publish_event(broadcaster: &dyn Broadcaster, event: &OutboxEvent) -> bo
                 "sequence": sequence
             })
         }
-        Ok(OutboxEventType::SlidesUpdate) => {
+        OutboxEventType::SlidesUpdate => {
             let slides = event.payload["slides"].clone();
             serde_json::json!({
                 "type": "SLIDES_UPDATE",
                 "slides": slides
             })
         }
-        Err(e) => {
-            tracing::error!("Unknown outbox event type: {}", e);
-            return false;
-        }
     };
 
     match broadcaster.broadcast(&event.session_id, &message).await {
-        Ok(_) => true,
+        Ok(_) => {
+            if parsed_event_type == OutboxEventType::StateUpdate {
+                tracing::info!(
+                    session_id = %event.session_id,
+                    sequence_id = event.sequence_id,
+                    current_slide_id = ?event.payload["currentSlideId"].as_str(),
+                    state_version = event.payload["stateVersion"].as_i64(),
+                    "Published STATE_UPDATE to registry"
+                );
+            }
+            true
+        }
         Err(e) => {
             tracing::error!("Broadcast failed for event {}: {}", event.event_type, e);
             false
