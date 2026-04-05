@@ -69,7 +69,7 @@ pub struct PublicSetResultsRequest {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct StateUpdatePayload {
+pub struct StateUpdatePayload {
     current_slide_id: Option<String>,
     is_presentation_active: bool,
     is_results_visible: bool,
@@ -81,7 +81,7 @@ pub async fn public_set_current_slide(
     State(app_state): State<crate::AppState>,
     Path(session_id): Path<String>,
     Json(payload): Json<PublicSetSlideRequest>,
-) -> Result<Json<ApiResponse<serde_json::Value>>> {
+) -> Result<Json<ApiResponse<StateUpdatePayload>>> {
     let pool = app_state.db_pool.pool_fast_fail().await?;
 
     let mut tx = pool.begin().await?;
@@ -110,9 +110,7 @@ pub async fn public_set_current_slide(
 
     tx.commit().await?;
 
-    Ok(Json(ApiResponse::success(
-        serde_json::json!({ "message": "Slide updated" }),
-    )))
+    Ok(Json(ApiResponse::success(build_state_payload(&session))))
 }
 
 /// Public endpoint to set results visibility (for mobile clicker)

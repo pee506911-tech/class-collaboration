@@ -4,13 +4,19 @@ export const runtime = 'edge';
 
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { useParams } from 'next/navigation';
-import { Slide } from 'shared';
+import { Slide, StateUpdatePayload } from 'shared';
 import { publicGetSlides, publicSetCurrentSlide } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { WebSocketProvider, useWebSocket } from '@/lib/websocket';
 import { ChevronLeft, ChevronRight, Smartphone, Layout } from 'lucide-react';
 import { SlideRenderer } from '@/components/slide-renderer';
-import { createLatestOnlySlideCommitter, reconcilePendingSlide } from '@/lib/clicker-navigation';
+import {
+    createLatestOnlySlideCommitter,
+    PendingSlideIntent,
+    reconcilePendingSlide,
+} from '@/lib/clicker-navigation';
+
+type AuthoritativeSlideState = Pick<StateUpdatePayload, 'currentSlideId' | 'stateVersion'>;
 
 function ClickerContent() {
     const { state, isConnected, lastSlideUpdate, updateState, initialStateLoaded } = useWebSocket();
@@ -24,18 +30,18 @@ function ClickerContent() {
     const currentIndexRef = useRef(currentIndex);
     
     // Track pending API call - debounce taps before they enter the serial commit queue.
-    const pendingSlideRef = useRef<string | null>(null);
+    const pendingSlideRef = useRef<PendingSlideIntent | null>(null);
     const apiTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-    const slideCommitterRef = useRef(createLatestOnlySlideCommitter((slideId: string) => publicSetCurrentSlide(id, slideId)));
-    const pendingRemoteSlideRef = useRef<string | null>(null);
+    const slideCommitterRef = useRef(createLatestOnlySlideCommitter<PendingSlideIntent>(async () => {}));
+    const latestIntentSeqRef = useRef(0);
+    const lastAckedStateRef = useRef<AuthoritativeSlideState>({
+        currentSlideId: null,
+        stateVersion: undefined,
+    });
 
     useEffect(() => {
         currentIndexRef.current = currentIndex;
     }, [currentIndex]);
-
-    useEffect(() => {
-        slideCommitterRef.current = createLatestOnlySlideCommitter((slideId: string) => publicSetCurrentSlide(id, slideId));
-    }, [id]);
 
     useEffect(() => {
         const timer = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -67,14 +73,98 @@ function ClickerContent() {
         visibleSlidesRef.current = visibleSlides;
     }, [visibleSlides]);
 
+    const applyAuthoritativeSlide = useCallback((nextState: AuthoritativeSlideState) => {
+        updateState(nextState);
+
+        if (!nextState.currentSlideId) {
+            currentIndexRef.current = -1;
+            setCurrentIndex(-1);
+            return;
+        }
+
+        const nextIndex = visibleSlidesRef.current.findIndex((slide) => slide.id === nextState.currentSlideId);
+        if (nextIndex === -1) {
+            return;
+        }
+
+        currentIndexRef.current = nextIndex;
+        setCurrentIndex(nextIndex);
+    }, [updateState]);
+
+    const syncAckedState = useCallback((nextState: AuthoritativeSlideState) => {
+        const currentAckedVersion = lastAckedStateRef.current.stateVersion;
+        const nextVersion = nextState.stateVersion;
+
+        if (
+            typeof currentAckedVersion === 'number'
+            && typeof nextVersion === 'number'
+            && nextVersion < currentAckedVersion
+        ) {
+            return;
+        }
+
+        lastAckedStateRef.current = {
+            currentSlideId: nextState.currentSlideId ?? null,
+            stateVersion: nextVersion,
+        };
+    }, []);
+
+    const rollbackToLastAckedState = useCallback(() => {
+        applyAuthoritativeSlide(lastAckedStateRef.current);
+    }, [applyAuthoritativeSlide]);
+
+    const commitSlideIntent = useCallback(async (intent: PendingSlideIntent) => {
+        try {
+            const ack = await publicSetCurrentSlide(id, intent.slideId);
+            syncAckedState(ack);
+
+            if (intent.intentSeq !== latestIntentSeqRef.current) {
+                return;
+            }
+
+            if (pendingSlideRef.current?.intentSeq === intent.intentSeq) {
+                pendingSlideRef.current = null;
+            }
+
+            applyAuthoritativeSlide(ack);
+        } catch (error) {
+            console.error('Failed to sync clicker slide:', error);
+
+            if (intent.intentSeq !== latestIntentSeqRef.current) {
+                return;
+            }
+
+            if (pendingSlideRef.current?.intentSeq === intent.intentSeq) {
+                pendingSlideRef.current = null;
+            }
+
+            rollbackToLastAckedState();
+        }
+    }, [applyAuthoritativeSlide, id, rollbackToLastAckedState, syncAckedState]);
+
+    useEffect(() => {
+        slideCommitterRef.current = createLatestOnlySlideCommitter(commitSlideIntent);
+    }, [commitSlideIntent]);
+
+    useEffect(() => {
+        if (typeof state?.stateVersion !== 'number') {
+            return;
+        }
+
+        syncAckedState({
+            currentSlideId: state.currentSlideId ?? null,
+            stateVersion: state.stateVersion,
+        });
+    }, [state?.currentSlideId, state?.stateVersion, syncAckedState]);
+
     useEffect(() => {
         if (visibleSlides.length > 0) {
             if (state?.currentSlideId) {
                 const syncDecision = reconcilePendingSlide(
-                    pendingRemoteSlideRef.current,
+                    pendingSlideRef.current,
                     state.currentSlideId,
                 );
-                pendingRemoteSlideRef.current = syncDecision.pendingSlideId;
+                pendingSlideRef.current = syncDecision.pendingIntent;
 
                 if (!syncDecision.shouldApply) {
                     return;
@@ -82,6 +172,7 @@ function ClickerContent() {
 
                 const index = visibleSlides.findIndex(s => s.id === state.currentSlideId);
                 if (index !== -1 && index !== currentIndex) {
+                    currentIndexRef.current = index;
                     queueMicrotask(() => {
                         setCurrentIndex(index);
                     });
@@ -98,7 +189,13 @@ function ClickerContent() {
     // Debounced API call - only sends the final slide after rapid clicks settle.
     // Once a request starts, the queue keeps only the newest target until the in-flight call finishes.
     const sendSlideToServer = useCallback((slideId: string) => {
-        pendingSlideRef.current = slideId;
+        const nextIntent: PendingSlideIntent = {
+            slideId,
+            intentSeq: latestIntentSeqRef.current + 1,
+        };
+
+        latestIntentSeqRef.current = nextIntent.intentSeq;
+        pendingSlideRef.current = nextIntent;
         
         // Clear any pending API call
         if (apiTimeoutRef.current) {
@@ -110,7 +207,6 @@ function ClickerContent() {
         apiTimeoutRef.current = setTimeout(() => {
             if (pendingSlideRef.current) {
                 slideCommitterRef.current.schedule(pendingSlideRef.current);
-                pendingSlideRef.current = null;
             }
         }, 150);
     }, []);
@@ -123,9 +219,9 @@ function ClickerContent() {
         
         const nextIndex = idx + 1;
         const nextSlide = slides[nextIndex];
-        pendingRemoteSlideRef.current = nextSlide.id;
         
         // Immediate UI update
+        currentIndexRef.current = nextIndex;
         setCurrentIndex(nextIndex);
         updateState({ currentSlideId: nextSlide.id });
         
@@ -141,9 +237,9 @@ function ClickerContent() {
         
         const prevIndex = idx - 1;
         const prevSlide = slides[prevIndex];
-        pendingRemoteSlideRef.current = prevSlide.id;
         
         // Immediate UI update
+        currentIndexRef.current = prevIndex;
         setCurrentIndex(prevIndex);
         updateState({ currentSlideId: prevSlide.id });
         

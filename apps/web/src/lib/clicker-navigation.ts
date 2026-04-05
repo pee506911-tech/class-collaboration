@@ -1,60 +1,65 @@
-type SlideCommitter = (slideId: string) => Promise<void>;
+export type PendingSlideIntent = {
+    slideId: string;
+    intentSeq: number;
+};
 
-export function createLatestOnlySlideCommitter(commitSlide: SlideCommitter) {
+type SlideCommitter<T> = (value: T) => Promise<void>;
+
+export function createLatestOnlySlideCommitter<T>(commitSlide: SlideCommitter<T>) {
     let inFlight = false;
-    let queuedSlideId: string | null = null;
+    let queuedValue: T | null = null;
 
-    const pump = async (slideId: string) => {
+    const pump = async (value: T) => {
         inFlight = true;
 
         try {
-            await commitSlide(slideId);
+            await commitSlide(value);
         } finally {
             inFlight = false;
 
-            if (!queuedSlideId || queuedSlideId === slideId) {
-                queuedSlideId = null;
+            if (!queuedValue || queuedValue === value) {
+                queuedValue = null;
                 return;
             }
 
-            const nextSlideId = queuedSlideId;
-            queuedSlideId = null;
-            void pump(nextSlideId);
+            const nextValue = queuedValue;
+            queuedValue = null;
+            void pump(nextValue);
         }
     };
 
     return {
-        schedule(slideId: string) {
+        schedule(value: T) {
             if (inFlight) {
-                queuedSlideId = slideId;
+                queuedValue = value;
                 return;
             }
 
-            void pump(slideId);
+            void pump(value);
         },
     };
 }
 
 export function reconcilePendingSlide(
-    pendingSlideId: string | null,
+    pendingIntent: PendingSlideIntent | null,
     incomingSlideId: string | null | undefined,
 ) {
-    if (!pendingSlideId) {
+    if (!pendingIntent) {
         return {
             shouldApply: true,
-            pendingSlideId: null,
+            pendingIntent: null,
         };
     }
 
-    if (incomingSlideId !== pendingSlideId) {
+    if (incomingSlideId !== pendingIntent.slideId) {
         return {
             shouldApply: false,
-            pendingSlideId,
+            pendingIntent,
         };
     }
 
     return {
         shouldApply: true,
-        pendingSlideId: null,
+        pendingIntent: null,
     };
 }

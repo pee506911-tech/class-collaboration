@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { updateSlide } from '@/lib/api';
+import { publicSetCurrentSlide, updateSlide } from '@/lib/api';
 
 const originalFetch = global.fetch;
 
@@ -139,5 +139,55 @@ describe('updateSlide', () => {
         });
 
         expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+});
+
+describe('publicSetCurrentSlide', () => {
+    afterEach(() => {
+        global.fetch = originalFetch;
+        vi.restoreAllMocks();
+    });
+
+    it('returns the authoritative slide state from the clicker endpoint', async () => {
+        const fetchMock = vi.fn().mockResolvedValue(
+            mockJsonResponse({
+                success: true,
+                data: {
+                    currentSlideId: 'slide-4',
+                    isPresentationActive: true,
+                    isResultsVisible: false,
+                    stateVersion: 9,
+                },
+            }),
+        );
+        global.fetch = fetchMock as typeof fetch;
+
+        await expect(publicSetCurrentSlide('session-1', 'slide-4')).resolves.toEqual(
+            expect.objectContaining({
+                currentSlideId: 'slide-4',
+                stateVersion: 9,
+            }),
+        );
+    });
+
+    it('surfaces clicker API failures to the caller', async () => {
+        const fetchMock = vi.fn().mockResolvedValue(
+            mockJsonResponse(
+                {
+                    success: false,
+                    error: 'Invalid slide',
+                },
+                { status: 400 },
+            ),
+        );
+        global.fetch = fetchMock as typeof fetch;
+
+        await expect(publicSetCurrentSlide('session-1', 'slide-missing')).rejects.toEqual(
+            expect.objectContaining({
+                message: 'Invalid slide',
+                status: 400,
+                retryable: false,
+            }),
+        );
     });
 });

@@ -16,25 +16,25 @@ describe('createLatestOnlySlideCommitter', () => {
     it('serializes slide commits and only keeps the latest queued slide', async () => {
         const firstCommit = createDeferred();
         const secondCommit = createDeferred();
-        const commitSlide = vi.fn<(slideId: string) => Promise<void>>()
+        const commitSlide = vi.fn<(slideId: { slideId: string; intentSeq: number }) => Promise<void>>()
             .mockReturnValueOnce(firstCommit.promise)
             .mockReturnValueOnce(secondCommit.promise);
 
         const committer = createLatestOnlySlideCommitter(commitSlide);
 
-        committer.schedule('slide-2');
-        committer.schedule('slide-3');
-        committer.schedule('slide-4');
+        committer.schedule({ slideId: 'slide-2', intentSeq: 1 });
+        committer.schedule({ slideId: 'slide-3', intentSeq: 2 });
+        committer.schedule({ slideId: 'slide-4', intentSeq: 3 });
 
         expect(commitSlide).toHaveBeenCalledTimes(1);
-        expect(commitSlide).toHaveBeenNthCalledWith(1, 'slide-2');
+        expect(commitSlide).toHaveBeenNthCalledWith(1, { slideId: 'slide-2', intentSeq: 1 });
 
         firstCommit.resolve();
         await Promise.resolve();
         await Promise.resolve();
 
         expect(commitSlide).toHaveBeenCalledTimes(2);
-        expect(commitSlide).toHaveBeenNthCalledWith(2, 'slide-4');
+        expect(commitSlide).toHaveBeenNthCalledWith(2, { slideId: 'slide-4', intentSeq: 3 });
 
         secondCommit.resolve();
         await Promise.resolve();
@@ -46,23 +46,23 @@ describe('createLatestOnlySlideCommitter', () => {
 
 describe('reconcilePendingSlide', () => {
     it('ignores stale remote slides while a newer local target is pending', () => {
-        expect(reconcilePendingSlide('slide-4', 'slide-2')).toEqual({
+        expect(reconcilePendingSlide({ slideId: 'slide-4', intentSeq: 3 }, 'slide-2')).toEqual({
             shouldApply: false,
-            pendingSlideId: 'slide-4',
+            pendingIntent: { slideId: 'slide-4', intentSeq: 3 },
         });
     });
 
     it('clears the pending target once the remote state catches up', () => {
-        expect(reconcilePendingSlide('slide-4', 'slide-4')).toEqual({
+        expect(reconcilePendingSlide({ slideId: 'slide-4', intentSeq: 3 }, 'slide-4')).toEqual({
             shouldApply: true,
-            pendingSlideId: null,
+            pendingIntent: null,
         });
     });
 
     it('applies remote slides immediately when no local target is pending', () => {
         expect(reconcilePendingSlide(null, 'slide-2')).toEqual({
             shouldApply: true,
-            pendingSlideId: null,
+            pendingIntent: null,
         });
     });
 });

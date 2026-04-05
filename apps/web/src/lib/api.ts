@@ -1,4 +1,4 @@
-import { ApiResponse, Session, Slide } from 'shared';
+import { ApiResponse, Session, Slide, StateUpdatePayload } from 'shared';
 import { httpFetch, createClientRequestId } from '@/lib/http';
 import { safeLocalStorageGet, safeLocalStorageRemove, safeLocalStorageSet } from '@/lib/storage';
 
@@ -406,21 +406,29 @@ export async function stopSession(sessionId: string): Promise<void> {
 
 // ============ Public Clicker API (no auth required) ============
 
-export async function publicSetCurrentSlide(sessionId: string, slideId: string | null): Promise<void> {
+export async function publicSetCurrentSlide(sessionId: string, slideId: string | null): Promise<StateUpdatePayload> {
+    let res: Response;
+
     try {
-        const res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/clicker/slide`, {
+        res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/clicker/slide`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ slideId }),
-        }, 2); // Fewer retries for non-critical
-        if (!res.ok) return;
-        const text = await res.text();
-        if (!text) return;
-        const json: ApiResponse<void> = JSON.parse(text);
-        if (!json.success) console.error(json.error || 'Failed to set slide');
-    } catch (e) {
-        console.error('Error setting slide:', e);
+        }, 2);
+    } catch (error) {
+        throw toApiRequestError(error, 'Failed to set slide');
     }
+
+    if (!res.ok) {
+        throw await buildApiError(res, 'Failed to set slide');
+    }
+
+    const json: ApiResponse<StateUpdatePayload> = await res.json();
+    if (!json.success || !json.data) {
+        throw new ApiRequestError(json.error || 'Failed to set slide', { status: res.status });
+    }
+
+    return json.data;
 }
 
 export async function publicSetResultsVisibility(sessionId: string, visible: boolean): Promise<void> {
