@@ -15,6 +15,7 @@ STATE_POLL_INTERVAL_MS="${STATE_POLL_INTERVAL_MS:-100}"
 PERF_TEST_TOKEN_VALUE="${PERF_TEST_TOKEN:-}"
 SKIP_CLEANUP="${SKIP_CLEANUP:-false}"
 INSECURE_SKIP_TLS_VERIFY="${INSECURE_SKIP_TLS_VERIFY:-false}"
+TRAFFIC_MODE="${TRAFFIC_MODE:-vote-storm}"
 SUMMARY_FILE=""
 
 while [[ $# -gt 0 ]]; do
@@ -51,6 +52,10 @@ while [[ $# -gt 0 ]]; do
       PERF_TEST_TOKEN_VALUE="$2"
       shift 2
       ;;
+    --traffic-mode)
+      TRAFFIC_MODE="$2"
+      shift 2
+      ;;
     --skip-cleanup)
       SKIP_CLEANUP=true
       shift
@@ -75,6 +80,7 @@ Options:
   --click-start-delay-ms MS    Delay after observer connect before load starts (default: 100)
   --observer-timeout-ms MS     Timeout for WS/state visibility checks (default: 10000)
   --state-poll-interval-ms MS  Poll cadence for /state observer (default: 100)
+  --traffic-mode MODE          no-vote or vote-storm (default: vote-storm)
   --perf-test-token TOKEN      Cleanup token for /api/internal/perf/sessions/:id
   --skip-cleanup               Leave the perf session behind for inspection
   --insecure-skip-tls-verify   Ignore TLS certificate errors
@@ -91,6 +97,7 @@ Environment variables:
   STATE_POLL_INTERVAL_MS
   PERF_TEST_TOKEN
   SKIP_CLEANUP
+  TRAFFIC_MODE
 EOF
       exit 0
       ;;
@@ -120,6 +127,7 @@ run_monitor() {
     --click-start-delay-ms "$CLICK_START_DELAY_MS" \
     --observer-timeout-ms "$OBSERVER_TIMEOUT_MS" \
     --state-poll-interval-ms "$STATE_POLL_INTERVAL_MS" \
+    --traffic-mode "$TRAFFIC_MODE" \
     --perf-test-token "$PERF_TEST_TOKEN_VALUE" \
     --skip-cleanup "$SKIP_CLEANUP" \
     --insecure-skip-tls-verify "$INSECURE_SKIP_TLS_VERIFY"
@@ -134,10 +142,10 @@ if [[ -n "$SUMMARY_FILE" ]]; then
   script_status=${PIPESTATUS[0]}
   set -e
 
-  node - "$log_file" "$SUMMARY_FILE" "$script_status" "$BASE_URL" "$CONCURRENCY" "$SLIDE_CHANGES" <<'EOF'
+  node - "$log_file" "$SUMMARY_FILE" "$script_status" "$BASE_URL" "$CONCURRENCY" "$SLIDE_CHANGES" "$TRAFFIC_MODE" <<'EOF'
 const fs = require('fs');
 
-const [, , logPath, summaryPath, exitCodeRaw, baseUrl, concurrencyRaw, slideChangesRaw] = process.argv;
+const [, , logPath, summaryPath, exitCodeRaw, baseUrl, concurrencyRaw, slideChangesRaw, trafficMode] = process.argv;
 const exitCode = Number(exitCodeRaw);
 const requestedConcurrency = Number(concurrencyRaw);
 const requestedSlideChanges = Number(slideChangesRaw);
@@ -169,6 +177,7 @@ fs.writeFileSync(
   JSON.stringify(
     {
       scenario: 'prod-clicker-slide-storm',
+      trafficMode,
       baseUrl,
       requestedConcurrency,
       requestedSlideChanges,

@@ -46,6 +46,12 @@ const SKIP_CLEANUP = readBool('skip-cleanup', false);
 const CLEANUP_DELETE_CREATOR_USER = readBool('cleanup-delete-creator-user', true);
 const PERF_TEST_TOKEN = readArg('perf-test-token', process.env.PERF_TEST_TOKEN || '');
 const INSECURE_SKIP_TLS_VERIFY = readBool('insecure-skip-tls-verify', false);
+const TRAFFIC_MODE = String(readArg('traffic-mode', 'vote-storm')).trim().toLowerCase();
+
+assert(
+  TRAFFIC_MODE === 'vote-storm' || TRAFFIC_MODE === 'no-vote',
+  `traffic-mode must be one of: vote-storm, no-vote (got=${TRAFFIC_MODE})`
+);
 
 const httpsAgent = new https.Agent({ rejectUnauthorized: !INSECURE_SKIP_TLS_VERIFY });
 
@@ -53,6 +59,7 @@ function log(event) {
   console.log(
     JSON.stringify({
       scenario: 'prod-clicker-slide-storm',
+      trafficMode: TRAFFIC_MODE,
       ts: new Date().toISOString(),
       ...event,
     })
@@ -473,6 +480,26 @@ async function runVoteStorm(sessionId, slideId) {
   };
 }
 
+function noVoteSummary() {
+  const latency = summarizeLatencies([]);
+  log({
+    phase: 'vote-summary',
+    status: 'skipped',
+    requestedVotes: 0,
+    successfulVotes: 0,
+    failedVotes: 0,
+    latency,
+    failureSamples: [],
+  });
+
+  return {
+    results: [],
+    failures: [],
+    skipped: true,
+    latency,
+  };
+}
+
 async function waitForStateVisibility(sessionId, targetSlideId, minStateVersion, sinceMs) {
   const deadline = Date.now() + OBSERVER_TIMEOUT_MS;
 
@@ -608,7 +635,10 @@ async function main() {
     await observer.connect();
     await wait(CLICK_START_DELAY_MS);
 
-    const voteStormPromise = runVoteStorm(setup.sessionId, setup.pollSlideId);
+    const voteStormPromise =
+      TRAFFIC_MODE === 'vote-storm'
+        ? runVoteStorm(setup.sessionId, setup.pollSlideId)
+        : Promise.resolve(noVoteSummary());
 
     const targetSlideIds = [];
     for (let index = 0; index < SLIDE_CHANGES; index += 1) {
@@ -642,9 +672,10 @@ async function main() {
     log({
       phase: 'verify',
       status: verifyStatus,
+      trafficMode: TRAFFIC_MODE,
       sessionId: setup.sessionId,
-      requestedVotes: CONCURRENCY,
-      successfulVotes: CONCURRENCY - voteFailures,
+      requestedVotes: TRAFFIC_MODE === 'vote-storm' ? CONCURRENCY : 0,
+      successfulVotes: TRAFFIC_MODE === 'vote-storm' ? CONCURRENCY - voteFailures : 0,
       failedVotes: voteFailures,
       clickCount: clickObservations.length,
       finalCurrentSlideId: finalState.json?.currentSlideId ?? null,

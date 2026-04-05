@@ -11,6 +11,7 @@
     "test:concurrency:500": "node run-concurrency-tests.js --concurrency=500",
     "test:prod-concurrency": "bash ./test-concurrency-k6.sh",
     "test:prod-clicker-slide-storm": "bash ./test-prod-clicker-slide-storm.sh",
+    "test:prod-clicker-slide-compare": "bash ./test-prod-clicker-slide-compare.sh",
     "test:prod-frontend-poll-storm": "bash ./test-frontend-poll-storm.sh",
     "docker:up": "docker-compose -f ../docker-compose.test.yml up -d",
     "docker:down": "docker-compose -f ../docker-compose.test.yml down -v",
