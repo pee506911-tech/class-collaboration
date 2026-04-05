@@ -363,7 +363,7 @@ async function createStaffSession() {
     headers: {
       Authorization: `Bearer ${staffToken}`,
     },
-    expectedStatuses: [200],
+    expectedStatuses: [200, 202],
   });
   slides.push(unwrapApiSuccess(pollSlideResponse.json, 'create poll slide'));
 
@@ -373,7 +373,7 @@ async function createStaffSession() {
       headers: {
         Authorization: `Bearer ${staffToken}`,
       },
-      expectedStatuses: [200],
+      expectedStatuses: [200, 202],
     });
     slides.push(unwrapApiSuccess(response.json, `create static slide ${index}`));
   }

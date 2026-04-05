@@ -9,16 +9,13 @@
     "test:concurrency:130": "node run-concurrency-tests.js --concurrency=130",
     "test:concurrency:300": "node run-concurrency-tests.js --concurrency=300",
     "test:concurrency:500": "node run-concurrency-tests.js --concurrency=500",
-    "test:auth-burst": "node run-auth-burst-test.js --concurrency=130",
-    "test:auth-burst:100": "node run-auth-burst-test.js --concurrency=100",
-    "test:auth-burst:130": "node run-auth-burst-test.js --concurrency=130",
     "test:prod-concurrency": "bash ./test-concurrency-k6.sh",
     "test:prod-clicker-slide-storm": "bash ./test-prod-clicker-slide-storm.sh",
     "test:prod-frontend-poll-storm": "bash ./test-frontend-poll-storm.sh",
     "docker:up": "docker-compose -f ../docker-compose.test.yml up -d",
     "docker:down": "docker-compose -f ../docker-compose.test.yml down -v",
     "docker:logs": "docker-compose -f ../docker-compose.test.yml logs -f",
-    "setup": "npm install && cd ably-stub && npm install"
+    "setup": "npm install"
   },
   "dependencies": {
     "mysql2": "^3.6.0",

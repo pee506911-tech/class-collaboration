@@ -79,7 +79,7 @@ interface WebSocketContextType {
     initialStateError: string | null;
     voteResults: Record<string, Record<string, number>>;
     sendMessage: (type: string, payload: any, options?: { clientRequestId?: string }) => Promise<SendAck>;
-    refreshState: () => Promise<SendAck>;
+    refreshState: (options?: { includeMyVotes?: boolean }) => Promise<SendAck>;
     updateState: (updates: Partial<StateUpdatePayload>) => void;
     lostCount: number;
     serverTimeOffset: number;
@@ -851,9 +851,12 @@ export function WebSocketProvider({
         };
     }, [sessionId, role, name, handleAblyMessage, processBufferedMessages]);
 
-    const refreshState = useCallback(async (): Promise<SendAck> => {
+    const refreshState = useCallback(async (
+        options?: { includeMyVotes?: boolean }
+    ): Promise<SendAck> => {
         const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
         const requestId = createClientRequestId();
+        const includeMyVotes = options?.includeMyVotes ?? true;
 
         try {
             const { response, requestId: rid } = await httpFetch(`${apiBase}/sessions/${sessionId}/state`, {
@@ -873,7 +876,7 @@ export function WebSocketProvider({
                 setLastStateSyncAt(Date.now());
             }
 
-            if (role === 'student') {
+            if (role === 'student' && includeMyVotes) {
                 try {
                     const { response: votesRes } = await httpFetch(
                         `${apiBase}/sessions/${sessionId}/my-votes?participantId=${encodeURIComponent(participantIdRef.current)}`,
@@ -917,7 +920,7 @@ export function WebSocketProvider({
 
             if (isStale && !isRefreshingRef.current) {
                 isRefreshingRef.current = true;
-                refreshState().finally(() => {
+                refreshState({ includeMyVotes: false }).finally(() => {
                     isRefreshingRef.current = false;
                 });
             }
