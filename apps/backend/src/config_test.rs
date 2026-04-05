@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use crate::config::{recommended_api_buffer_size, recommended_api_concurrency_limit};
     use std::env;
 
     // Helper to build a Config from specific env vars, restoring originals after test
@@ -202,24 +203,34 @@ mod tests {
         // - Slowloris-style attacks
         // - Memory exhaustion from too many in-flight requests
 
-        // Default concurrency: db_max_connections * 8, clamped to [64, 512]
+        // Default concurrency leaves DB headroom for background workers first,
+        // then scales request admission from the remaining pool capacity.
         let db_max_connections: u32 = 5; // dev default
-        let calculated = (db_max_connections as usize * 8).clamp(64, 512);
-        assert_eq!(calculated, 64);
+        let calculated = recommended_api_concurrency_limit(db_max_connections);
+        assert_eq!(calculated, 16);
 
-        // Default buffer: concurrency * 8, clamped to [256, 4096]
-        let calculated_buffer = (calculated * 8).clamp(256, 4096);
-        assert_eq!(calculated_buffer, 512);
+        // Default buffer still absorbs bursts, but scales from the safer
+        // concurrency limit instead of assuming the DB can serve them all.
+        let calculated_buffer = recommended_api_buffer_size(calculated);
+        assert_eq!(calculated_buffer, 128);
     }
 
     #[test]
     fn production_db_settings_scale_higher() {
         // Production settings should scale for more concurrent users
-        let db_max_connections: u32 = 20; // production default
-        let calculated = (db_max_connections as usize * 8).clamp(64, 512);
-        assert_eq!(calculated, 160);
+        let db_max_connections: u32 = 40; // production default
+        let calculated = recommended_api_concurrency_limit(db_max_connections);
+        assert_eq!(calculated, 152);
 
-        let calculated_buffer = (calculated * 8).clamp(256, 4096);
-        assert_eq!(calculated_buffer, 1280);
+        let calculated_buffer = recommended_api_buffer_size(calculated);
+        assert_eq!(calculated_buffer, 1216);
+    }
+
+    #[test]
+    fn concurrency_formula_reserves_background_db_headroom() {
+        assert_eq!(recommended_api_concurrency_limit(1), 16);
+        assert_eq!(recommended_api_concurrency_limit(8), 24);
+        assert_eq!(recommended_api_concurrency_limit(64), 248);
+        assert_eq!(recommended_api_concurrency_limit(200), 512);
     }
 }

@@ -928,6 +928,8 @@ describe('SlideEditor session loading', () => {
         const { default: SlideEditor } = await import('./page');
         render(<SlideEditor />);
 
+        expect(await screen.findByRole('button', { name: /add new slide/i })).not.toBeDisabled();
+
         fireEvent.click(await screen.findByText('New Slide'));
         const tempInput = await screen.findByDisplayValue('New Slide');
         expect(tempInput).not.toBeDisabled();
@@ -1023,6 +1025,78 @@ describe('SlideEditor session loading', () => {
 
         expect(await screen.findByText('Preview: Slide 2')).toBeInTheDocument();
         expect(screen.getByText('● LIVE for Students')).toBeInTheDocument();
+    });
+
+    it('keeps duplicate and delete actions enabled while other structural work is syncing', async () => {
+        mockStorage.set('token', 'valid-token');
+        queueMockState.hasPendingStructuralMutations = true;
+        queueMockState.slides = [
+            {
+                id: 'slide-agenda',
+                sessionId: 'test-session-id',
+                type: 'static',
+                content: { title: 'Agenda', body: 'First slide' },
+                orderIndex: 0,
+                isHidden: false,
+                version: 1,
+            },
+            {
+                id: 'temp-new-slide',
+                sessionId: 'test-session-id',
+                type: 'static',
+                content: { title: 'New Slide', body: 'Content here' },
+                orderIndex: 1,
+                isHidden: false,
+                version: 0,
+                optimistic: {
+                    isPending: true,
+                    isTemp: true,
+                    syncState: 'syncing',
+                },
+            },
+        ];
+
+        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
+            if (url.includes('/sessions/test-session-id') && !url.includes('/slides')) {
+                return {
+                    response: {
+                        ok: true,
+                        json: async () => ({
+                            success: true,
+                            data: {
+                                id: 'test-session-id',
+                                title: 'Test Session',
+                                status: 'draft',
+                                createdAt: '2024-01-01T00:00:00Z',
+                                allowQuestions: false,
+                                requireName: false,
+                                createdBy: 'user-1',
+                            },
+                        }),
+                    },
+                };
+            }
+
+            if (url.includes('/slides')) {
+                return {
+                    response: {
+                        ok: true,
+                        json: async () => ({ success: true, data: queueMockState.slides }),
+                    },
+                };
+            }
+
+            return { response: { ok: true, json: async () => ({ success: true, data: null }) } };
+        });
+
+        const { default: SlideEditor } = await import('./page');
+        render(<SlideEditor />);
+
+        fireEvent.click(await screen.findByText('Agenda'));
+
+        expect(screen.getByRole('button', { name: /duplicate/i })).not.toBeDisabled();
+        expect(screen.getByRole('button', { name: /delete/i })).not.toBeDisabled();
+        expect(screen.getByRole('button', { name: /add new slide/i })).not.toBeDisabled();
     });
 
     it('keeps the delete fallback slide editable while the delete is still syncing', async () => {

@@ -31,7 +31,7 @@ mod services;
 mod tidb_ru;
 mod ws;
 
-use config::Config;
+use config::{recommended_api_concurrency_limit, Config};
 use db::{DbPoolSettings, LazyDbPool};
 use repositories::session::SessionRepository;
 use repositories::sqlx_session::SqlxSessionRepository;
@@ -93,6 +93,16 @@ async fn main() -> anyhow::Result<()> {
         rate_limit_general_burst = config.rate_limit_general_burst,
         "Config loaded"
     );
+
+    let recommended_api_concurrency = recommended_api_concurrency_limit(config.db_max_connections);
+    if config.api_concurrency_limit > recommended_api_concurrency {
+        tracing::warn!(
+            db_max_connections = config.db_max_connections,
+            configured_api_concurrency_limit = config.api_concurrency_limit,
+            recommended_api_concurrency_limit = recommended_api_concurrency,
+            "API concurrency limit exceeds the DB-backed recommendation; background workers may time out waiting for pool connections under load"
+        );
+    }
 
     // Create lazy DB pool (instant, no blocking)
     let lazy_pool = LazyDbPool::new();

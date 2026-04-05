@@ -288,7 +288,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
 
     async function handleDeleteSlide(slideId: string) {
         const slide = slides.find((entry) => entry.id === slideId);
-        if (!slide || slide.optimistic?.isPending) return;
+        if (!slide) return;
         if (!confirm('Are you sure you want to delete this slide?')) return;
 
         const nextPreviewSlideId = getNextPreviewSlideId(
@@ -325,7 +325,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
 
     function handleDuplicateSlide(slideId: string) {
         const slide = slides.find((entry) => entry.id === slideId);
-        if (!slide || slide.optimistic?.isPending) return;
+        if (!slide) return;
 
         clearInlineError(slideId);
         const tempId = enqueueDuplicateSlide(toSlide(slide));
@@ -337,7 +337,6 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
 
     const handleToggleVisibility = useCallback(async (e: React.MouseEvent, slide: Slide) => {
         e.stopPropagation();
-        if ((slide as EditorSlide).optimistic?.isPending) return;
 
         const resolvedSlideId = resolveOptimisticId(slide.id) ?? slide.id;
         setBaseSlidesSynced((prevSlides) => prevSlides.map((entry) => entry.id === resolvedSlideId ? { ...entry, isHidden: !slide.isHidden } : entry));
@@ -420,6 +419,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
     }
 
     const isStructuralSyncing = hasPendingStructuralMutations || isReordering;
+    const isReorderLocked = isReordering;
     const isShareEnabled = !(editorSync.dirty || editorSync.saving || isStructuralSyncing || isTogglingVisibility || isSavingSettings);
     const renderSlideCard = useCallback((
         slide: EditorSlide,
@@ -433,7 +433,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
             isPreview={previewSlideId === slide.id}
             isLive={state?.currentSlideId === slide.id}
             isDragging={isDragging}
-            isStructuralSyncing={isStructuralSyncing}
+            isStructuralSyncing={false}
             innerRef={draggableProvided.innerRef}
             draggableAttributes={{
                 'data-rfd-draggable-context-id': draggableProvided.draggableProps['data-rfd-draggable-context-id'],
@@ -445,7 +445,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
             onSelectSlide={handleSelectSlide}
             onToggleVisibility={handleToggleVisibility}
         />
-    ), [handleSelectSlide, handleToggleVisibility, isStructuralSyncing, previewSlideId, state?.currentSlideId]);
+    ), [handleSelectSlide, handleToggleVisibility, previewSlideId, state?.currentSlideId]);
 
     return (
         <div className="h-screen bg-slate-50 flex overflow-hidden font-sans text-slate-900">
@@ -505,7 +505,7 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                 ref={provided.innerRef}
                             >
                                 {slides.map((slide, index) => (
-                                    <Draggable key={slide.id} draggableId={slide.id} index={index} isDragDisabled={isStructuralSyncing}>
+                                    <Draggable key={slide.id} draggableId={slide.id} index={index} isDragDisabled={isReorderLocked}>
                                         {(provided, snapshot) => renderSlideCard(slide, index, provided, snapshot.isDragging)}
                                     </Draggable>
                                 ))}
@@ -517,7 +517,6 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                             setShowTypeSelector(true);
                                         });
                                     }}
-                                    disabled={isStructuralSyncing}
                                     className="w-full h-12 border-dashed border-slate-300 text-slate-500 hover:text-blue-600 hover:border-blue-400 hover:bg-blue-50"
                                 >
                                     <Plus className="w-4 h-4 mr-2" /> Add New Slide
@@ -681,7 +680,6 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                     size="icon"
                                     className="h-8 w-8 text-slate-400 hover:text-blue-600"
                                     onClick={() => handleDuplicateSlide(previewSlide.id)}
-                                    disabled={previewSlide.optimistic?.isPending || isStructuralSyncing}
                                     title="Duplicate Slide"
                                 >
                                     <span className="sr-only">Duplicate</span>
@@ -692,7 +690,6 @@ function EditorContent({ baseSlides, setBaseSlides, loadSlides, session, loadSes
                                     size="icon"
                                     className="h-8 w-8 text-slate-400 hover:text-red-600 hover:bg-red-50"
                                     onClick={() => handleDeleteSlide(previewSlide.id)}
-                                    disabled={previewSlide.optimistic?.isPending || isStructuralSyncing}
                                     title="Delete Slide"
                                 >
                                     <span className="sr-only">Delete</span>

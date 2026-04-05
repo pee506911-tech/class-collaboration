@@ -1,6 +1,13 @@
 use dotenvy::dotenv;
 use std::env;
 
+const RESERVED_BACKGROUND_DB_CONNECTIONS: u32 = 2;
+const API_CONCURRENCY_PER_DB_CONNECTION: usize = 4;
+const MIN_API_CONCURRENCY_LIMIT: usize = 16;
+const MAX_API_CONCURRENCY_LIMIT: usize = 512;
+const MIN_API_BUFFER_SIZE: usize = 128;
+const MAX_API_BUFFER_SIZE: usize = 4096;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub environment: String,
@@ -37,6 +44,19 @@ pub struct Config {
     pub session_state_cache_ttl_ms: u64,
     pub session_state_cache_max_entries: usize,
     pub perf_test_token: Option<String>,
+}
+
+pub(crate) fn recommended_api_concurrency_limit(db_max_connections: u32) -> usize {
+    let request_db_connections = db_max_connections
+        .saturating_sub(RESERVED_BACKGROUND_DB_CONNECTIONS)
+        .max(1);
+
+    ((request_db_connections as usize) * API_CONCURRENCY_PER_DB_CONNECTION)
+        .clamp(MIN_API_CONCURRENCY_LIMIT, MAX_API_CONCURRENCY_LIMIT)
+}
+
+pub(crate) fn recommended_api_buffer_size(api_concurrency_limit: usize) -> usize {
+    (api_concurrency_limit * 8).clamp(MIN_API_BUFFER_SIZE, MAX_API_BUFFER_SIZE)
 }
 
 impl Config {
@@ -108,13 +128,13 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(default_db_max_lifetime_seconds);
 
-        let default_api_concurrency_limit = (db_max_connections as usize * 8).clamp(64, 512);
+        let default_api_concurrency_limit = recommended_api_concurrency_limit(db_max_connections);
         let api_concurrency_limit = env::var("API_CONCURRENCY_LIMIT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(default_api_concurrency_limit);
 
-        let default_api_buffer_size = (api_concurrency_limit * 8).clamp(256, 4096);
+        let default_api_buffer_size = recommended_api_buffer_size(api_concurrency_limit);
         let api_buffer_size = env::var("API_BUFFER_SIZE")
             .ok()
             .and_then(|v| v.parse().ok())

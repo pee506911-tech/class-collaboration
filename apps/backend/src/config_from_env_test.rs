@@ -8,6 +8,8 @@
 
 #[cfg(test)]
 mod config_parsing_logic_tests {
+    use crate::config::{recommended_api_buffer_size, recommended_api_concurrency_limit};
+
     #[test]
     fn rate_limit_boolean_parsing_true_values() {
         for value in &["1", "true", "TRUE", "True"] {
@@ -115,22 +117,20 @@ mod config_parsing_logic_tests {
 
     #[test]
     fn api_concurrency_limit_clamping() {
-        let calc = |db_max_conn: u32| (db_max_conn as usize * 8).clamp(64, 512);
-        assert_eq!(calc(5), 64); // 40 → clamped to min 64
-        assert_eq!(calc(8), 64); // At min boundary
-        assert_eq!(calc(20), 160); // Normal
-        assert_eq!(calc(64), 512); // At max
-        assert_eq!(calc(100), 512); // Above max → clamped
+        assert_eq!(recommended_api_concurrency_limit(5), 16); // reserve 2 DB conns, min 16
+        assert_eq!(recommended_api_concurrency_limit(8), 24); // 6 usable DB conns × 4
+        assert_eq!(recommended_api_concurrency_limit(20), 72); // 18 usable DB conns × 4
+        assert_eq!(recommended_api_concurrency_limit(64), 248); // 62 usable DB conns × 4
+        assert_eq!(recommended_api_concurrency_limit(200), 512); // Above max → clamped
     }
 
     #[test]
     fn api_buffer_size_clamping() {
-        let calc = |concurrency: usize| (concurrency * 8).clamp(256, 4096);
-        assert_eq!(calc(8), 256); // 64 → clamped to min 256
-        assert_eq!(calc(32), 256); // At min boundary
-        assert_eq!(calc(160), 1280); // Normal
-        assert_eq!(calc(512), 4096); // At max
-        assert_eq!(calc(1000), 4096); // Above max → clamped
+        assert_eq!(recommended_api_buffer_size(16), 128); // At min boundary
+        assert_eq!(recommended_api_buffer_size(32), 256); // Normal scaling
+        assert_eq!(recommended_api_buffer_size(152), 1216); // Production default
+        assert_eq!(recommended_api_buffer_size(512), 4096); // At max
+        assert_eq!(recommended_api_buffer_size(1000), 4096); // Above max → clamped
     }
 
     #[test]
