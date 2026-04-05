@@ -81,8 +81,22 @@ mod config_parsing_logic_tests {
     #[test]
     fn db_max_connections_default_production() {
         let environment = "production";
-        let default = if environment == "production" { 20 } else { 5 };
-        assert_eq!(default, 20);
+        let default = if environment == "production" { 40 } else { 5 };
+        assert_eq!(default, 40);
+    }
+
+    #[test]
+    fn db_min_connections_default_development() {
+        let environment = "development";
+        let default = if environment == "production" { 5 } else { 0 };
+        assert_eq!(default, 0);
+    }
+
+    #[test]
+    fn db_min_connections_default_production() {
+        let environment = "production";
+        let default = if environment == "production" { 5 } else { 0 };
+        assert_eq!(default, 5);
     }
 
     #[test]

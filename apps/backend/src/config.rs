@@ -88,10 +88,11 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(default_db_max_connections);
+        let default_db_min_connections = if environment == "production" { 5 } else { 0 };
         let db_min_connections = env::var("DB_MIN_CONNECTIONS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
+            .unwrap_or(default_db_min_connections);
         let db_acquire_timeout_seconds = env::var("DB_ACQUIRE_TIMEOUT_SECONDS")
             .ok()
             .and_then(|v| v.parse().ok())
