@@ -83,7 +83,7 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(20);
 
-        let default_db_max_connections = if environment == "production" { 20 } else { 5 };
+        let default_db_max_connections = if environment == "production" { 40 } else { 5 };
         let db_max_connections = env::var("DB_MAX_CONNECTIONS")
             .ok()
             .and_then(|v| v.parse().ok())
