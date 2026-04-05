@@ -435,6 +435,11 @@ pub async fn submit_vote(
         return Ok((StatusCode::OK, Json(ApiResponse::success(existing))).into_response());
     }
 
+    // Queue votes per session before opening a DB transaction so waiters do not
+    // consume pool connections while contending on the same vote-sequence row.
+    let vote_lock = app_state.vote_gate.session_lock(&session_id).await;
+    let _vote_guard = vote_lock.lock().await;
+
     for attempt in 0..=MAX_DEADLOCK_RETRIES {
         let mut tx = pool.begin().await?;
 
