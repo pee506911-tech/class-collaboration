@@ -1,67 +1,69 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { httpFetch } from '@/lib/http';
-import { ApiRequestError } from '@/lib/api';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Slide, Session } from 'shared';
 
 const dndState = vi.hoisted(() => ({
-    dragEndHandlers: [] as Array<(result: any) => void | Promise<void>>,
+    dragEndHandlers: [] as Array<(result: unknown) => void | Promise<void>>,
 }));
 
 const apiMockState = vi.hoisted(() => ({
-    reorderSlides: vi.fn(),
-}));
-
-const queueMockState = vi.hoisted(() => ({
-    onDeleteRollback: null as null | ((rollback: {
-        restorePreviewSlideId: string | null;
-        fallbackPreviewSlideId: string | null;
-    }) => void),
-    slides: null as null | any[],
-    tempIdMap: {} as Record<string, string>,
-    hasPendingStructuralMutations: false,
-    stageTempSlideContent: vi.fn(() => ({ accepted: true })),
-    discardTempSlide: vi.fn(() => ({ accepted: true })),
+    createSlide: vi.fn(),
+    getSession: vi.fn(),
+    getSlides: vi.fn(),
+    updateSlide: vi.fn(),
+    updateSlideVisibility: vi.fn(),
+    updateSession: vi.fn(),
+    goLiveSession: vi.fn(),
+    stopSession: vi.fn(),
 }));
 
 const wsMockState = vi.hoisted(() => ({
-    initialState: null as null | Record<string, unknown>,
+    initialState: {
+        currentSlideId: null,
+        isPresentationActive: false,
+        isBlackout: false,
+        showResults: false,
+        stateVersion: 1,
+    } as Record<string, unknown>,
     lastSlideUpdate: 0,
-    setLastSlideUpdate: null as null | ((value: number) => void),
 }));
 
-const debounceMockState = vi.hoisted(() => ({
-    lastValue: 0,
-    lastDelayMs: 0,
-    callback: null as null | ((value: number) => void),
+const toastMock = vi.hoisted(() => ({
+    success: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
 }));
 
-// Mock next/navigation
-const mockPush = vi.fn();
-const mockSaveSlideUpdate = vi.fn();
-const mockEnqueueCreateSlide = vi.fn();
-const mockEnqueueDuplicateSlide = vi.fn();
-const mockEnqueueDeleteSlide = vi.fn(() => ({ accepted: false }));
-const mockClearInlineError = vi.fn();
-const mockClearSessionInlineError = vi.fn();
-const mockResolveOptimisticId = vi.fn((id: string | null) => id);
-const mockRequestRefreshAfterDrain = vi.fn();
+const navigationMockState = vi.hoisted(() => ({
+    router: {
+        push: vi.fn(),
+    },
+}));
+
+const editorMockState = vi.hoisted(() => ({
+    latestSlide: null as Slide | null,
+    onUpdate: null as null | ((content: Slide['content']) => Promise<{ status: 'saved' | 'queued' }>),
+}));
+
+function deferred<T>() {
+    let resolve!: (value: T | PromiseLike<T>) => void;
+    let reject!: (reason?: unknown) => void;
+
+    const promise = new Promise<T>((res, rej) => {
+        resolve = res;
+        reject = rej;
+    });
+
+    return { promise, resolve, reject };
+}
+
 vi.mock('next/navigation', () => ({
     useParams: () => ({ id: 'test-session-id' }),
-    useRouter: () => ({ push: mockPush }),
+    useRouter: () => navigationMockState.router,
 }));
 
-vi.mock('@/lib/use-debounced-slide-refetch', async () => {
-    return {
-        useDebouncedValue: (value: number, delayMs: number, callback: (value: number) => void) => {
-            debounceMockState.lastValue = value;
-            debounceMockState.lastDelayMs = delayMs;
-            debounceMockState.callback = callback;
-        },
-    };
-});
-
 vi.mock('@hello-pangea/dnd', () => ({
-    DragDropContext: ({ children, onDragEnd }: { children: React.ReactNode; onDragEnd: (result: any) => void | Promise<void> }) => {
+    DragDropContext: ({ children, onDragEnd }: { children: React.ReactNode; onDragEnd: (result: unknown) => void | Promise<void> }) => {
         dndState.dragEndHandlers.push(onDragEnd);
         return children;
     },
@@ -83,63 +85,35 @@ vi.mock('@hello-pangea/dnd', () => ({
             role: 'button',
             draggable: false,
             'aria-describedby': 'drag-handle',
+            'data-rfd-drag-handle-context-id': 'test-context',
+            'data-rfd-drag-handle-draggable-id': 'test-draggable',
+            onDragStart: vi.fn(),
         },
     }, { isDragging: false }),
 }));
 
-// Mock toast
-const mockToast = {
-    error: vi.fn(),
-    success: vi.fn(),
-    info: vi.fn(),
-};
 vi.mock('sonner', () => ({
-    toast: mockToast,
+    toast: toastMock,
+}));
+
+vi.mock('@/lib/storage', () => ({
+    safeLocalStorageGet: vi.fn((key: string) => key === 'token' ? 'valid-token' : null),
 }));
 
 vi.mock('@/lib/api', async () => {
     const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api');
     return {
         ...actual,
-        reorderSlides: apiMockState.reorderSlides,
+        createSlide: apiMockState.createSlide,
+        getSession: apiMockState.getSession,
+        getSlides: apiMockState.getSlides,
+        updateSlide: apiMockState.updateSlide,
+        updateSlideVisibility: apiMockState.updateSlideVisibility,
+        updateSession: apiMockState.updateSession,
+        goLiveSession: apiMockState.goLiveSession,
+        stopSession: apiMockState.stopSession,
     };
 });
-
-// Mock localStorage
-const mockStorage = new Map<string, string>();
-const mockLocalStorage: Storage = {
-    getItem: vi.fn((key: string) => mockStorage.get(key) ?? null),
-    setItem: vi.fn((key: string, value: string) => { mockStorage.set(key, value); }),
-    removeItem: vi.fn((key: string) => { mockStorage.delete(key); }),
-    clear: vi.fn(() => { mockStorage.clear(); }),
-    length: 0,
-    key: vi.fn(),
-};
-
-Object.defineProperty(global, 'localStorage', {
-    value: mockLocalStorage,
-    writable: true,
-});
-
-Object.defineProperty(window, 'localStorage', {
-    value: mockLocalStorage,
-    writable: true,
-});
-
-Object.defineProperty(window, 'confirm', {
-    value: vi.fn(() => true),
-    writable: true,
-});
-
-// Mock fetch
-const mockFetch = vi.fn();
-global.fetch = mockFetch;
-
-// Mock httpFetch
-vi.mock('@/lib/http', () => ({
-    httpFetch: vi.fn(),
-    createClientRequestId: () => 'test-request-id',
-}));
 
 vi.mock('@/lib/websocket', async () => {
     const ReactModule = await import('react');
@@ -147,1143 +121,181 @@ vi.mock('@/lib/websocket', async () => {
     return {
         WebSocketProvider: ({ children }: { children: React.ReactNode }) => children,
         useWebSocket: () => {
-            const [state, setState] = ReactModule.useState(wsMockState.initialState);
-            const [lastSlideUpdate, setLastSlideUpdate] = ReactModule.useState(wsMockState.lastSlideUpdate);
-
-            ReactModule.useEffect(() => {
-                wsMockState.setLastSlideUpdate = setLastSlideUpdate;
-                return () => {
-                    wsMockState.setLastSlideUpdate = null;
-                };
-            }, []);
-
+            const [state, setState] = ReactModule.useState<Record<string, unknown> | null>(wsMockState.initialState);
             return {
-                sendMessage: vi.fn(),
+                sendMessage: vi.fn(() => Promise.resolve({ ok: true })),
                 state,
                 activeParticipants: 0,
                 updateState: (updates: Record<string, unknown>) => {
                     setState((prev: Record<string, unknown> | null) => ({ ...(prev ?? {}), ...updates }));
                 },
-                lastSlideUpdate,
                 initialStateLoaded: true,
+                lastSlideUpdate: wsMockState.lastSlideUpdate,
             };
         },
     };
 });
 
-vi.mock('@/lib/use-optimistic-slide-queue', () => ({
-    useOptimisticSlideQueue: ({ baseSlides, refreshBaseSlides, onDeleteRollback }: {
-        baseSlides: any[];
-        refreshBaseSlides: () => Promise<void>;
-        onDeleteRollback?: (rollback: {
-            restorePreviewSlideId: string | null;
-            fallbackPreviewSlideId: string | null;
-        }) => void;
+vi.mock('@/components/slide-renderer', () => ({
+    SlideRenderer: ({ slide }: { slide: Slide }) => <div data-testid="slide-renderer">{slide.content.title || slide.content.question || slide.id}</div>,
+}));
+
+vi.mock('@/components/slide-editor-panel', () => ({
+    SlideEditorPanel: ({
+        slide,
+        onUpdate,
+    }: {
+        slide: Slide;
+        onUpdate: (content: Slide['content']) => Promise<{ status: 'saved' | 'queued' }>;
     }) => {
-        queueMockState.onDeleteRollback = onDeleteRollback ?? null;
-        return {
-            slides: queueMockState.slides ?? baseSlides,
-            queueState: { tempIdMap: queueMockState.tempIdMap },
-            enqueueCreateSlide: mockEnqueueCreateSlide,
-            enqueueDuplicateSlide: mockEnqueueDuplicateSlide,
-            enqueueDeleteSlide: mockEnqueueDeleteSlide,
-            stageTempSlideContent: queueMockState.stageTempSlideContent,
-            discardTempSlide: queueMockState.discardTempSlide,
-            clearInlineError: mockClearInlineError,
-            clearSessionInlineError: mockClearSessionInlineError,
-            resolveOptimisticId: mockResolveOptimisticId,
-            requestRefreshAfterDrain: mockRequestRefreshAfterDrain,
-            hasPendingStructuralMutations: queueMockState.hasPendingStructuralMutations,
-            sessionInlineError: null,
-        };
+        editorMockState.latestSlide = slide;
+        editorMockState.onUpdate = onUpdate;
+        return (
+            <div>
+                <div data-testid="editor-slide-id">{slide.id}</div>
+                <div data-testid="editor-slide-title">{slide.content.title || slide.content.question || ''}</div>
+            </div>
+        );
     },
 }));
 
-vi.mock('@/lib/slide-update', () => ({
-    saveSlideUpdate: mockSaveSlideUpdate,
+vi.mock('@/components/qa-manager', () => ({
+    QAManager: () => null,
 }));
 
-describe('SlideEditor session loading', () => {
+vi.mock('@/components/session-dashboard', () => ({
+    SessionDashboard: () => null,
+}));
+
+vi.mock('@/components/slide-type-selector', () => ({
+    SlideTypeSelector: () => null,
+}));
+
+vi.mock('@/components/ui/breadcrumb', () => ({
+    Breadcrumb: () => null,
+}));
+
+function makeSession(): Session {
+    return {
+        id: 'test-session-id',
+        title: 'Test Session',
+        status: 'draft',
+        createdAt: '2024-01-01T00:00:00Z',
+        updatedAt: '2024-01-01T00:00:00Z',
+        allowQuestions: false,
+        requireName: false,
+        shareToken: 'share-token',
+    };
+}
+
+function makeSlide(overrides: Partial<Slide> = {}): Slide {
+    return {
+        id: 'slide-1',
+        sessionId: 'test-session-id',
+        type: 'static',
+        content: {
+            title: 'Original title',
+            body: 'Original body',
+        },
+        orderIndex: 0,
+        isHidden: false,
+        version: 1,
+        ...overrides,
+    };
+}
+
+describe('staff editor duplicate flow', () => {
     beforeEach(() => {
-        mockStorage.clear();
-        mockFetch.mockReset();
-        mockPush.mockReset();
-        mockSaveSlideUpdate.mockReset();
-        mockEnqueueCreateSlide.mockReset();
-        mockEnqueueDuplicateSlide.mockReset();
-        mockEnqueueDeleteSlide.mockClear();
-        mockClearInlineError.mockReset();
-        mockClearSessionInlineError.mockReset();
-        mockRequestRefreshAfterDrain.mockReset();
-        mockResolveOptimisticId.mockClear();
-        apiMockState.reorderSlides.mockReset();
         dndState.dragEndHandlers = [];
-        queueMockState.onDeleteRollback = null;
-        queueMockState.slides = null;
-        queueMockState.tempIdMap = {};
-        queueMockState.hasPendingStructuralMutations = false;
-        queueMockState.stageTempSlideContent.mockReset();
-        queueMockState.discardTempSlide.mockReset();
-        queueMockState.stageTempSlideContent.mockReturnValue({ accepted: true });
-        queueMockState.discardTempSlide.mockReturnValue({ accepted: true });
-        wsMockState.initialState = null;
-        wsMockState.lastSlideUpdate = 0;
-        wsMockState.setLastSlideUpdate = null;
-        debounceMockState.lastValue = 0;
-        debounceMockState.lastDelayMs = 0;
-        debounceMockState.callback = null;
-        mockSaveSlideUpdate.mockResolvedValue({ status: 'saved' });
-        apiMockState.reorderSlides.mockResolvedValue(undefined);
-        vi.mocked(httpFetch).mockReset();
-        vi.mocked(window.confirm).mockClear();
+        apiMockState.createSlide.mockReset();
+        apiMockState.getSession.mockReset();
+        apiMockState.getSlides.mockReset();
+        apiMockState.updateSlide.mockReset();
+        apiMockState.updateSlideVisibility.mockReset();
+        apiMockState.updateSession.mockReset();
+        apiMockState.goLiveSession.mockReset();
+        apiMockState.stopSession.mockReset();
+        navigationMockState.router.push.mockReset();
+        editorMockState.latestSlide = null;
+        editorMockState.onUpdate = null;
+        toastMock.success.mockReset();
+        toastMock.error.mockReset();
+        toastMock.info.mockReset();
+
+        apiMockState.getSession.mockResolvedValue(makeSession());
+        apiMockState.getSlides.mockResolvedValue([makeSlide()]);
+        apiMockState.updateSlide.mockImplementation(async (
+            sessionId: string,
+            slideId: string,
+            content: Slide['content'],
+        ) => ({
+            id: slideId,
+            sessionId,
+            type: 'static',
+            content,
+            orderIndex: 1,
+            isHidden: false,
+            version: 2,
+        }));
+        apiMockState.updateSlideVisibility.mockResolvedValue(undefined);
+        apiMockState.updateSession.mockResolvedValue(undefined);
+        apiMockState.goLiveSession.mockResolvedValue(undefined);
+        apiMockState.stopSession.mockResolvedValue(undefined);
     });
 
-    it('redirects to dashboard when session returns 404', async () => {
-        // Arrange: authenticated user
-        mockStorage.set('token', 'valid-token');
+    it('keeps the latest edited duplicate content visible when the create request resolves', async () => {
+        const createRequest = deferred<Slide>();
+        apiMockState.createSlide.mockReturnValueOnce(createRequest.promise);
 
-        // getSession/getSlides return 404 as ApiRequestError
-        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
-            if (url.includes('/sessions/test-session-id')) {
-                throw new ApiRequestError('Session not found', { status: 404, retryable: false });
-            }
-            return {
-                response: {
-                    ok: true,
-                    json: async () => ({ success: true, data: [] }),
-                },
-            };
-        });
-
-        // Act: import and render component
-        const { default: SlideEditor } = await import('./page');
-        render(<SlideEditor />);
-
-        // Assert: should redirect to sessions list
+        const { default: SlideEditorPage } = await import('./page');
+        render(<SlideEditorPage />);
         await waitFor(() => {
-            expect(mockPush).toHaveBeenCalledWith('/sessions');
+            expect(editorMockState.latestSlide?.id).toBe('slide-1');
         });
-
-        // Should show appropriate error message
-        expect(mockToast.error).toHaveBeenCalledWith('Session not found');
-    });
-
-    it('shows loading state while fetching session', async () => {
-        // Arrange: authenticated user
-        mockStorage.set('token', 'valid-token');
-
-        // Slow responses
-        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
-            await new Promise(resolve => setTimeout(resolve, 100));
-
-            if (url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({ success: true, data: [] }),
-                    },
-                };
-            }
-
-            return {
-                response: {
-                    ok: true,
-                    json: async () => ({
-                        success: true,
-                        data: {
-                            id: 'test-session-id',
-                            title: 'Test Session',
-                            status: 'draft',
-                            createdAt: '2024-01-01T00:00:00Z',
-                            allowQuestions: false,
-                            requireName: false,
-                            createdBy: 'user-1',
-                        },
-                    }),
-                },
-            };
-        });
-
-        // Act
-        const { default: SlideEditor } = await import('./page');
-        render(<SlideEditor />);
-
-        // Assert: should show loading indicator
-        expect(screen.getByText('Loading session...')).toBeInTheDocument();
-    });
-
-    it('renders editor when session loads successfully', async () => {
-        // Arrange: authenticated user
-        mockStorage.set('token', 'valid-token');
-
-        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
-            if (url.includes('/sessions/test-session-id') && !url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({
-                            success: true,
-                            data: {
-                                id: 'test-session-id',
-                                title: 'Test Session',
-                                status: 'draft',
-                                createdAt: '2024-01-01T00:00:00Z',
-                                allowQuestions: false,
-                                requireName: false,
-                                createdBy: 'user-1',
-                            },
-                        }),
-                    },
-                };
-            }
-            if (url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({ success: true, data: [] }),
-                    },
-                };
-            }
-            return { response: { ok: true, json: async () => ({ success: true, data: null }) } };
-        });
-
-        // Act
-        const { default: SlideEditor } = await import('./page');
-        const { container } = render(<SlideEditor />);
-
-        // Assert: should render editor (check for WebSocketProvider wrapper)
-        await waitFor(() => {
-            expect(screen.queryByText('Loading session...')).not.toBeInTheDocument();
-        });
-    });
-
-    it('saves the latest option draft before switching to another slide', async () => {
-        mockStorage.set('token', 'valid-token');
-
-        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
-            if (url.includes('/sessions/test-session-id') && !url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({
-                            success: true,
-                            data: {
-                                id: 'test-session-id',
-                                title: 'Test Session',
-                                status: 'draft',
-                                createdAt: '2024-01-01T00:00:00Z',
-                                allowQuestions: false,
-                                requireName: false,
-                                createdBy: 'user-1',
-                            },
-                        }),
-                    },
-                };
-            }
-
-            if (url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({
-                            success: true,
-                            data: [
-                                {
-                                    id: 'slide-poll',
-                                    sessionId: 'test-session-id',
-                                    type: 'poll',
-                                    content: {
-                                        question: 'Favorite color?',
-                                        options: [
-                                            { id: 'opt-1', text: 'Red' },
-                                            { id: 'opt-2', text: 'Blue' },
-                                        ],
-                                        chartType: 'bar',
-                                        limitSubmissions: true,
-                                    },
-                                    orderIndex: 0,
-                                    isHidden: false,
-                                    version: 1,
-                                },
-                                {
-                                    id: 'slide-static',
-                                    sessionId: 'test-session-id',
-                                    type: 'static',
-                                    content: {
-                                        title: 'Agenda',
-                                        body: 'Second slide',
-                                    },
-                                    orderIndex: 1,
-                                    isHidden: false,
-                                    version: 1,
-                                },
-                            ],
-                        }),
-                    },
-                };
-            }
-
-            return { response: { ok: true, json: async () => ({ success: true, data: null }) } };
-        });
-
-        const { default: SlideEditor } = await import('./page');
-        render(<SlideEditor />);
-
-        const redInput = await screen.findByDisplayValue('Red');
-
-        fireEvent.focus(redInput);
-        fireEvent.change(redInput, { target: { value: 'Crimson' } });
-        fireEvent.blur(redInput);
-        fireEvent.click(await screen.findByText('Agenda'));
-
-        await waitFor(() => {
-            expect(mockSaveSlideUpdate).toHaveBeenCalledWith(expect.objectContaining({
-                sessionId: 'test-session-id',
-                slideId: 'slide-poll',
-                content: expect.objectContaining({
-                    question: 'Favorite color?',
-                    options: expect.arrayContaining([
-                        expect.objectContaining({ id: 'opt-1', text: 'Crimson' }),
-                        expect.objectContaining({ id: 'opt-2', text: 'Blue' }),
-                    ]),
-                }),
-            }));
-        });
-
-        expect(await screen.findByDisplayValue('Agenda')).toBeInTheDocument();
-    });
-
-    it('keeps a newer preview selection when delete rollback arrives late', async () => {
-        mockStorage.set('token', 'valid-token');
-        mockEnqueueDeleteSlide.mockReturnValueOnce({ accepted: true });
-
-        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
-            if (url.includes('/sessions/test-session-id') && !url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({
-                            success: true,
-                            data: {
-                                id: 'test-session-id',
-                                title: 'Test Session',
-                                status: 'draft',
-                                createdAt: '2024-01-01T00:00:00Z',
-                                allowQuestions: false,
-                                requireName: false,
-                                createdBy: 'user-1',
-                            },
-                        }),
-                    },
-                };
-            }
-
-            if (url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({
-                            success: true,
-                            data: [
-                                {
-                                    id: 'slide-poll',
-                                    sessionId: 'test-session-id',
-                                    type: 'poll',
-                                    content: {
-                                        question: 'Favorite color?',
-                                        options: [
-                                            { id: 'opt-1', text: 'Red' },
-                                            { id: 'opt-2', text: 'Blue' },
-                                        ],
-                                        chartType: 'bar',
-                                        limitSubmissions: true,
-                                    },
-                                    orderIndex: 0,
-                                    isHidden: false,
-                                    version: 1,
-                                },
-                                {
-                                    id: 'slide-agenda',
-                                    sessionId: 'test-session-id',
-                                    type: 'static',
-                                    content: {
-                                        title: 'Agenda',
-                                        body: 'Second slide',
-                                    },
-                                    orderIndex: 1,
-                                    isHidden: false,
-                                    version: 1,
-                                },
-                                {
-                                    id: 'slide-wrap',
-                                    sessionId: 'test-session-id',
-                                    type: 'static',
-                                    content: {
-                                        title: 'Wrap up',
-                                        body: 'Third slide',
-                                    },
-                                    orderIndex: 2,
-                                    isHidden: false,
-                                    version: 1,
-                                },
-                            ],
-                        }),
-                    },
-                };
-            }
-
-            return { response: { ok: true, json: async () => ({ success: true, data: null }) } };
-        });
-
-        const { default: SlideEditor } = await import('./page');
-        render(<SlideEditor />);
-
-        await screen.findByDisplayValue('Red');
-
-        fireEvent.click(screen.getByRole('button', { name: /delete/i }));
-        expect(await screen.findByDisplayValue('Agenda')).toBeInTheDocument();
-
-        fireEvent.click(screen.getAllByText('Wrap up')[0]);
-        expect(await screen.findByDisplayValue('Wrap up')).toBeInTheDocument();
-
-        act(() => {
-            queueMockState.onDeleteRollback?.({
-                restorePreviewSlideId: 'slide-poll',
-                fallbackPreviewSlideId: 'slide-agenda',
-            });
-        });
-
-        expect(screen.getByDisplayValue('Wrap up')).toBeInTheDocument();
-    });
-
-    it('falls back to an existing slide when the preview temp slide disappears', async () => {
-        mockStorage.set('token', 'valid-token');
-        mockEnqueueDuplicateSlide.mockReturnValueOnce('temp-duplicate');
-
-        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
-            if (url.includes('/sessions/test-session-id') && !url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({
-                            success: true,
-                            data: {
-                                id: 'test-session-id',
-                                title: 'Test Session',
-                                status: 'draft',
-                                createdAt: '2024-01-01T00:00:00Z',
-                                allowQuestions: false,
-                                requireName: false,
-                                createdBy: 'user-1',
-                            },
-                        }),
-                    },
-                };
-            }
-
-            if (url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({
-                            success: true,
-                            data: [
-                                {
-                                    id: 'slide-agenda',
-                                    sessionId: 'test-session-id',
-                                    type: 'static',
-                                    content: {
-                                        title: 'Agenda',
-                                        body: 'First slide',
-                                    },
-                                    orderIndex: 0,
-                                    isHidden: false,
-                                    version: 1,
-                                },
-                                {
-                                    id: 'slide-wrap',
-                                    sessionId: 'test-session-id',
-                                    type: 'static',
-                                    content: {
-                                        title: 'Wrap up',
-                                        body: 'Second slide',
-                                    },
-                                    orderIndex: 1,
-                                    isHidden: false,
-                                    version: 1,
-                                },
-                            ],
-                        }),
-                    },
-                };
-            }
-
-            return { response: { ok: true, json: async () => ({ success: true, data: null }) } };
-        });
-
-        const { default: SlideEditor } = await import('./page');
-        const { rerender } = render(<SlideEditor />);
-
-        expect(await screen.findByDisplayValue('Agenda')).toBeInTheDocument();
-
-        queueMockState.slides = [
-            {
-                id: 'slide-agenda',
-                sessionId: 'test-session-id',
-                type: 'static',
-                content: {
-                    title: 'Agenda',
-                    body: 'First slide',
-                },
-                orderIndex: 0,
-                isHidden: false,
-                version: 1,
-            },
-            {
-                id: 'temp-duplicate',
-                sessionId: 'test-session-id',
-                type: 'static',
-                content: {
-                    title: 'Agenda',
-                    body: 'First slide',
-                },
-                orderIndex: 1,
-                isHidden: false,
-                version: 0,
-                optimistic: {
-                    isPending: true,
-                    isTemp: true,
-                    disableEditing: true,
-                    syncState: 'syncing',
-                },
-            },
-            {
-                id: 'slide-wrap',
-                sessionId: 'test-session-id',
-                type: 'static',
-                content: {
-                    title: 'Wrap up',
-                    body: 'Second slide',
-                },
-                orderIndex: 2,
-                isHidden: false,
-                version: 1,
-            },
-        ];
-        rerender(<SlideEditor />);
 
         fireEvent.click(screen.getByRole('button', { name: /duplicate/i }));
+        await waitFor(() => {
+            expect(editorMockState.latestSlide?.id).toMatch(/^temp-/);
+        });
+
+        await act(async () => {
+            await editorMockState.onUpdate?.({
+                ...editorMockState.latestSlide?.content,
+                title: 'Edited duplicate title',
+            } as Slide['content']);
+        });
+        expect(editorMockState.latestSlide?.content.title).toBe('Edited duplicate title');
+
+        createRequest.resolve(makeSlide({
+            id: 'slide-2',
+            content: {
+                title: 'Original title',
+                body: 'Original body',
+            },
+            orderIndex: 1,
+            version: 1,
+        }));
+
+        await act(async () => {
+            await Promise.resolve();
+            await Promise.resolve();
+            await Promise.resolve();
+        });
 
         await waitFor(() => {
-            expect(screen.getByText('Preview: Slide 2')).toBeInTheDocument();
+            expect(editorMockState.latestSlide?.id).toBe('slide-2');
+            expect(editorMockState.latestSlide?.content.title).toBe('Edited duplicate title');
         });
-
-        queueMockState.slides = null;
-        rerender(<SlideEditor />);
 
         await waitFor(() => {
-            expect(screen.getByDisplayValue('Agenda')).toBeInTheDocument();
+            expect(apiMockState.updateSlide).toHaveBeenCalledWith(
+                'test-session-id',
+                'slide-2',
+                expect.objectContaining({
+                    title: 'Edited duplicate title',
+                    body: 'Original body',
+                }),
+            );
         });
-        expect(screen.getByText('Preview: Slide 1')).toBeInTheDocument();
-    });
-
-    it('keeps preview on the resolved slide when a temp duplicate is confirmed', async () => {
-        mockStorage.set('token', 'valid-token');
-
-        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
-            if (url.includes('/sessions/test-session-id') && !url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({
-                            success: true,
-                            data: {
-                                id: 'test-session-id',
-                                title: 'Test Session',
-                                status: 'draft',
-                                createdAt: '2024-01-01T00:00:00Z',
-                                allowQuestions: false,
-                                requireName: false,
-                                createdBy: 'user-1',
-                            },
-                        }),
-                    },
-                };
-            }
-
-            if (url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({
-                            success: true,
-                            data: [
-                                {
-                                    id: 'slide-one',
-                                    sessionId: 'test-session-id',
-                                    type: 'static',
-                                    content: {
-                                        title: 'Slide 1',
-                                        body: 'First',
-                                    },
-                                    orderIndex: 0,
-                                    isHidden: false,
-                                    version: 1,
-                                },
-                                {
-                                    id: 'slide-twenty-three',
-                                    sessionId: 'test-session-id',
-                                    type: 'static',
-                                    content: {
-                                        title: 'Slide 23',
-                                        body: 'Last confirmed slide',
-                                    },
-                                    orderIndex: 1,
-                                    isHidden: false,
-                                    version: 1,
-                                },
-                            ],
-                        }),
-                    },
-                };
-            }
-
-            return { response: { ok: true, json: async () => ({ success: true, data: null }) } };
-        });
-
-        queueMockState.slides = [
-            {
-                id: 'slide-one',
-                sessionId: 'test-session-id',
-                type: 'static',
-                content: {
-                    title: 'Slide 1',
-                    body: 'First',
-                },
-                orderIndex: 0,
-                isHidden: false,
-                version: 1,
-            },
-            {
-                id: 'slide-twenty-three',
-                sessionId: 'test-session-id',
-                type: 'static',
-                content: {
-                    title: 'Slide 23',
-                    body: 'Last confirmed slide',
-                },
-                orderIndex: 1,
-                isHidden: false,
-                version: 1,
-            },
-            {
-                id: 'temp-duplicate',
-                sessionId: 'test-session-id',
-                type: 'static',
-                content: {
-                    title: 'Slide 24 draft',
-                    body: 'Last confirmed slide',
-                },
-                orderIndex: 2,
-                isHidden: false,
-                version: 0,
-                optimistic: {
-                    isPending: true,
-                    isTemp: true,
-                    disableEditing: true,
-                    syncState: 'syncing',
-                },
-            },
-        ];
-
-        const { default: SlideEditor } = await import('./page');
-        const { rerender } = render(<SlideEditor />);
-
-        fireEvent.click(await screen.findByText('Slide 24 draft'));
-        expect(await screen.findByDisplayValue('Slide 24 draft')).toBeInTheDocument();
-
-        queueMockState.tempIdMap = { 'temp-duplicate': 'slide-twenty-four' };
-        queueMockState.slides = [
-            {
-                id: 'slide-one',
-                sessionId: 'test-session-id',
-                type: 'static',
-                content: {
-                    title: 'Slide 1',
-                    body: 'First',
-                },
-                orderIndex: 0,
-                isHidden: false,
-                version: 1,
-            },
-            {
-                id: 'slide-twenty-three',
-                sessionId: 'test-session-id',
-                type: 'static',
-                content: {
-                    title: 'Slide 23',
-                    body: 'Last confirmed slide',
-                },
-                orderIndex: 1,
-                isHidden: false,
-                version: 1,
-            },
-            {
-                id: 'slide-twenty-four',
-                sessionId: 'test-session-id',
-                type: 'static',
-                content: {
-                    title: 'Slide 24 draft',
-                    body: 'Last confirmed slide',
-                },
-                orderIndex: 2,
-                isHidden: false,
-                version: 1,
-            },
-        ];
-
-        rerender(<SlideEditor />);
-
-        expect(await screen.findByDisplayValue('Slide 24 draft')).toBeInTheDocument();
-        expect(screen.queryByDisplayValue('Slide 1')).not.toBeInTheDocument();
-    });
-
-    it('keeps temp slides editable and queues local saves while they are still syncing', async () => {
-        mockStorage.set('token', 'valid-token');
-        queueMockState.hasPendingStructuralMutations = true;
-
-        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
-            if (url.includes('/sessions/test-session-id') && !url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({
-                            success: true,
-                            data: {
-                                id: 'test-session-id',
-                                title: 'Test Session',
-                                status: 'draft',
-                                createdAt: '2024-01-01T00:00:00Z',
-                                allowQuestions: false,
-                                requireName: false,
-                                createdBy: 'user-1',
-                            },
-                        }),
-                    },
-                };
-            }
-
-            if (url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({
-                            success: true,
-                            data: [
-                                {
-                                    id: 'slide-agenda',
-                                    sessionId: 'test-session-id',
-                                    type: 'static',
-                                    content: {
-                                        title: 'Agenda',
-                                        body: 'First slide',
-                                    },
-                                    orderIndex: 0,
-                                    isHidden: false,
-                                    version: 1,
-                                },
-                                {
-                                    id: 'slide-wrap',
-                                    sessionId: 'test-session-id',
-                                    type: 'static',
-                                    content: {
-                                        title: 'Wrap up',
-                                        body: 'Second slide',
-                                    },
-                                    orderIndex: 1,
-                                    isHidden: false,
-                                    version: 1,
-                                },
-                            ],
-                        }),
-                    },
-                };
-            }
-
-            return { response: { ok: true, json: async () => ({ success: true, data: null }) } };
-        });
-
-        queueMockState.slides = [
-            {
-                id: 'slide-agenda',
-                sessionId: 'test-session-id',
-                type: 'static',
-                content: {
-                    title: 'Agenda',
-                    body: 'First slide',
-                },
-                orderIndex: 0,
-                isHidden: false,
-                version: 1,
-            },
-            {
-                id: 'temp-new-slide',
-                sessionId: 'test-session-id',
-                type: 'static',
-                content: {
-                    title: 'New Slide',
-                    body: 'Content here',
-                },
-                orderIndex: 1,
-                isHidden: false,
-                version: 0,
-                optimistic: {
-                    isPending: true,
-                    isTemp: true,
-                    disableEditing: true,
-                    syncState: 'syncing',
-                },
-            },
-            {
-                id: 'slide-wrap',
-                sessionId: 'test-session-id',
-                type: 'static',
-                content: {
-                    title: 'Wrap up',
-                    body: 'Second slide',
-                },
-                orderIndex: 2,
-                isHidden: false,
-                version: 1,
-            },
-        ];
-
-        const { default: SlideEditor } = await import('./page');
-        render(<SlideEditor />);
-
-        expect(await screen.findByRole('button', { name: /add new slide/i })).not.toBeDisabled();
-
-        fireEvent.click(await screen.findByText('New Slide'));
-        const tempInput = await screen.findByDisplayValue('New Slide');
-        expect(tempInput).not.toBeDisabled();
-        fireEvent.change(tempInput, { target: { value: 'Edited temp slide' } });
-        fireEvent.blur(tempInput);
-
-        await waitFor(() => {
-            expect(queueMockState.stageTempSlideContent).toHaveBeenCalled();
-        });
-        expect(mockSaveSlideUpdate).not.toHaveBeenCalled();
-
-        fireEvent.click(screen.getAllByText('Agenda')[0]);
-
-        const agendaInput = await screen.findByDisplayValue('Agenda');
-        expect(agendaInput).not.toBeDisabled();
-    });
-
-    it('shows a live badge for the authoritative slide and only follows live when asked', async () => {
-        mockStorage.set('token', 'valid-token');
-        wsMockState.initialState = {
-            currentSlideId: 'slide-live',
-            stateVersion: 5,
-            isPresentationActive: true,
-        };
-
-        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
-            if (url.includes('/sessions/test-session-id') && !url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({
-                            success: true,
-                            data: {
-                                id: 'test-session-id',
-                                title: 'Test Session',
-                                status: 'draft',
-                                createdAt: '2024-01-01T00:00:00Z',
-                                allowQuestions: false,
-                                requireName: false,
-                                createdBy: 'user-1',
-                            },
-                        }),
-                    },
-                };
-            }
-
-            if (url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({
-                            success: true,
-                            data: [
-                                {
-                                    id: 'slide-agenda',
-                                    sessionId: 'test-session-id',
-                                    type: 'static',
-                                    content: { title: 'Agenda', body: 'First slide' },
-                                    orderIndex: 0,
-                                    isHidden: false,
-                                    version: 1,
-                                },
-                                {
-                                    id: 'slide-live',
-                                    sessionId: 'test-session-id',
-                                    type: 'static',
-                                    content: { title: 'Live slide', body: 'Students see this' },
-                                    orderIndex: 1,
-                                    isHidden: false,
-                                    version: 1,
-                                },
-                            ],
-                        }),
-                    },
-                };
-            }
-
-            return { response: { ok: true, json: async () => ({ success: true, data: null }) } };
-        });
-
-        const { default: SlideEditor } = await import('./page');
-        render(<SlideEditor />);
-
-        expect(await screen.findByText('Preview: Slide 2')).toBeInTheDocument();
-        expect(screen.getByText('● LIVE for Students')).toBeInTheDocument();
-
-        fireEvent.click(screen.getAllByText('Agenda')[0]);
-
-        expect(await screen.findByText('Preview: Slide 1')).toBeInTheDocument();
-        expect(screen.queryByText('● LIVE for Students')).not.toBeInTheDocument();
-
-        fireEvent.click(screen.getByRole('button', { name: /jump to live/i }));
-
-        expect(await screen.findByText('Preview: Slide 2')).toBeInTheDocument();
-        expect(screen.getByText('● LIVE for Students')).toBeInTheDocument();
-    });
-
-    it('keeps duplicate and delete actions enabled while other structural work is syncing', async () => {
-        mockStorage.set('token', 'valid-token');
-        queueMockState.hasPendingStructuralMutations = true;
-        queueMockState.slides = [
-            {
-                id: 'slide-agenda',
-                sessionId: 'test-session-id',
-                type: 'static',
-                content: { title: 'Agenda', body: 'First slide' },
-                orderIndex: 0,
-                isHidden: false,
-                version: 1,
-            },
-            {
-                id: 'temp-new-slide',
-                sessionId: 'test-session-id',
-                type: 'static',
-                content: { title: 'New Slide', body: 'Content here' },
-                orderIndex: 1,
-                isHidden: false,
-                version: 0,
-                optimistic: {
-                    isPending: true,
-                    isTemp: true,
-                    syncState: 'syncing',
-                },
-            },
-        ];
-
-        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
-            if (url.includes('/sessions/test-session-id') && !url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({
-                            success: true,
-                            data: {
-                                id: 'test-session-id',
-                                title: 'Test Session',
-                                status: 'draft',
-                                createdAt: '2024-01-01T00:00:00Z',
-                                allowQuestions: false,
-                                requireName: false,
-                                createdBy: 'user-1',
-                            },
-                        }),
-                    },
-                };
-            }
-
-            if (url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({ success: true, data: queueMockState.slides }),
-                    },
-                };
-            }
-
-            return { response: { ok: true, json: async () => ({ success: true, data: null }) } };
-        });
-
-        const { default: SlideEditor } = await import('./page');
-        render(<SlideEditor />);
-
-        fireEvent.click(await screen.findByText('Agenda'));
-
-        expect(screen.getByRole('button', { name: /duplicate/i })).not.toBeDisabled();
-        expect(screen.getByRole('button', { name: /delete/i })).not.toBeDisabled();
-        expect(screen.getByRole('button', { name: /add new slide/i })).not.toBeDisabled();
-    });
-
-    it('keeps the delete fallback slide editable while the delete is still syncing', async () => {
-        mockStorage.set('token', 'valid-token');
-        queueMockState.hasPendingStructuralMutations = true;
-        queueMockState.slides = [
-            {
-                id: 'slide-wrap',
-                sessionId: 'test-session-id',
-                type: 'static',
-                content: {
-                    title: 'Wrap up',
-                    body: 'Second slide',
-                },
-                orderIndex: 0,
-                isHidden: false,
-                version: 1,
-            },
-        ];
-
-        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
-            if (url.includes('/sessions/test-session-id') && !url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({
-                            success: true,
-                            data: {
-                                id: 'test-session-id',
-                                title: 'Test Session',
-                                status: 'draft',
-                                createdAt: '2024-01-01T00:00:00Z',
-                                allowQuestions: false,
-                                requireName: false,
-                                createdBy: 'user-1',
-                            },
-                        }),
-                    },
-                };
-            }
-
-            if (url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({
-                            success: true,
-                            data: [
-                                {
-                                    id: 'slide-agenda',
-                                    sessionId: 'test-session-id',
-                                    type: 'static',
-                                    content: {
-                                        title: 'Agenda',
-                                        body: 'First slide',
-                                    },
-                                    orderIndex: 0,
-                                    isHidden: false,
-                                    version: 1,
-                                },
-                                {
-                                    id: 'slide-wrap',
-                                    sessionId: 'test-session-id',
-                                    type: 'static',
-                                    content: {
-                                        title: 'Wrap up',
-                                        body: 'Second slide',
-                                    },
-                                    orderIndex: 1,
-                                    isHidden: false,
-                                    version: 1,
-                                },
-                            ],
-                        }),
-                    },
-                };
-            }
-
-            return { response: { ok: true, json: async () => ({ success: true, data: null }) } };
-        });
-
-        const { default: SlideEditor } = await import('./page');
-        render(<SlideEditor />);
-
-        const wrapInput = await screen.findByDisplayValue('Wrap up');
-        expect(wrapInput).not.toBeDisabled();
-        expect(screen.queryByText('This slide is temporarily locked while structural changes are syncing.')).not.toBeInTheDocument();
-    });
-
-    it('does not trigger editor slide refetches from websocket slide updates', async () => {
-        mockStorage.set('token', 'valid-token');
-
-        vi.mocked(httpFetch).mockImplementation(async (url: string) => {
-            if (url.includes('/sessions/test-session-id') && !url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({
-                            success: true,
-                            data: {
-                                id: 'test-session-id',
-                                title: 'Test Session',
-                                status: 'draft',
-                                createdAt: '2024-01-01T00:00:00Z',
-                                allowQuestions: false,
-                                requireName: false,
-                                createdBy: 'user-1',
-                            },
-                        }),
-                    },
-                };
-            }
-
-            if (url.includes('/slides')) {
-                return {
-                    response: {
-                        ok: true,
-                        json: async () => ({
-                            success: true,
-                            data: [
-                                {
-                                    id: 'slide-agenda',
-                                    sessionId: 'test-session-id',
-                                    type: 'static',
-                                    content: {
-                                        title: 'Agenda',
-                                        body: 'First slide',
-                                    },
-                                    orderIndex: 0,
-                                    isHidden: false,
-                                    version: 1,
-                                },
-                            ],
-                        }),
-                    },
-                };
-            }
-
-            return { response: { ok: true, json: async () => ({ success: true, data: null }) } };
-        });
-
-        const { default: SlideEditor } = await import('./page');
-        render(<SlideEditor />);
-
-        await screen.findByDisplayValue('Agenda');
-        expect(mockRequestRefreshAfterDrain).not.toHaveBeenCalled();
-        expect(debounceMockState.callback).toBeNull();
-
-        act(() => {
-            wsMockState.lastSlideUpdate = 1_234;
-            wsMockState.setLastSlideUpdate?.(1_234);
-        });
-
-        expect(debounceMockState.callback).toBeNull();
-        expect(mockRequestRefreshAfterDrain).not.toHaveBeenCalled();
     });
 });

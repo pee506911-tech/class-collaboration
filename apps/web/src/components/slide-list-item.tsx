@@ -2,12 +2,12 @@ import { memo } from 'react';
 import type { CSSProperties, MouseEvent, TransitionEventHandler } from 'react';
 
 import { Button } from '@/components/ui/button';
-import type { EditorSlide } from '@/lib/optimistic-slide-queue';
+import type { Slide } from 'shared';
 import type { DraggableProvidedDragHandleProps } from '@hello-pangea/dnd';
 import { BarChart2, Eye, EyeOff, GripVertical, HelpCircle, Layout } from 'lucide-react';
 
 export interface SlideListItemProps {
-    slide: EditorSlide;
+    slide: Slide;
     index: number;
     isPreview: boolean;
     isLive: boolean;
@@ -22,10 +22,10 @@ export interface SlideListItemProps {
     onTransitionEnd?: TransitionEventHandler<HTMLDivElement>;
     dragHandleProps: DraggableProvidedDragHandleProps | null;
     onSelectSlide: (slideId: string) => void;
-    onToggleVisibility: (event: MouseEvent, slide: EditorSlide) => void;
+    onToggleVisibility: (event: MouseEvent, slide: Slide) => void;
 }
 
-function getSlideLabel(slide: EditorSlide) {
+function getSlideLabel(slide: Slide) {
     return slide.content.question || slide.content.title || 'Untitled Slide';
 }
 
@@ -68,12 +68,10 @@ function areDragHandlePropsEqual(
         && left['data-rfd-drag-handle-draggable-id'] === right['data-rfd-drag-handle-draggable-id'];
 }
 
-function areSlidesEqual(left: EditorSlide, right: EditorSlide) {
+function areSlidesEqual(left: Slide, right: Slide) {
     return left.id === right.id
         && left.type === right.type
         && left.isHidden === right.isHidden
-        && left.optimistic?.isPending === right.optimistic?.isPending
-        && left.optimistic?.error === right.optimistic?.error
         && getSlideLabel(left) === getSlideLabel(right);
 }
 
@@ -108,7 +106,7 @@ function SlideListItemComponent({
                 : isLive
                     ? 'bg-green-50 border-green-600 shadow-sm ring-1 ring-green-600/20'
                     : 'bg-white border-slate-200 hover:border-blue-300 hover:shadow-sm'
-                } ${slide.optimistic?.isPending ? 'opacity-90' : ''} ${isDragging ? 'shadow-xl ring-2 ring-blue-600 rotate-2 z-50' : ''}`}
+                } ${isDragging ? 'shadow-xl ring-2 ring-blue-600 rotate-2 z-50' : ''}`}
             title={
                 isPreview
                     ? 'Selected for Preview'
@@ -148,7 +146,7 @@ function SlideListItemComponent({
                                 variant="ghost"
                                 size="icon"
                                 className={`h-6 w-6 ${slide.isHidden ? 'text-slate-400' : 'text-slate-300 hover:text-slate-500'}`}
-                                disabled={slide.optimistic?.isPending || isStructuralSyncing}
+                                disabled={isStructuralSyncing}
                                 onClick={(event) => onToggleVisibility(event, slide)}
                                 title={slide.isHidden ? 'Show Slide' : 'Hide Slide'}
                             >
@@ -162,11 +160,6 @@ function SlideListItemComponent({
                     <p className={`text-xs font-medium truncate ${slide.isHidden ? 'text-slate-400 italic' : 'text-slate-700'}`}>
                         {getSlideLabel(slide)}
                     </p>
-                    {slide.optimistic?.error && (
-                        <p className="mt-2 text-[11px] text-rose-600 truncate">
-                            {slide.optimistic.error}
-                        </p>
-                    )}
                 </div>
             </div>
         </div>

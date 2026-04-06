@@ -10,26 +10,8 @@ import { fetchWsToken } from './ws-auth';
 import { createReconnect } from './ws-reconnect';
 import { trimTrailingSlash } from './url';
 
-// Cross-tab connection sharing using BroadcastChannel
-// Only one tab (the "leader") maintains the actual WebSocket connection
-// Other tabs receive messages via BroadcastChannel
-// Includes automatic leader failover when leader tab closes
-
-interface TabMessage {
-    type: 'ABLY_MESSAGE' | 'REQUEST_LEADER' | 'LEADER_ANNOUNCE' | 'LEADER_PING' | 'LEADER_PONG' | 'LEADER_GOODBYE' | 'STATE_SYNC';
-    sessionId?: string;
-    tabId?: string;
-    message?: { name: string; data: any };
-    timestamp?: number;
-    leaderSince?: number; // When this tab became leader (for priority)
-    currentState?: {
-        state: any;
-        voteResults: Record<string, Record<string, number>>;
-        questions: any[];
-        voteSequence?: number;
-        qaSequence?: number;
-    };
-}
+// Every tab maintains its own direct WebSocket connection.
+// There is no cross-tab coordination or leader election.
 
 function syncSequenceRefs(
     voteSequenceRef: React.MutableRefObject<number>,
@@ -55,21 +37,6 @@ function shouldRetryConnectionError(error: unknown): boolean {
         message.includes('HTTP 404')
     );
 }
-
-// Generate unique tab ID with creation timestamp for priority
-const TAB_ID = typeof crypto !== 'undefined' && crypto.randomUUID
-    ? crypto.randomUUID()
-    : Math.random().toString(36).substring(2);
-
-// Leader health check interval (ms)
-const LEADER_PING_INTERVAL = 5000;
-const LEADER_PING_TIMEOUT = 3000;
-const ELECTION_BASE_DELAY = 100;
-const ELECTION_RANDOM_DELAY = 400;
-
-// Track if this tab is the leader for each session
-const leaderStatus = new Map<string, boolean>();
-const broadcastChannels = new Map<string, BroadcastChannel>();
 
 interface WebSocketContextType {
     isConnected: boolean;
@@ -140,34 +107,20 @@ export function WebSocketProvider({
     }));
     const wsRef = useRef<WebSocket | null>(null);
     const wsReconnectRef = useRef<ReturnType<typeof createReconnect> | null>(null);
-    const isLeaderRef = useRef<boolean>(false);
-    const leaderSinceRef = useRef<number>(0); // When we became leader
-    const leaderCheckTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-    const leaderPingIntervalRef = useRef<NodeJS.Timeout | null>(null);
-    const leaderPongTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-    const bcRef = useRef<BroadcastChannel | null>(null);
     const isMountedRef = useRef<boolean>(true);
-    const isRefreshingRef = useRef<boolean>(false); // Track if auto-refresh is in progress
-    const initialStateLoadedRef = useRef<boolean>(false); // Track if initial state fetched
+    const isRefreshingRef = useRef<boolean>(false);
+    const initialStateLoadedRef = useRef<boolean>(false);
     const hasOpenedSocketRef = useRef<boolean>(false);
     const refreshStateRef = useRef<((options?: { includeMyVotes?: boolean }) => Promise<SendAck>) | null>(null);
-
-    // Message buffer for failover gap
-    const messageBufferRef = useRef<Array<{ name: string; data: any; timestamp: number }>>([]);
-    const isInFailoverRef = useRef<boolean>(false);
-
-    // State refs for sharing during failover
     const stateRef = useRef<StateUpdatePayload | null>(null);
-    const voteResultsRef = useRef<Record<string, Record<string, number>>>({});
-    const questionsRef = useRef<any[]>([]);
+
+    // State refs for sequence tracking
     const voteSequenceRef = useRef<number>(0);
     const qaSequenceRef = useRef<number>(0);
-    const lastRealtimeMessageAtRef = useRef<number | null>(null);
 
-    // Keep refs in sync with state
-    useEffect(() => { stateRef.current = state; }, [state]);
-    useEffect(() => { voteResultsRef.current = voteResults; }, [voteResults]);
-    useEffect(() => { questionsRef.current = questions; }, [questions]);
+    useEffect(() => {
+        stateRef.current = state;
+    }, [state]);
 
     // Fetch initial state IMMEDIATELY on mount (before WebSocket connection)
     // This prevents the flash of incorrect UI state
@@ -219,21 +172,15 @@ export function WebSocketProvider({
     // participantId is now initialized synchronously in useRef above
     // This effect is kept for backwards compatibility but the ref is already set
 
-    // Handle incoming WebSocket messages (for both leader and follower)
+    // Handle incoming WebSocket messages
     const handleAblyMessage = useCallback((messageName: string, data: any) => {
         if (!isMountedRef.current) return;
 
         const now = Date.now();
-        if (!lastRealtimeMessageAtRef.current || now - lastRealtimeMessageAtRef.current > 1000) {
-            lastRealtimeMessageAtRef.current = now;
-            setLastRealtimeMessageAt(now);
-        }
-
-        // If in failover, buffer the message
-        if (isInFailoverRef.current) {
-            messageBufferRef.current.push({ name: messageName, data, timestamp: Date.now() });
-            return;
-        }
+        setLastRealtimeMessageAt(prev => {
+            if (!prev || now - prev > 1000) return now;
+            return prev;
+        });
 
         const payload = data;
 
@@ -281,36 +228,11 @@ export function WebSocketProvider({
         }
     }, []);
 
-    // Process buffered messages after failover
-    const processBufferedMessages = useCallback(() => {
-        const buffer = messageBufferRef.current;
-        messageBufferRef.current = [];
-        isInFailoverRef.current = false;
-
-        buffer.forEach(msg => {
-            handleAblyMessage(msg.name, msg.data);
-        });
-    }, [handleAblyMessage]);
-
     useEffect(() => {
         if (!sessionId) return;
 
-        // IMPORTANT: Disable BroadcastChannel for students so each window gets its own WebSocket connection
-        // This ensures each student has a unique connection even in the same browser
-        // BroadcastChannel is only useful for staff who might have multiple tabs open
-        const hasBroadcastChannel = typeof window !== 'undefined'
-            && typeof (window as any).BroadcastChannel !== 'undefined'
-            && role !== 'student';
-
         isMountedRef.current = true;
         let ws: WebSocket | null = null;
-        let bc: BroadcastChannel | null = null;
-        const channelName = `ws-session-${sessionId}-${role}`;
-
-        // Track when we last heard from a leader and their priority
-        let lastLeaderTimestamp = 0;
-        let currentLeaderSince = 0;
-        let currentLeaderTabId = '';
 
         const fetchAbortController = new AbortController();
 
@@ -452,56 +374,15 @@ export function WebSocketProvider({
                         isRefreshingRef.current = false;
                     });
                 }
-
-                // End failover mode and process buffered messages
-                if (isInFailoverRef.current) {
-                    setTimeout(processBufferedMessages, 100);
-                }
-
-                // Announce leader if we have BroadcastChannel
-                if (bc && isLeaderRef.current) {
-                    bc.postMessage({
-                        type: 'LEADER_ANNOUNCE',
-                        sessionId,
-                        tabId: TAB_ID,
-                        timestamp: Date.now(),
-                        leaderSince: leaderSinceRef.current,
-                        currentState: {
-                            state: stateRef.current,
-                            voteResults: voteResultsRef.current,
-                            questions: questionsRef.current,
-                            voteSequence: voteSequenceRef.current,
-                            qaSequence: qaSequenceRef.current,
-                        }
-                    });
-                }
             };
 
             ws.onmessage = (event: MessageEvent) => {
                 if (!isMountedRef.current) return;
 
-                const now = Date.now();
-                if (!lastRealtimeMessageAtRef.current || now - lastRealtimeMessageAtRef.current > 1000) {
-                    lastRealtimeMessageAtRef.current = now;
-                    setLastRealtimeMessageAt(now);
-                }
-
                 try {
                     const message = JSON.parse(event.data);
                     const { type, ...data } = message;
-
-                    // Handle the message
                     handleAblyMessage(type, data);
-
-                    // Broadcast to follower tabs if we're leader
-                    if (bc && isLeaderRef.current) {
-                        bc.postMessage({
-                            type: 'ABLY_MESSAGE',
-                            sessionId,
-                            message: { name: type, data },
-                            timestamp: Date.now()
-                        });
-                    }
                 } catch (e) {
                     console.error('[WS] Failed to parse message:', e);
                 }
@@ -514,7 +395,7 @@ export function WebSocketProvider({
                 setIsConnecting(false);
 
                 // Schedule reconnect if not intentional close
-                if (event.code !== 1000 && isLeaderRef.current) {
+                if (event.code !== 1000) {
                     scheduleReconnect();
                 }
             };
@@ -532,7 +413,7 @@ export function WebSocketProvider({
             console.error('[WS] Failed to connect:', e);
             setIsConnecting(false);
             setConnectionError(e instanceof Error ? e.message : 'Connection failed');
-            if (isLeaderRef.current && shouldRetryConnectionError(e)) {
+            if (shouldRetryConnectionError(e)) {
                 scheduleReconnect();
             }
         }
@@ -573,266 +454,18 @@ export function WebSocketProvider({
         }
     };
 
-        const becomeLeader = () => {
-            if (isLeaderRef.current) return;
-
-            const now = Date.now();
-            if (now - lastLeaderTimestamp < 1000) {
-
-                return;
-            }
-
-
-            isLeaderRef.current = true;
-            leaderSinceRef.current = now;
-            leaderStatus.set(sessionId, true);
-
-            if (leaderPingIntervalRef.current) {
-                clearInterval(leaderPingIntervalRef.current);
-                leaderPingIntervalRef.current = null;
-            }
-            if (leaderPongTimeoutRef.current) {
-                clearTimeout(leaderPongTimeoutRef.current);
-                leaderPongTimeoutRef.current = null;
-            }
-
-            createWebSocketConnection();
-        };
-
-        const stepDown = (newLeaderTabId: string, newLeaderSince: number) => {
-            if (!isLeaderRef.current) return;
-
-
-            isLeaderRef.current = false;
-            leaderStatus.set(sessionId, false);
-            currentLeaderTabId = newLeaderTabId;
-            currentLeaderSince = newLeaderSince;
-
-            if (ws) {
-                try {
-                    ws.onclose = null;
-                    ws.onerror = null;
-                    ws.onmessage = null;
-                    ws.close(1000, 'Stepping down as leader');
-                } catch (e) {
-                    // Ignore close errors
-                }
-                ws = null;
-                wsRef.current = null;
-                setWsConnection(null);
-            }
-
-            resetReconnect();
-
-            startLeaderHealthCheck();
-        };
-
-        const startLeaderHealthCheck = () => {
-            if (isLeaderRef.current) return;
-
-            // Clear existing interval
-            if (leaderPingIntervalRef.current) {
-                clearInterval(leaderPingIntervalRef.current);
-            }
-
-            leaderPingIntervalRef.current = setInterval(() => {
-                if (!bc || isLeaderRef.current) return;
-
-                bc.postMessage({ type: 'LEADER_PING', sessionId, tabId: TAB_ID });
-
-                leaderPongTimeoutRef.current = setTimeout(() => {
-                    if (!isMountedRef.current || isLeaderRef.current) return;
-
-
-                    isInFailoverRef.current = true;
-
-                    const tabHash = TAB_ID.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
-                    const electionDelay = ELECTION_BASE_DELAY + (tabHash % ELECTION_RANDOM_DELAY);
-
-                    setTimeout(() => {
-                        if (!isMountedRef.current || isLeaderRef.current) return;
-
-                        bc?.postMessage({ type: 'REQUEST_LEADER', sessionId, tabId: TAB_ID });
-
-                        setTimeout(() => {
-                            if (!isMountedRef.current || isLeaderRef.current) return;
-                            becomeLeader();
-                        }, 300);
-                    }, electionDelay);
-                }, LEADER_PING_TIMEOUT);
-            }, LEADER_PING_INTERVAL);
-        };
-
-        const BroadcastChannelCtor = typeof window !== 'undefined'
-            ? (window as any).BroadcastChannel
-            : undefined;
-
-        if (hasBroadcastChannel && typeof BroadcastChannelCtor === 'function') {
-            const broadcastChannel = new BroadcastChannelCtor(channelName) as BroadcastChannel;
-            bc = broadcastChannel;
-            bcRef.current = broadcastChannel;
-            broadcastChannels.set(sessionId, broadcastChannel);
-
-            broadcastChannel.onmessage = (event: MessageEvent<TabMessage>) => {
-                const msg = event.data;
-
-                if (msg.sessionId !== sessionId) return;
-
-                if (msg.type === 'ABLY_MESSAGE' && msg.message) {
-                    handleAblyMessage(msg.message.name, msg.message.data);
-
-                } else if (msg.type === 'LEADER_ANNOUNCE' && msg.tabId !== TAB_ID) {
-
-                    lastLeaderTimestamp = msg.timestamp || Date.now();
-                    const newLeaderSince = msg.leaderSince || Date.now();
-
-                    // Split-brain resolution: older leader wins
-                    if (isLeaderRef.current) {
-                        if (newLeaderSince < leaderSinceRef.current) {
-                            // Other leader is older, we step down
-
-                            stepDown(msg.tabId!, newLeaderSince);
-                        } else {
-                            // We are older, re-announce
-
-                            broadcastChannel.postMessage({
-                                type: 'LEADER_ANNOUNCE',
-                                sessionId,
-                                tabId: TAB_ID,
-                                timestamp: Date.now(),
-                                leaderSince: leaderSinceRef.current,
-                                currentState: {
-                                    state: stateRef.current,
-                                    voteResults: voteResultsRef.current,
-                                    questions: questionsRef.current,
-                                    voteSequence: voteSequenceRef.current,
-                                    qaSequence: qaSequenceRef.current,
-                                }
-                            });
-                            return;
-                        }
-                    }
-
-                    currentLeaderTabId = msg.tabId!;
-                    currentLeaderSince = newLeaderSince;
-                    isLeaderRef.current = false;
-                    leaderStatus.set(sessionId, false);
-                    setIsConnected(true);
-                    setIsConnecting(false);
-
-                    // End failover mode
-                    if (isInFailoverRef.current) {
-                        isInFailoverRef.current = false;
-                        messageBufferRef.current = [];
-                    }
-
-                    if (leaderCheckTimeoutRef.current) {
-                        clearTimeout(leaderCheckTimeoutRef.current);
-                        leaderCheckTimeoutRef.current = null;
-                    }
-
-                    // Apply state from leader if provided
-                    if (msg.currentState) {
-                        if (msg.currentState.state) setState(msg.currentState.state);
-                        if (msg.currentState.voteResults) setVoteResults(msg.currentState.voteResults);
-                        if (msg.currentState.questions) setQuestions(msg.currentState.questions);
-                        syncSequenceRefs(voteSequenceRef, qaSequenceRef, msg.currentState.state);
-                        syncSequenceRefs(voteSequenceRef, qaSequenceRef, msg.currentState);
-                        setInitialStateError(null);
-                        setLastStateSyncAt(Date.now());
-                    } else {
-                        fetchInitialState();
-                    }
-
-                    startLeaderHealthCheck();
-
-                } else if (msg.type === 'REQUEST_LEADER') {
-                    if (isLeaderRef.current) {
-                        broadcastChannel.postMessage({
-                            type: 'LEADER_ANNOUNCE',
-                            sessionId,
-                            tabId: TAB_ID,
-                            timestamp: Date.now(),
-                            leaderSince: leaderSinceRef.current,
-                            currentState: {
-                                state: stateRef.current,
-                                voteResults: voteResultsRef.current,
-                                questions: questionsRef.current,
-                                voteSequence: voteSequenceRef.current,
-                                qaSequence: qaSequenceRef.current,
-                            }
-                        });
-                    }
-
-                } else if (msg.type === 'LEADER_PING' && isLeaderRef.current) {
-                    bc?.postMessage({ type: 'LEADER_PONG', sessionId, tabId: TAB_ID });
-
-                } else if (msg.type === 'LEADER_PONG' && msg.tabId !== TAB_ID) {
-                    lastLeaderTimestamp = Date.now();
-                    if (leaderPongTimeoutRef.current) {
-                        clearTimeout(leaderPongTimeoutRef.current);
-                        leaderPongTimeoutRef.current = null;
-                    }
-
-                } else if (msg.type === 'LEADER_GOODBYE' && msg.tabId !== TAB_ID) {
-
-                    isInFailoverRef.current = true;
-
-                    const tabHash = TAB_ID.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
-                    const electionDelay = ELECTION_BASE_DELAY + (tabHash % ELECTION_RANDOM_DELAY);
-
-                    setTimeout(() => {
-                        if (!isMountedRef.current || isLeaderRef.current) return;
-
-                        bc?.postMessage({ type: 'REQUEST_LEADER', sessionId, tabId: TAB_ID });
-
-                        setTimeout(() => {
-                            if (!isMountedRef.current || isLeaderRef.current) return;
-                            becomeLeader();
-                        }, 300);
-                    }, electionDelay);
-
-                } else if (msg.type === 'STATE_SYNC' && !isLeaderRef.current && msg.currentState) {
-                    // Sync state from leader
-                    if (msg.currentState.state) setState(msg.currentState.state);
-                    if (msg.currentState.voteResults) setVoteResults(msg.currentState.voteResults);
-                    if (msg.currentState.questions) setQuestions(msg.currentState.questions);
-                    syncSequenceRefs(voteSequenceRef, qaSequenceRef, msg.currentState.state);
-                    syncSequenceRefs(voteSequenceRef, qaSequenceRef, msg.currentState);
-                    setInitialStateError(null);
-                    setLastStateSyncAt(Date.now());
-                }
-            };
-
-            broadcastChannel.postMessage({
-                type: 'REQUEST_LEADER',
-                sessionId,
-                tabId: TAB_ID
-            });
-
-            leaderCheckTimeoutRef.current = setTimeout(() => {
-                if (!isMountedRef.current) return;
-                becomeLeader();
-            }, 200);
-
-        } else {
-
-            becomeLeader();
-        }
+        // Every tab has its own direct WebSocket connection
+        createWebSocketConnection();
 
         return () => {
             isMountedRef.current = false;
-            fetchAbortController.abort(); // Cancel any pending fetches
+            fetchAbortController.abort();
 
-            if (isLeaderRef.current && bc) {
-                bc.postMessage({ type: 'LEADER_GOODBYE', sessionId, tabId: TAB_ID });
+            if (reconnectTimeoutId) {
+                clearTimeout(reconnectTimeoutId);
+                reconnectTimeoutId = null;
             }
 
-            if (leaderCheckTimeoutRef.current) clearTimeout(leaderCheckTimeoutRef.current);
-            if (leaderPingIntervalRef.current) clearInterval(leaderPingIntervalRef.current);
-            if (leaderPongTimeoutRef.current) clearTimeout(leaderPongTimeoutRef.current);
-
-            // Close WebSocket connection
             if (ws) {
                 try {
                     ws.onclose = null;
@@ -844,24 +477,8 @@ export function WebSocketProvider({
                 wsRef.current = null;
                 setWsConnection(null);
             }
-
-            // Clear reconnect timeout
-            if (reconnectTimeoutId) {
-                clearTimeout(reconnectTimeoutId);
-                reconnectTimeoutId = null;
-            }
-
-            if (bc) {
-                bc.close();
-                broadcastChannels.delete(sessionId);
-            }
-
-            isLeaderRef.current = false;
-            leaderStatus.delete(sessionId);
-            wsRef.current = null;
-            bcRef.current = null;
         };
-    }, [sessionId, role, name, handleAblyMessage, processBufferedMessages]);
+    }, [sessionId, role, name, handleAblyMessage]);
 
     const refreshState = useCallback(async (
         options?: { includeMyVotes?: boolean }

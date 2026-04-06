@@ -10,7 +10,6 @@ import { StaticSlideEditor } from '@/components/slide-editors/static-slide-edito
 import { PollSlideEditor } from '@/components/slide-editors/poll-slide-editor';
 import { QuizSlideEditor } from '@/components/slide-editors/quiz-slide-editor';
 import { MultipleChoiceSlideEditor } from '@/components/slide-editors/multiple-choice-slide-editor';
-import type { EditorSlide } from '@/lib/optimistic-slide-queue';
 
 export type SlideEditorSaveResult = { status: 'saved' | 'queued' };
 type SlideOption = { id: string; text: string; isCorrect?: boolean };
@@ -38,7 +37,7 @@ function areOptionListsEqual(left: SlideOption[], right: SlideOption[]) {
 }
 
 interface SlideEditorPanelProps {
-    slide: Slide | EditorSlide;
+    slide: Slide;
     onUpdate: (content: SlideContentDraft) => Promise<SlideEditorSaveResult>;
     onSave?: () => void;
     disabled?: boolean;

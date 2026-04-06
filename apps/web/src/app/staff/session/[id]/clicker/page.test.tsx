@@ -14,6 +14,11 @@ const wsMockState = vi.hoisted(() => ({
         stateVersion: 1,
         isPresentationActive: true,
         isResultsVisible: false,
+    } as {
+        currentSlideId: string | null;
+        stateVersion: number;
+        isPresentationActive: boolean;
+        isResultsVisible: boolean;
     },
     isConnected: true,
     isConnecting: false,

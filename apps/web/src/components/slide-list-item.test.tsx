@@ -21,14 +21,16 @@ function makeProps(overrides: Partial<React.ComponentProps<typeof SlideListItem>
         isStructuralSyncing: false,
         innerRef: vi.fn(),
         draggableAttributes: {
-            'data-rbd-draggable-context-id': 'test-context',
-            'data-rbd-draggable-id': 'slide-1',
+            'data-rfd-draggable-context-id': 'test-context',
+            'data-rfd-draggable-id': 'slide-1',
         },
         draggableStyle: {},
         dragHandleProps: {
             tabIndex: 0,
             role: 'button',
             'aria-describedby': 'drag-handle',
+            'data-rfd-drag-handle-context-id': 'test-context',
+            'data-rfd-drag-handle-draggable-id': 'slide-1',
             draggable: false,
             onDragStart: vi.fn(),
         },

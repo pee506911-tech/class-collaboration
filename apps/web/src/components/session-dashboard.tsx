@@ -114,8 +114,8 @@ export function SessionDashboard({ sessionId, isPublic = false }: { sessionId: s
     useEffect(() => {
         // Initial fetch with force flag
         fetchStats(true);
-        // Refresh every 30 seconds
-        const interval = setInterval(() => fetchStats(true), 30000);
+        // Refresh every 60 seconds as safety net (real-time updates come via WS events)
+        const interval = setInterval(() => fetchStats(true), 60000);
         return () => clearInterval(interval);
     }, [sessionId, isPublic]);
 
