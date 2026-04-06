@@ -78,6 +78,101 @@ export function createSlideEditCommitter(
     });
 }
 
+export function createSlideCreateCommitter(
+    sessionId: string,
+    callbacks?: {
+        onSuccess?: (
+            savedSlide: Slide,
+            request: {
+                tempId: string;
+                slideType: Slide['type'];
+                content: Slide['content'];
+                insertAfterSlideId?: string;
+            },
+        ) => void;
+        onError?: (
+            error: unknown,
+            request: {
+                tempId: string;
+                slideType: Slide['type'];
+                content: Slide['content'];
+                insertAfterSlideId?: string;
+            },
+        ) => void;
+    },
+) {
+    let queue = Promise.resolve();
+    const resolvedSlideIds = new Map<string, string>();
+    const pendingSlideIds = new Map<string, Promise<string | undefined>>();
+
+    const resolveInsertAfterSlideId = async (slideId?: string) => {
+        if (!slideId) {
+            return undefined;
+        }
+
+        if (!slideId.startsWith('temp-')) {
+            return slideId;
+        }
+
+        const resolvedSlideId = resolvedSlideIds.get(slideId);
+        if (resolvedSlideId) {
+            return resolvedSlideId;
+        }
+
+        const pendingSlideId = pendingSlideIds.get(slideId);
+        if (!pendingSlideId) {
+            return undefined;
+        }
+
+        return pendingSlideId;
+    };
+
+    return {
+        schedule(request: {
+            tempId: string;
+            slideType: Slide['type'];
+            content: Slide['content'];
+            insertAfterSlideId?: string;
+        }) {
+            let resolvePendingSlideId!: (slideId: string | undefined) => void;
+            const pendingSlideId = new Promise<string | undefined>((resolve) => {
+                resolvePendingSlideId = resolve;
+            });
+            pendingSlideIds.set(request.tempId, pendingSlideId);
+
+            const task = queue
+                .catch(() => undefined)
+                .then(async () => {
+                    const insertAfterSlideId = await resolveInsertAfterSlideId(request.insertAfterSlideId);
+                    const savedSlide = await createSlide(
+                        sessionId,
+                        request.slideType,
+                        request.content,
+                        insertAfterSlideId ? { insertAfterSlideId } : undefined,
+                    );
+                    resolvedSlideIds.set(request.tempId, savedSlide.id);
+                    resolvePendingSlideId(savedSlide.id);
+                    callbacks?.onSuccess?.(savedSlide, {
+                        ...request,
+                        ...(insertAfterSlideId ? { insertAfterSlideId } : {}),
+                    });
+                    return savedSlide;
+                })
+                .catch((error) => {
+                    resolvePendingSlideId(undefined);
+                    callbacks?.onError?.(error, request);
+                    throw error;
+                })
+                .finally(() => {
+                    pendingSlideIds.delete(request.tempId);
+                });
+
+            queue = task.then(() => undefined, () => undefined);
+            return task;
+        },
+    };
+}
+
 /**
  * Create a new slide via HTTP POST.
  * The server will broadcast SLIDES_UPDATE via WebSocket to all connected

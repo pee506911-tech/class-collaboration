@@ -74,13 +74,21 @@ pub(crate) async fn enqueue_slides_update_event(
     slides: &[Slide],
 ) -> Result<()> {
     let state_payload = serde_json::json!({ "slides": slides });
-    crate::services::outbox::enqueue_event(
+    let enqueued_event = crate::services::outbox::enqueue_event(
         tx,
         session_id,
         crate::services::outbox::OutboxEventType::SlidesUpdate,
         &state_payload,
     )
     .await?;
+
+    tracing::info!(
+        session_id = %session_id,
+        slide_count = slides.len(),
+        correlation_id = %enqueued_event.id,
+        sequence_id = enqueued_event.sequence_id,
+        "SPEED_AUDIT: SLIDES_UPDATE event enqueued from slide handler"
+    );
 
     Ok(())
 }

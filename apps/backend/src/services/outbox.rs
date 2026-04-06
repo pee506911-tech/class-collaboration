@@ -13,7 +13,7 @@ const POLL_INTERVAL_MS: u64 = 100;
 const BATCH_SIZE: usize = 50;
 const CLEANUP_AGE_HOURS: i64 = 24;
 const PENDING_EVENTS_QUERY: &str = "
-        SELECT id, sequence_id, session_id, event_type, payload, status, retry_count
+        SELECT id, sequence_id, session_id, event_type, payload, status, retry_count, enqueued_at
         FROM outbox_events
         WHERE status = 'pending' AND retry_count < ?
         ORDER BY
@@ -74,6 +74,7 @@ pub struct OutboxEvent {
     pub payload: serde_json::Value,
     pub status: String,
     pub retry_count: i32,
+    pub enqueued_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,7 +101,7 @@ pub async fn enqueue_event(
     })?;
 
     sqlx::query(
-        "INSERT INTO outbox_events (id, sequence_id, session_id, event_type, payload) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO outbox_events (id, sequence_id, session_id, event_type, payload, enqueued_at) VALUES (?, ?, ?, ?, ?, NOW())",
     )
     .bind(&id)
     .bind(sequence_id)
@@ -109,6 +110,14 @@ pub async fn enqueue_event(
     .bind(sqlx::types::Json(&payload_json))
     .execute(&mut **tx)
     .await?;
+
+    tracing::info!(
+        session_id = %session_id,
+        event_type = %event_type,
+        sequence_id = sequence_id,
+        correlation_id = %id,
+        "SPEED_AUDIT: Event enqueued to outbox"
+    );
 
     Ok(EnqueuedOutboxEvent { id, sequence_id })
 }
@@ -238,6 +247,12 @@ async fn publish_event(
         }
     };
 
+    // Calculate queue wait time (time from enqueue to now)
+    let queue_wait_ms = chrono::Utc::now()
+        .signed_duration_since(event.enqueued_at)
+        .num_milliseconds()
+        .max(0) as u128;
+
     let message_result = match parsed_event_type {
         OutboxEventType::StateUpdate => serde_json::json!({
             "type": "STATE_UPDATE",
@@ -278,6 +293,15 @@ async fn publish_event(
         .await
     {
         Ok(_) => {
+            tracing::info!(
+                session_id = %event.session_id,
+                event_type = %parsed_event_type,
+                sequence_id = event.sequence_id,
+                correlation_id = %event.id,
+                queue_wait_ms = queue_wait_ms,
+                "SPEED_AUDIT: Event published to broadcast channel"
+            );
+            
             if parsed_event_type == OutboxEventType::StateUpdate {
                 tracing::info!(
                     session_id = %event.session_id,
@@ -314,6 +338,8 @@ pub async fn process_pending_batch(
     pool: &Pool<MySql>,
     broadcaster: &dyn Broadcaster,
 ) -> Result<usize, sqlx::Error> {
+    let batch_started_at = std::time::Instant::now();
+    
     let events: Vec<OutboxEvent> = sqlx::query_as(PENDING_EVENTS_QUERY)
         .bind(MAX_RETRIES as i32)
         .bind(BATCH_SIZE as i64)
@@ -339,6 +365,16 @@ pub async fn process_pending_batch(
                 .execute(pool)
                 .await?;
         }
+    }
+
+    if count > 0 {
+        let batch_duration_ms = batch_started_at.elapsed().as_millis();
+        tracing::info!(
+            event_count = count,
+            batch_duration_ms = batch_duration_ms,
+            avg_latency_per_event_ms = if count > 0 { batch_duration_ms / count as u128 } else { 0 },
+            "SPEED_AUDIT: Batch processing completed"
+        );
     }
 
     Ok(count)
@@ -586,6 +622,7 @@ mod tests {
 
     #[test]
     fn prioritize_events_for_delivery_puts_state_updates_ahead_of_vote_bursts() {
+        let now = chrono::Utc::now();
         let prioritized = prioritize_events_for_delivery(vec![
             OutboxEvent {
                 id: "vote-1".to_string(),
@@ -595,6 +632,7 @@ mod tests {
                 payload: serde_json::json!({}),
                 status: "pending".to_string(),
                 retry_count: 0,
+                enqueued_at: now,
             },
             OutboxEvent {
                 id: "vote-2".to_string(),
@@ -604,6 +642,7 @@ mod tests {
                 payload: serde_json::json!({}),
                 status: "pending".to_string(),
                 retry_count: 0,
+                enqueued_at: now,
             },
             OutboxEvent {
                 id: "state-3".to_string(),
@@ -613,6 +652,7 @@ mod tests {
                 payload: serde_json::json!({ "currentSlideId": "slide-3" }),
                 status: "pending".to_string(),
                 retry_count: 0,
+                enqueued_at: now,
             },
         ]);
 
@@ -664,6 +704,7 @@ mod tests {
             payload: serde_json::json!({ "currentSlideId": "slide-1" }),
             status: "pending".to_string(),
             retry_count: 0,
+            enqueued_at: chrono::Utc::now() - chrono::Duration::milliseconds(50),
         };
 
         let success = publish_event(&pool, &spy, &event).await;
@@ -696,6 +737,7 @@ mod tests {
             }),
             status: "pending".to_string(),
             retry_count: 0,
+            enqueued_at: chrono::Utc::now() - chrono::Duration::milliseconds(50),
         };
 
         let success = publish_event(&pool, &spy, &event).await;
@@ -729,6 +771,7 @@ mod tests {
             }),
             status: "pending".to_string(),
             retry_count: 0,
+            enqueued_at: chrono::Utc::now() - chrono::Duration::milliseconds(50),
         };
 
         let success = publish_event(&pool, &spy, &event).await;
@@ -762,6 +805,7 @@ mod tests {
             }),
             status: "pending".to_string(),
             retry_count: 0,
+            enqueued_at: chrono::Utc::now() - chrono::Duration::milliseconds(50),
         };
 
         let success = publish_event(&pool, &spy, &event).await;
@@ -787,6 +831,7 @@ mod tests {
             payload: serde_json::json!({ "currentSlideId": "slide-1" }),
             status: "pending".to_string(),
             retry_count: 0,
+            enqueued_at: chrono::Utc::now() - chrono::Duration::milliseconds(50),
         };
 
         let success = publish_event(&pool, &spy, &event).await;
@@ -811,6 +856,7 @@ mod tests {
             payload: serde_json::json!({}),
             status: "pending".to_string(),
             retry_count: 0,
+            enqueued_at: chrono::Utc::now() - chrono::Duration::milliseconds(50),
         };
 
         let success = publish_event(&pool, &spy, &event).await;
@@ -838,6 +884,7 @@ mod tests {
             }),
             status: "pending".to_string(),
             retry_count: 0,
+            enqueued_at: chrono::Utc::now() - chrono::Duration::milliseconds(50),
         };
 
         publish_event(&pool, &spy, &event).await;

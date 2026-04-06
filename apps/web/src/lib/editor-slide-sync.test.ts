@@ -1,10 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
     reconcileCreatedSlide,
     commitCreateSlide,
     commitDeleteSlide,
     commitReorderSlides,
+    createSlideCreateCommitter,
     createSlideEditCommitter,
 } from './editor-slide-sync';
 
@@ -29,7 +30,18 @@ function deferred<T>() {
     return { promise, resolve, reject };
 }
 
+async function flushQueueTurn() {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 describe('createSlideEditCommitter', () => {
+    beforeEach(() => {
+        apiMocks.createSlide.mockReset();
+        apiMocks.deleteSlide.mockReset();
+        apiMocks.reorderSlides.mockReset();
+        apiMocks.updateSlide.mockReset();
+    });
+
     it('commits the latest queued content for the same slide after the in-flight save settles', async () => {
         const firstSave = deferred<void>();
         const secondSave = deferred<void>();
@@ -60,7 +72,7 @@ describe('createSlideEditCommitter', () => {
 
         firstSave.resolve();
         await firstSave.promise;
-        await Promise.resolve();
+        await flushQueueTurn();
 
         expect(apiMocks.updateSlide).toHaveBeenCalledTimes(2);
         expect(apiMocks.updateSlide).toHaveBeenNthCalledWith(
@@ -76,6 +88,93 @@ describe('createSlideEditCommitter', () => {
 });
 
 describe('slide structural commit helpers', () => {
+    beforeEach(() => {
+        apiMocks.createSlide.mockReset();
+        apiMocks.deleteSlide.mockReset();
+        apiMocks.reorderSlides.mockReset();
+        apiMocks.updateSlide.mockReset();
+    });
+
+    it('waits for a temp insert-after slide to resolve before creating the dependent slide', async () => {
+        const firstCreate = deferred<{ id: string }>();
+        const secondCreate = deferred<{ id: string }>();
+
+        apiMocks.createSlide
+            .mockReturnValueOnce(firstCreate.promise)
+            .mockReturnValueOnce(secondCreate.promise);
+
+        const committer = createSlideCreateCommitter('session-1');
+
+        const firstRequest = committer.schedule({
+            tempId: 'temp-1',
+            slideType: 'static',
+            content: { title: 'First' },
+        });
+
+        const secondRequest = committer.schedule({
+            tempId: 'temp-2',
+            slideType: 'static',
+            content: { title: 'Second' },
+            insertAfterSlideId: 'temp-1',
+        });
+
+        await flushQueueTurn();
+
+        expect(apiMocks.createSlide).toHaveBeenCalledTimes(1);
+        expect(apiMocks.createSlide).toHaveBeenNthCalledWith(
+            1,
+            'session-1',
+            'static',
+            { title: 'First' },
+            undefined,
+        );
+
+        firstCreate.resolve({ id: 'slide-1' });
+        await firstRequest;
+        await flushQueueTurn();
+
+        expect(apiMocks.createSlide).toHaveBeenCalledTimes(2);
+        expect(apiMocks.createSlide).toHaveBeenNthCalledWith(
+            2,
+            'session-1',
+            'static',
+            { title: 'Second' },
+            { insertAfterSlideId: 'slide-1' },
+        );
+
+        secondCreate.resolve({ id: 'slide-2' });
+        await secondRequest;
+    });
+
+    it('falls back to creating without insert-after when the temp dependency failed', async () => {
+        apiMocks.createSlide
+            .mockRejectedValueOnce(new Error('create failed'))
+            .mockResolvedValueOnce({ id: 'slide-2' });
+
+        const committer = createSlideCreateCommitter('session-1');
+
+        await expect(committer.schedule({
+            tempId: 'temp-1',
+            slideType: 'static',
+            content: { title: 'First' },
+        })).rejects.toThrow('create failed');
+
+        await committer.schedule({
+            tempId: 'temp-2',
+            slideType: 'static',
+            content: { title: 'Second' },
+            insertAfterSlideId: 'temp-1',
+        });
+
+        expect(apiMocks.createSlide).toHaveBeenNthCalledWith(
+            2,
+            'session-1',
+            'static',
+            { title: 'Second' },
+            undefined,
+        );
+    });
+
     it('preserves local temp-slide edits when the server confirms the created slide', () => {
         const result = reconcileCreatedSlide({
             localSlide: {

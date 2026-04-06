@@ -211,6 +211,7 @@ pub struct PendingWalEntry {
     pub response_payload: Value,
     pub priority: i32,
     pub retry_count: i32,
+    pub created_at: String,
 }
 
 #[derive(Clone)]
@@ -302,7 +303,16 @@ impl WalStore {
         .await;
 
         match insert_result {
-            Ok(_) => Ok(AppendWalResult::Appended),
+            Ok(_) => {
+                tracing::info!(
+                    session_id = %entry.session_id,
+                    op_type = %entry.op_type,
+                    client_request_id = %entry.client_request_id,
+                    resource_id = ?entry.resource_id,
+                    "SPEED_AUDIT: WAL entry appended (queued for flush)"
+                );
+                Ok(AppendWalResult::Appended)
+            },
             Err(sqlx::Error::Database(db_error))
                 if db_error.message().contains("UNIQUE constraint failed") =>
             {
@@ -340,7 +350,7 @@ impl WalStore {
 
     pub async fn fetch_pending(&self, limit: i64) -> Result<Vec<PendingWalEntry>> {
         let rows = sqlx::query(
-            "SELECT wal_id, op_type, session_id, client_request_id, resource_id, payload, response_payload, priority, retry_count
+            "SELECT wal_id, op_type, session_id, client_request_id, resource_id, payload, response_payload, priority, retry_count, created_at
              FROM wal_entries
              WHERE flushed = 0 AND flush_error IS NULL
              ORDER BY priority ASC, created_at ASC, wal_id ASC
@@ -372,6 +382,7 @@ impl WalStore {
                     })?,
                     priority: row.try_get("priority")?,
                     retry_count: row.try_get("retry_count")?,
+                    created_at: row.try_get("created_at")?,
                 })
             })
             .collect()
@@ -708,6 +719,23 @@ async fn flush_session_group(
     session_id: &str,
     entries: &[PendingWalEntry],
 ) -> Result<usize> {
+    let session_flush_started_at = std::time::Instant::now();
+    let entry_count = entries.len();
+    
+    // Log WAL queue wait time for audit profiling
+    // The created_at timestamp is when the entry was appended to WAL
+    if let Some(first_entry) = entries.first() {
+        tracing::info!(
+            session_id = %session_id,
+            wal_id = first_entry.wal_id,
+            op_type = %first_entry.op_type,
+            client_request_id = %first_entry.client_request_id,
+            entry_count = entry_count,
+            wal_entry_age_ms = first_entry.created_at,
+            "SPEED_AUDIT: WAL session group flush started"
+        );
+    }
+    
     let mut tx = mysql_pool.begin().await?;
     lock_session(&mut tx, session_id).await?;
 
@@ -751,6 +779,17 @@ async fn flush_session_group(
     for entry in entries {
         wal_store.mark_flushed(entry.wal_id).await?;
         flushed += 1;
+    }
+    
+    if flushed > 0 {
+        let flush_duration_ms = session_flush_started_at.elapsed().as_millis();
+        tracing::info!(
+            session_id = %session_id,
+            flushed_count = flushed,
+            flush_duration_ms = flush_duration_ms,
+            avg_ms_per_entry = if flushed > 0 { flush_duration_ms / flushed as u128 } else { 0 },
+            "SPEED_AUDIT: WAL session group flush completed"
+        );
     }
 
     Ok(flushed)

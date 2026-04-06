@@ -64,13 +64,22 @@ pub async fn set_current_slide(
     let should_flush_outbox = update_result.rows_affected() > 0;
     if should_flush_outbox {
         let state_payload = build_state_payload(&session);
-        outbox::enqueue_event(
+        let enqueued_event = outbox::enqueue_event(
             &mut tx,
             &session_id,
             OutboxEventType::StateUpdate,
             &state_payload,
         )
         .await?;
+        
+        tracing::info!(
+            session_id = %session_id,
+            state_version = session.state_version,
+            current_slide_id = ?session.current_slide_id,
+            correlation_id = %enqueued_event.id,
+            sequence_id = enqueued_event.sequence_id,
+            "SPEED_AUDIT: STATE_UPDATE enqueued from set_current_slide"
+        );
     }
 
     tx.commit().await?;
@@ -106,13 +115,22 @@ pub async fn set_results_visibility(
     let should_flush_outbox = update_result.rows_affected() > 0;
     if should_flush_outbox {
         let state_payload = build_state_payload(&session);
-        outbox::enqueue_event(
+        let enqueued_event = outbox::enqueue_event(
             &mut tx,
             &session_id,
             OutboxEventType::StateUpdate,
             &state_payload,
         )
         .await?;
+        
+        tracing::info!(
+            session_id = %session_id,
+            state_version = session.state_version,
+            is_results_visible = session.is_results_visible,
+            correlation_id = %enqueued_event.id,
+            sequence_id = enqueued_event.sequence_id,
+            "SPEED_AUDIT: STATE_UPDATE enqueued from set_results_visibility"
+        );
     }
 
     tx.commit().await?;
@@ -150,13 +168,21 @@ pub async fn update_slide_visibility(
 
     let session = fetch_session(&mut tx, &session_id).await?;
     let state_payload = build_state_payload(&session);
-    outbox::enqueue_event(
+    let enqueued_event = outbox::enqueue_event(
         &mut tx,
         &session_id,
         OutboxEventType::StateUpdate,
         &state_payload,
     )
     .await?;
+    
+    tracing::info!(
+        session_id = %session_id,
+        state_version = session.state_version,
+        correlation_id = %enqueued_event.id,
+        sequence_id = enqueued_event.sequence_id,
+        "SPEED_AUDIT: STATE_UPDATE enqueued from update_slide_visibility"
+    );
 
     tx.commit().await?;
     app_state.outbox_flush_notify.notify_one();
@@ -188,13 +214,21 @@ pub async fn go_live(
     let should_flush_outbox = update_result.rows_affected() > 0;
     if should_flush_outbox {
         let state_payload = build_state_payload(&session);
-        outbox::enqueue_event(
+        let enqueued_event = outbox::enqueue_event(
             &mut tx,
             &session_id,
             OutboxEventType::StateUpdate,
             &state_payload,
         )
         .await?;
+        
+        tracing::info!(
+            session_id = %session_id,
+            state_version = session.state_version,
+            correlation_id = %enqueued_event.id,
+            sequence_id = enqueued_event.sequence_id,
+            "SPEED_AUDIT: STATE_UPDATE enqueued from go_live"
+        );
     }
 
     tx.commit().await?;
@@ -227,13 +261,21 @@ pub async fn stop_live(
     let should_flush_outbox = update_result.rows_affected() > 0;
     if should_flush_outbox {
         let state_payload = build_state_payload(&session);
-        outbox::enqueue_event(
+        let enqueued_event = outbox::enqueue_event(
             &mut tx,
             &session_id,
             OutboxEventType::StateUpdate,
             &state_payload,
         )
         .await?;
+        
+        tracing::info!(
+            session_id = %session_id,
+            state_version = session.state_version,
+            correlation_id = %enqueued_event.id,
+            sequence_id = enqueued_event.sequence_id,
+            "SPEED_AUDIT: STATE_UPDATE enqueued from stop_live"
+        );
     }
 
     tx.commit().await?;

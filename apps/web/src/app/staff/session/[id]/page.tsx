@@ -25,8 +25,8 @@ import { SlideListItem } from '@/components/slide-list-item';
 import { reorderSlidesWithRollback } from '@/lib/slide-reorder';
 import { getNextPreviewSlideId } from '@/lib/slide-preview-selection';
 import {
+    createSlideCreateCommitter,
     createSlideEditCommitter,
-    commitCreateSlide,
     commitDeleteSlide,
     commitReorderSlides,
     normalizeSlides,
@@ -133,11 +133,13 @@ function EditorContent({
         onSuccess: handleSlideSaveSuccess,
         onError: handleSlideSaveError,
     }));
+    const slideCreateCommitterRef = useRef(createSlideCreateCommitter(id));
     useEffect(() => {
         slideEditCommitterRef.current = createSlideEditCommitter(id, {
             onSuccess: handleSlideSaveSuccess,
             onError: handleSlideSaveError,
         });
+        slideCreateCommitterRef.current = createSlideCreateCommitter(id);
     }, [handleSlideSaveError, handleSlideSaveSuccess, id]);
 
     // Slides are the base slides directly (no optimistic wrapper)
@@ -252,7 +254,11 @@ function EditorContent({
         });
 
         // Fire-and-forget: server will broadcast SLIDES_UPDATE which triggers refetch
-        void commitCreateSlide(id, type as Slide['type'], newSlide.content)
+        void slideCreateCommitterRef.current.schedule({
+            tempId,
+            slideType: type as Slide['type'],
+            content: newSlide.content,
+        })
             .then((serverSlide) => {
                 let contentNeedingSync: Slide['content'] | null = null;
                 setBaseSlidesSynced((prev) => normalizeSlides(prev.map((slide) => {
@@ -400,12 +406,12 @@ function EditorContent({
         });
 
         // Fire-and-forget
-        void commitCreateSlide(
-            id,
-            sourceSlide.type,
-            sourceSlide.content,
-            { insertAfterSlideId: sourceSlide.id },
-        )
+        void slideCreateCommitterRef.current.schedule({
+            tempId,
+            slideType: sourceSlide.type,
+            content: sourceSlide.content,
+            insertAfterSlideId: sourceSlide.id,
+        })
             .then((serverSlide) => {
                 let contentNeedingSync: Slide['content'] | null = null;
                 setBaseSlidesSynced((prev) => normalizeSlides(prev.map((slide) => {

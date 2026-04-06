@@ -298,4 +298,58 @@ describe('staff editor duplicate flow', () => {
             );
         });
     });
+
+    it('waits for a temp duplicate to get a real id before duplicating it again', async () => {
+        const firstCreateRequest = deferred<Slide>();
+        const secondCreateRequest = deferred<Slide>();
+        apiMockState.createSlide
+            .mockReturnValueOnce(firstCreateRequest.promise)
+            .mockReturnValueOnce(secondCreateRequest.promise);
+
+        const { default: SlideEditorPage } = await import('./page');
+        render(<SlideEditorPage />);
+
+        await waitFor(() => {
+            expect(editorMockState.latestSlide?.id).toBe('slide-1');
+        });
+
+        fireEvent.click(screen.getByRole('button', { name: /duplicate/i }));
+
+        await waitFor(() => {
+            expect(editorMockState.latestSlide?.id).toMatch(/^temp-/);
+        });
+
+        fireEvent.click(screen.getByRole('button', { name: /duplicate/i }));
+
+        expect(apiMockState.createSlide).toHaveBeenCalledTimes(1);
+
+        firstCreateRequest.resolve(makeSlide({
+            id: 'slide-2',
+            orderIndex: 1,
+            version: 1,
+        }));
+
+        await waitFor(() => {
+            expect(apiMockState.createSlide).toHaveBeenCalledTimes(2);
+        });
+
+        expect(apiMockState.createSlide).toHaveBeenNthCalledWith(
+            2,
+            'test-session-id',
+            'static',
+            { title: 'Original title', body: 'Original body' },
+            { insertAfterSlideId: 'slide-2' },
+        );
+
+        secondCreateRequest.resolve(makeSlide({
+            id: 'slide-3',
+            orderIndex: 2,
+            version: 1,
+        }));
+
+        await waitFor(() => {
+            expect(editorMockState.latestSlide?.id).toBe('slide-3');
+        });
+        expect(toastMock.error).not.toHaveBeenCalledWith('Failed to duplicate slide');
+    });
 });
