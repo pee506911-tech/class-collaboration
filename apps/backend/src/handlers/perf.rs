@@ -48,7 +48,6 @@ pub async fn cleanup_session(
     let pool = app_state.db_pool.pool_fast_fail().await?;
     let cleanup = cleanup_perf_session(
         &pool,
-        &app_state.wal_store,
         &session_id,
         query.delete_creator_user.unwrap_or(false),
     )

@@ -4,7 +4,6 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sqlx::{MySql, Transaction};
 use std::collections::{HashMap, HashSet};
@@ -21,12 +20,6 @@ const MAX_OPTION_IDS: usize = 10;
 const MAX_DEADLOCK_RETRIES: u32 = 3;
 const MY_VOTES_SLIDE_ID_CHUNK_SIZE: usize = 128;
 const VOTE_COUNT_SHARD_COUNT: u32 = 16;
-
-fn decode_wal_response<T: DeserializeOwned>(value: serde_json::Value) -> Result<T> {
-    serde_json::from_value(value).map_err(|error| {
-        AppError::Internal(format!("Failed to decode WAL response payload: {error}"))
-    })
-}
 
 fn resolve_client_request_id(headers: &HeaderMap) -> Result<String> {
     let client_request_id = headers
@@ -1019,8 +1012,9 @@ pub async fn submit_question(
         return Ok((StatusCode::ACCEPTED, Json(ApiResponse::success(existing))).into_response());
     }
 
+    let question_id = Uuid::new_v4().to_string();
     let question = QuestionResponse {
-        id: Uuid::new_v4().to_string(),
+        id: question_id.clone(),
         session_id: session_id.clone(),
         slide_id: payload.slide_id.clone(),
         participant_id: payload.participant_id.clone(),
@@ -1030,35 +1024,46 @@ pub async fn submit_question(
         created_at: None,
     };
 
-    let append_result = app_state
-        .wal_store
-        .append_or_get_existing(crate::services::wal::AppendWalEntry {
-            op_type: crate::services::wal::WalOpType::SubmitQuestion,
-            session_id: session_id.clone(),
-            client_request_id,
-            resource_id: Some(question.id.clone()),
-            payload: serde_json::to_value(crate::services::wal::SubmitQuestionWalPayload {
-                question_id: question.id.clone(),
-                participant_id: question.participant_id.clone(),
-                slide_id: question.slide_id.clone(),
-                content: question.content.clone(),
-            })
-            .map_err(|error| {
-                AppError::Internal(format!("Failed to encode question WAL payload: {error}"))
-            })?,
-            response_payload: serde_json::to_value(&question).map_err(|error| {
-                AppError::Internal(format!("Failed to encode queued question: {error}"))
-            })?,
-            priority: 2,
-        })
-        .await?;
+    let mut tx = pool.begin().await?;
 
-    let question = match append_result {
-        crate::services::wal::AppendWalResult::Appended => question,
-        crate::services::wal::AppendWalResult::Existing { response_payload } => {
-            decode_wal_response::<QuestionResponse>(response_payload)?
-        }
-    };
+    sqlx::query(
+        "INSERT INTO questions (id, session_id, slide_id, participant_id, content, client_request_id)
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&question_id)
+    .bind(&session_id)
+    .bind(question.slide_id.as_deref())
+    .bind(&question.participant_id)
+    .bind(&question.content)
+    .bind(&client_request_id)
+    .execute(&mut *tx)
+    .await?;
+
+    let (sequence, questions) = next_qa_sequence_and_questions(&mut tx, &session_id).await?;
+    let qa_payload = serde_json::json!({
+        "payload": { "questions": questions },
+        "sequence": sequence
+    });
+    crate::services::outbox::enqueue_event(
+        &mut tx,
+        &session_id,
+        crate::services::outbox::OutboxEventType::QaUpdate,
+        &qa_payload,
+    )
+    .await?;
+
+    sqlx::query(
+        "INSERT IGNORE INTO wal_request_replays (session_id, op_type, client_request_id, response_payload)
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(&session_id)
+    .bind(crate::services::wal::WalOpType::SubmitQuestion.to_string())
+    .bind(&client_request_id)
+    .bind(sqlx::types::Json(serde_json::to_value(&question).expect("question should serialize")))
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
 
     Ok((StatusCode::ACCEPTED, Json(ApiResponse::success(question))).into_response())
 }
@@ -1100,43 +1105,64 @@ pub async fn upvote_question(
     )
     .await?
     {
-        return crate::services::wal::queued_success_response(&existing);
+        return Ok(crate::services::wal::queued_success_response(&existing));
     }
 
+    let mut tx = pool.begin().await?;
+
+    let insert_result =
+        sqlx::query("INSERT INTO question_upvotes (question_id, participant_id) VALUES (?, ?)")
+            .bind(&question_id)
+            .bind(&participant_id)
+            .execute(&mut *tx)
+            .await;
+
+    let already_upvoted = match insert_result {
+        Ok(_) => false,
+        Err(ref error) => is_mysql_duplicate_key(error),
+    };
+
+    if !already_upvoted {
+        sqlx::query("UPDATE questions SET upvotes = upvotes + 1 WHERE id = ?")
+            .bind(&question_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    let (sequence, questions) = next_qa_sequence_and_questions(&mut tx, &session_id).await?;
+    let qa_payload = serde_json::json!({
+        "payload": { "questions": questions },
+        "sequence": sequence
+    });
+    crate::services::outbox::enqueue_event(
+        &mut tx,
+        &session_id,
+        crate::services::outbox::OutboxEventType::QaUpdate,
+        &qa_payload,
+    )
+    .await?;
+
+    let updated_upvotes = question.upvotes.saturating_add(if already_upvoted { 0 } else { 1 });
     let response = serde_json::json!({
         "message": "Question upvoted",
-        "upvotes": question.upvotes.saturating_add(1),
-        "alreadyUpvoted": false
+        "upvotes": updated_upvotes,
+        "alreadyUpvoted": already_upvoted
     });
 
-    let append_result = app_state
-        .wal_store
-        .append_or_get_existing(crate::services::wal::AppendWalEntry {
-            op_type: crate::services::wal::WalOpType::UpvoteQuestion,
-            session_id: session_id.clone(),
-            client_request_id,
-            resource_id: Some(question_id.clone()),
-            payload: serde_json::to_value(crate::services::wal::UpvoteQuestionWalPayload {
-                question_id: question_id.clone(),
-                participant_id,
-            })
-            .map_err(|error| {
-                AppError::Internal(format!("Failed to encode upvote WAL payload: {error}"))
-            })?,
-            response_payload: response.clone(),
-            priority: 2,
-        })
-        .await?;
+    sqlx::query(
+        "INSERT IGNORE INTO wal_request_replays (session_id, op_type, client_request_id, response_payload)
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(&session_id)
+    .bind(crate::services::wal::WalOpType::UpvoteQuestion.to_string())
+    .bind(&client_request_id)
+    .bind(sqlx::types::Json(&response))
+    .execute(&mut *tx)
+    .await?;
 
-    match append_result {
-        crate::services::wal::AppendWalResult::Appended => {
-            crate::services::wal::queued_success_response(&response)
-        }
-        crate::services::wal::AppendWalResult::Existing { response_payload } => {
-            let response = decode_wal_response::<serde_json::Value>(response_payload)?;
-            crate::services::wal::queued_success_response(&response)
-        }
-    }
+    tx.commit().await?;
+
+    Ok(crate::services::wal::queued_success_response(&response))
 }
 
 #[derive(Deserialize)]

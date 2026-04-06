@@ -10,14 +10,12 @@ mod tests {
             session_id: "sess-1".to_string(),
             creator_id: "user-1".to_string(),
             deleted_creator_user: true,
-            deleted_wal_entries: 3,
         };
 
         let json = serde_json::to_value(&response).expect("should serialize");
         assert_eq!(json["sessionId"], "sess-1");
         assert_eq!(json["creatorId"], "user-1");
         assert_eq!(json["deletedCreatorUser"], true);
-        assert_eq!(json["deletedWalEntries"], 3);
         // Snake case keys should NOT appear
         assert!(json.get("session_id").is_none());
         assert!(json.get("creator_id").is_none());
@@ -31,12 +29,10 @@ mod tests {
             session_id: "sess-1".to_string(),
             creator_id: "user-1".to_string(),
             deleted_creator_user: false,
-            deleted_wal_entries: 0,
         };
 
         let json = serde_json::to_value(&response).expect("should serialize");
         assert_eq!(json["deletedCreatorUser"], false);
-        assert_eq!(json["deletedWalEntries"], 0);
     }
 
     /// Verifies the SQL deletion order is correct: child tables before parent.

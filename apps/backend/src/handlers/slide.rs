@@ -2,12 +2,11 @@ use std::collections::HashSet;
 
 use axum::{
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::HeaderMap,
     response::IntoResponse,
     Json,
 };
-use serde::de::DeserializeOwned;
-use sqlx::{query_as, query_scalar, MySql, Pool, QueryBuilder, Transaction};
+use sqlx::{query_as, query_scalar, MySql, QueryBuilder, Transaction};
 use uuid::Uuid;
 
 use crate::error::{AppError, Result};
@@ -22,17 +21,6 @@ const ORDER_STEP: i32 = 1024;
 const CLIENT_REQUEST_ID_HEADER: &str = "x-client-request-id";
 const MAX_CLIENT_REQUEST_ID_LEN: usize = 64;
 const MAX_BATCH_SLIDE_COUNT: usize = 50;
-
-enum InsertAfterTarget {
-    Materialized(i32),
-    Pending,
-}
-
-fn deserialize_wal_response<T: DeserializeOwned>(value: serde_json::Value) -> Result<T> {
-    serde_json::from_value(value).map_err(|error| {
-        AppError::Internal(format!("Failed to decode WAL response payload: {error}"))
-    })
-}
 
 fn resolved_client_request_id(
     explicit_client_request_id: Option<String>,
@@ -112,33 +100,47 @@ pub async fn get_slides(
     Ok(Json(ApiResponse::success(slides)))
 }
 
-async fn resolve_insert_after_target(
-    app_state: &crate::AppState,
-    pool: &Pool<MySql>,
+async fn compute_insert_order_index(
+    tx: &mut Transaction<'_, MySql>,
     session_id: &str,
-    insert_after_slide_id: &str,
-) -> Result<Option<InsertAfterTarget>> {
-    let order_index = query_scalar::<_, i32>(
-        "SELECT order_index FROM slides WHERE id = ? AND session_id = ?",
+    insert_after_slide_id: Option<&str>,
+) -> Result<i32> {
+    match insert_after_slide_id {
+        Some(after_id) => allocate_order_after(tx, session_id, after_id).await,
+        None => get_append_order_index(tx, session_id).await,
+    }
+}
+
+async fn lock_session(tx: &mut Transaction<'_, MySql>, session_id: &str) -> Result<()> {
+    let exists = query_scalar::<_, String>(
+        "SELECT id FROM sessions WHERE id = ? FOR UPDATE",
     )
-    .bind(insert_after_slide_id)
     .bind(session_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await?;
 
-    if let Some(order_index) = order_index {
-        return Ok(Some(InsertAfterTarget::Materialized(order_index)));
+    match exists {
+        Some(_) => Ok(()),
+        None => Err(AppError::NotFound("Session not found".to_string())),
     }
+}
 
-    if app_state
-        .wal_store
-        .has_pending_create_slide_resource(session_id, insert_after_slide_id)
-        .await?
-    {
-        return Ok(Some(InsertAfterTarget::Pending));
-    }
+async fn load_slide(
+    tx: &mut Transaction<'_, MySql>,
+    slide_id: &str,
+    session_id: &str,
+) -> Result<Slide> {
+    let slide = query_as::<_, Slide>(
+        "SELECT id, session_id, type, content, order_index, is_hidden, version
+         FROM slides
+         WHERE id = ? AND session_id = ?",
+    )
+    .bind(slide_id)
+    .bind(session_id)
+    .fetch_optional(&mut **tx)
+    .await?;
 
-    Ok(None)
+    slide.ok_or_else(|| AppError::NotFound("Slide not found".to_string()))
 }
 
 /// Create a new slide
@@ -162,92 +164,50 @@ pub async fn create_slide(
     )
     .await?
     {
-        return crate::services::wal::queued_success_response(&existing_slide);
+        return Ok(crate::services::wal::queued_success_response(&existing_slide));
     }
 
-    let predicted_order_index =
-        if let Some(insert_after_slide_id) = payload.insert_after_slide_id.as_deref() {
-            match resolve_insert_after_target(&app_state, &pool, &session_id, insert_after_slide_id)
-                .await?
-            {
-                Some(InsertAfterTarget::Materialized(insert_after_order_index)) => {
-                    insert_after_order_index.saturating_add(1)
-                }
-                Some(InsertAfterTarget::Pending) => {
-                    let max_order_index = query_scalar::<_, Option<i32>>(
-                        "SELECT MAX(order_index) FROM slides WHERE session_id = ?",
-                    )
-                    .bind(&session_id)
-                    .fetch_one(&pool)
-                    .await?;
-                    compute_append_order_index(max_order_index)
-                }
-                None => return Err(AppError::Input("Insert-after slide not found".to_string())),
-            }
-        } else {
-            let max_order_index = query_scalar::<_, Option<i32>>(
-                "SELECT MAX(order_index) FROM slides WHERE session_id = ?",
-            )
-            .bind(&session_id)
-            .fetch_one(&pool)
-            .await?;
-            compute_append_order_index(max_order_index)
-        };
+    let slide_id = Uuid::new_v4().to_string();
+    let slide_type = payload.slide_type.clone();
+    let content = payload.content.clone();
+    let insert_after = payload.insert_after_slide_id.clone();
 
-    let slide = Slide {
-        id: Uuid::new_v4().to_string(),
-        session_id: session_id.clone(),
-        slide_type: payload.slide_type.clone(),
-        content: sqlx::types::Json(payload.content.clone()),
-        order_index: predicted_order_index,
-        is_hidden: false,
-        version: 0,
-    };
+    let mut tx = pool.begin().await?;
+    lock_session(&mut tx, &session_id).await?;
 
-    let append_result = app_state
-        .wal_store
-        .append_or_get_existing(crate::services::wal::AppendWalEntry {
-            op_type: crate::services::wal::WalOpType::CreateSlide,
-            session_id: session_id.clone(),
-            client_request_id: client_request_id.clone(),
-            resource_id: Some(slide.id.clone()),
-            payload: serde_json::to_value(crate::services::wal::CreateSlideWalPayload {
-                slide_id: slide.id.clone(),
-                slide_type: slide.slide_type.clone(),
-                content: slide.content.0.clone(),
-                insert_after_slide_id: payload.insert_after_slide_id.clone(),
-            })
-            .map_err(|error| {
-                AppError::Internal(format!("Failed to encode WAL payload: {error}"))
-            })?,
-            response_payload: serde_json::to_value(&slide).map_err(|error| {
-                AppError::Internal(format!("Failed to encode queued slide: {error}"))
-            })?,
-            priority: 3,
-        })
-        .await?;
+    let order_index = compute_insert_order_index(&mut tx, &session_id, insert_after.as_deref()).await?;
 
-    match append_result {
-        crate::services::wal::AppendWalResult::Appended => {
-            // Wait for the WAL entry to be flushed and replayed to MySQL
-            // before returning. This ensures the slide actually exists in
-            // the database when the response is received, preventing
-            // race conditions with insert-after-slide-id references.
-            let saved_slide = crate::services::wal::wait_for_replay_response::<Slide>(
-                &pool,
-                &session_id,
-                crate::services::wal::WalOpType::CreateSlide,
-                &client_request_id,
-                std::time::Duration::from_secs(5),
-            )
-            .await?;
-            crate::services::wal::queued_success_response(&saved_slide)
-        }
-        crate::services::wal::AppendWalResult::Existing { response_payload } => {
-            let slide = deserialize_wal_response::<Slide>(response_payload)?;
-            crate::services::wal::queued_success_response(&slide)
-        }
-    }
+    sqlx::query(
+        "INSERT INTO slides (id, session_id, type, content, order_index, client_request_id)
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&slide_id)
+    .bind(&session_id)
+    .bind(&slide_type)
+    .bind(sqlx::types::Json(&content))
+    .bind(order_index)
+    .bind(&client_request_id)
+    .execute(&mut *tx)
+    .await?;
+
+    let slide = load_slide(&mut tx, &slide_id, &session_id).await?;
+    enqueue_slides_update_event(&mut tx, &session_id, &[slide.clone()]).await?;
+
+    sqlx::query(
+        "INSERT IGNORE INTO wal_request_replays (session_id, op_type, client_request_id, response_payload)
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(&session_id)
+    .bind(crate::services::wal::WalOpType::CreateSlide.to_string())
+    .bind(&client_request_id)
+    .bind(sqlx::types::Json(serde_json::to_value(&slide).expect("slide should serialize")))
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    app_state.session_service.invalidate_session_cache(&session_id).await;
+
+    Ok(crate::services::wal::queued_success_response(&slide))
 }
 
 /// Create multiple slides in a single atomic operation.
@@ -263,7 +223,6 @@ pub async fn create_slides_batch(
     let pool = app_state.db_pool.pool_fast_fail().await?;
     verify_session_ownership(&pool, &session_id, &user_id).await?;
 
-    // Validate batch size
     if payload.slides.is_empty() {
         return Err(AppError::Input("No slides to create".to_string()));
     }
@@ -285,251 +244,75 @@ pub async fn create_slides_batch(
         )
         .await?
     {
-        return crate::services::wal::queued_success_response(&existing);
+        return Ok(crate::services::wal::queued_success_response(&existing));
     }
 
-    let mut next_order_index =
-        query_scalar::<_, Option<i32>>("SELECT MAX(order_index) FROM slides WHERE session_id = ?")
-            .bind(&session_id)
-            .fetch_one(&pool)
-            .await?
-            .map(|value| value.saturating_add(ORDER_STEP))
-            .unwrap_or(0);
+    let slide_specs: Vec<_> = payload.slides.iter().map(|s| {
+        (
+            Uuid::new_v4().to_string(),
+            s.slide_type.clone(),
+            s.content.clone(),
+        )
+    }).collect();
 
-    let created_slides: Vec<Slide> = payload
-        .slides
-        .iter()
-        .map(|slide_req| {
-            let slide = Slide {
-                id: Uuid::new_v4().to_string(),
-                session_id: session_id.clone(),
-                slide_type: slide_req.slide_type.clone(),
-                content: sqlx::types::Json(slide_req.content.clone()),
-                order_index: next_order_index,
-                is_hidden: false,
-                version: 0,
-            };
-            next_order_index = next_order_index.saturating_add(ORDER_STEP);
-            slide
-        })
-        .collect();
+    let mut tx = pool.begin().await?;
+    lock_session(&mut tx, &session_id).await?;
 
-    let state_version =
-        sqlx::query_scalar::<_, i64>("SELECT state_version FROM sessions WHERE id = ?")
-            .bind(&session_id)
-            .fetch_one(&pool)
-            .await?;
+    let mut next_order_index = get_append_order_index(&mut tx, &session_id).await?;
 
-    let response = CreateSlidesBatchResponse {
-        slides: created_slides,
-        state_version: state_version.saturating_add(1),
-    };
-
-    let append_result = app_state
-        .wal_store
-        .append_or_get_existing(crate::services::wal::AppendWalEntry {
-            op_type: crate::services::wal::WalOpType::CreateSlidesBatch,
-            session_id: session_id.clone(),
-            client_request_id: client_request_id.clone(),
-            resource_id: response.slides.first().map(|slide| slide.id.clone()),
-            payload: serde_json::to_value(crate::services::wal::CreateSlidesBatchWalPayload {
-                slides: response
-                    .slides
-                    .iter()
-                    .map(|slide| crate::services::wal::CreateSlidesBatchWalItem {
-                        slide_id: slide.id.clone(),
-                        slide_type: slide.slide_type.clone(),
-                        content: slide.content.0.clone(),
-                    })
-                    .collect(),
-            })
-            .map_err(|error| {
-                AppError::Internal(format!("Failed to encode batch WAL payload: {error}"))
-            })?,
-            response_payload: serde_json::to_value(&response).map_err(|error| {
-                AppError::Internal(format!("Failed to encode batch response: {error}"))
-            })?,
-            priority: 3,
-        })
+    let mut created_slides = Vec::with_capacity(slide_specs.len());
+    for (slide_id, slide_type, content) in slide_specs {
+        sqlx::query(
+            "INSERT INTO slides (id, session_id, type, content, order_index, client_request_id)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&slide_id)
+        .bind(&session_id)
+        .bind(&slide_type)
+        .bind(sqlx::types::Json(&content))
+        .bind(next_order_index)
+        .bind(&client_request_id)
+        .execute(&mut *tx)
         .await?;
 
-    match append_result {
-        crate::services::wal::AppendWalResult::Appended => {
-            // Wait for the WAL entry to be flushed and replayed to MySQL
-            // before returning. This ensures the slides actually exist in
-            // the database when the response is received.
-            let saved_response = crate::services::wal::wait_for_replay_response::<CreateSlidesBatchResponse>(
-                &pool,
-                &session_id,
-                crate::services::wal::WalOpType::CreateSlidesBatch,
-                &client_request_id,
-                std::time::Duration::from_secs(5),
-            )
-            .await?;
-            crate::services::wal::queued_success_response(&saved_response)
-        }
-        crate::services::wal::AppendWalResult::Existing { response_payload } => {
-            let response = deserialize_wal_response::<CreateSlidesBatchResponse>(response_payload)?;
-            crate::services::wal::queued_success_response(&response)
-        }
-    }
-}
-
-async fn find_batch_by_client_request_id(
-    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
-    session_id: &str,
-    client_request_id: &str,
-) -> Result<Option<CreateSlidesBatchResponse>> {
-    // Check slide_update_requests for slides created with this batch client_request_id
-    let slides: Vec<Slide> = query_as::<_, Slide>(
-        "SELECT id, session_id, type, content, order_index, is_hidden, version FROM slides WHERE session_id = ? AND client_request_id = ? ORDER BY order_index ASC, id ASC",
-    )
-    .bind(session_id)
-    .bind(client_request_id)
-    .fetch_all(&mut **tx)
-    .await?;
-
-    if slides.is_empty() {
-        return Ok(None);
+        let slide = load_slide(&mut tx, &slide_id, &session_id).await?;
+        created_slides.push(slide);
+        next_order_index = next_order_index.saturating_add(ORDER_STEP);
     }
 
-    let state_version = sqlx::query_scalar("SELECT state_version FROM sessions WHERE id = ?")
-        .bind(session_id)
-        .fetch_one(&mut **tx)
+    sqlx::query("UPDATE sessions SET state_version = state_version + 1 WHERE id = ?")
+        .bind(&session_id)
+        .execute(&mut *tx)
         .await?;
 
-    Ok(Some(CreateSlidesBatchResponse {
-        slides,
-        state_version,
-    }))
-}
-
-async fn store_batch_client_request_id(
-    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
-    session_id: &str,
-    client_request_id: &str,
-    slides: &[Slide],
-) -> Result<()> {
-    // We use the existing slide_update_requests table for idempotency.
-    // Store the first slide's id as the slide_id in the idempotency table.
-    if slides.is_empty() {
-        return Ok(());
-    }
-    let response_slide = serde_json::to_value(slides)
-        .map_err(|e| AppError::Internal(format!("Failed to serialize batch response: {}", e)))?;
-    let request_payload = serde_json::json!({"batch": true, "slideCount": slides.len()});
+    enqueue_slides_update_event(&mut tx, &session_id, &created_slides).await?;
 
     sqlx::query(
-        "INSERT INTO slide_update_requests (session_id, client_request_id, slide_id, request_payload, response_slide) VALUES (?, ?, ?, ?, ?)",
+        "INSERT IGNORE INTO wal_request_replays (session_id, op_type, client_request_id, response_payload)
+         VALUES (?, ?, ?, ?)",
     )
-    .bind(session_id)
-    .bind(client_request_id)
-    .bind(&slides[0].id)
-    .bind(sqlx::types::Json(&request_payload))
-    .bind(sqlx::types::Json(&response_slide))
-    .execute(&mut **tx)
+    .bind(&session_id)
+    .bind(crate::services::wal::WalOpType::CreateSlidesBatch.to_string())
+    .bind(&client_request_id)
+    .bind(sqlx::types::Json(serde_json::to_value(&CreateSlidesBatchResponse {
+        slides: created_slides.clone(),
+        state_version: 0,
+    }).expect("batch response should serialize")))
+    .execute(&mut *tx)
     .await?;
 
-    Ok(())
-}
+    tx.commit().await?;
+    app_state.session_service.invalidate_session_cache(&session_id).await;
 
-async fn find_slide_by_client_request_id(
-    tx: &mut Transaction<'_, MySql>,
-    session_id: &str,
-    client_request_id: &str,
-) -> Result<Option<Slide>> {
-    let slide = query_as::<_, Slide>(
-        "SELECT id, session_id, type, content, order_index, is_hidden, version FROM slides WHERE session_id = ? AND client_request_id = ? LIMIT 1",
-    )
-    .bind(session_id)
-    .bind(client_request_id)
-    .fetch_optional(&mut **tx)
-    .await?;
+    let state_version = sqlx::query_scalar::<_, i64>("SELECT state_version FROM sessions WHERE id = ?")
+        .bind(&session_id)
+        .fetch_one(&pool)
+        .await?;
 
-    Ok(slide)
-}
-
-fn is_mysql_duplicate_key(e: &sqlx::Error) -> bool {
-    match e {
-        sqlx::Error::Database(db_err) => {
-            db_err.message().contains("Duplicate entry")
-                || db_err.code().as_deref() == Some("23000")
-                || db_err.code().as_deref() == Some("1062")
-        }
-        _ => false,
-    }
-}
-
-fn is_app_error_mysql_duplicate_key(e: &AppError) -> bool {
-    match e {
-        AppError::Database(sqlx_err) => is_mysql_duplicate_key(sqlx_err),
-        _ => false,
-    }
-}
-
-fn is_deadlock_error(e: &sqlx::Error) -> bool {
-    match e {
-        sqlx::Error::Database(db_err) => {
-            db_err.code().as_deref() == Some("40001")
-                || db_err.code().as_deref() == Some("1205")
-                || db_err.message().contains("Deadlock found")
-                || db_err.message().contains("Lock wait timeout exceeded")
-        }
-        _ => false,
-    }
-}
-
-fn is_app_error_transient_slide_create(e: &AppError) -> bool {
-    match e {
-        AppError::Database(sqlx_err) => is_deadlock_error(sqlx_err),
-        _ => false,
-    }
-}
-
-fn is_app_error_transient_slide_update(e: &AppError) -> bool {
-    match e {
-        AppError::Database(sqlx_err) => is_deadlock_error(sqlx_err),
-        _ => false,
-    }
-}
-
-async fn fetch_slide_by_client_request_id(
-    pool: &crate::db::DbPool,
-    session_id: &str,
-    client_request_id: &str,
-) -> Result<Option<Slide>> {
-    let slide = query_as::<_, Slide>(
-        "SELECT id, session_id, type, content, order_index, is_hidden, version FROM slides WHERE session_id = ? AND client_request_id = ? LIMIT 1",
-    )
-    .bind(session_id)
-    .bind(client_request_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(slide)
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct SlideUpdateReplay {
-    slide_id: String,
-    request_payload: sqlx::types::Json<UpdateSlideRequest>,
-    response_slide: Option<sqlx::types::Json<Slide>>,
-}
-
-async fn fetch_slide_update_replay(
-    pool: &crate::db::DbPool,
-    session_id: &str,
-    client_request_id: &str,
-) -> Result<Option<SlideUpdateReplay>> {
-    let replay = query_as::<_, SlideUpdateReplay>(
-        "SELECT slide_id, request_payload, response_slide FROM slide_update_requests WHERE session_id = ? AND client_request_id = ? LIMIT 1",
-    )
-    .bind(session_id)
-    .bind(client_request_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(replay)
+    Ok(crate::services::wal::queued_success_response(&CreateSlidesBatchResponse {
+        slides: created_slides,
+        state_version,
+    }))
 }
 
 fn extract_client_request_id(headers: &HeaderMap) -> Result<Option<String>> {
@@ -569,36 +352,21 @@ pub async fn update_slide(
     )
     .await?
     {
-        return crate::services::wal::queued_success_response(&existing);
+        return Ok(crate::services::wal::queued_success_response(&existing));
     }
 
-    let existing_slide = if let Some(pending_slide) = app_state
-        .wal_store
-        .fetch_latest_pending_response::<Slide>(
-            &session_id,
-            &slide_id,
-            crate::services::wal::WalOpType::UpdateSlide,
-        )
-        .await?
-    {
-        pending_slide
-    } else {
-        query_as::<_, Slide>(
-            "SELECT id, session_id, type, content, order_index, is_hidden, version FROM slides WHERE id = ? AND session_id = ?",
-        )
-        .bind(&slide_id)
-        .bind(&session_id)
-        .fetch_optional(&pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Slide not found".to_string()))?
-    };
+    let existing_slide = query_as::<_, Slide>(
+        "SELECT id, session_id, type, content, order_index, is_hidden, version FROM slides WHERE id = ? AND session_id = ?",
+    )
+    .bind(&slide_id)
+    .bind(&session_id)
+    .fetch_optional(&pool)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Slide not found".to_string()))?;
 
     if let Some(base_version) = payload.base_version {
         if base_version != existing_slide.version {
-            return Err(build_slide_version_conflict(
-                &slide_id,
-                existing_slide.version,
-            ));
+            return Err(build_slide_version_conflict(&slide_id, existing_slide.version));
         }
     }
 
@@ -621,54 +389,44 @@ pub async fn update_slide(
     }
 
     if !has_changes {
-        return Ok((StatusCode::OK, Json(ApiResponse::success(existing_slide))));
+        return Ok(Json(ApiResponse::success(existing_slide)));
     }
 
-    updated_slide.version = existing_slide.version + 1;
+    let expected_version = payload.base_version.unwrap_or(existing_slide.version);
 
-    let append_result = app_state
-        .wal_store
-        .append_or_get_existing(crate::services::wal::AppendWalEntry {
-            op_type: crate::services::wal::WalOpType::UpdateSlide,
-            session_id: session_id.clone(),
-            client_request_id: client_request_id.clone(),
-            resource_id: Some(slide_id.clone()),
-            payload: serde_json::to_value(crate::services::wal::UpdateSlideWalPayload {
-                slide_id: slide_id.clone(),
-                slide_type: payload.slide_type.clone(),
-                content: payload.content.clone(),
-                base_version: payload.base_version,
-            })
-            .map_err(|error| {
-                AppError::Internal(format!("Failed to encode update WAL payload: {error}"))
-            })?,
-            response_payload: serde_json::to_value(&updated_slide).map_err(|error| {
-                AppError::Internal(format!("Failed to encode updated slide: {error}"))
-            })?,
-            priority: 1,
-        })
-        .await?;
+    let mut tx = pool.begin().await?;
+    lock_session(&mut tx, &session_id).await?;
 
-    match append_result {
-        crate::services::wal::AppendWalResult::Appended => {
-            // Wait for the WAL entry to be flushed and replayed to MySQL
-            // before returning. This ensures the slide update actually
-            // exists in the database when the response is received.
-            let saved_slide = crate::services::wal::wait_for_replay_response::<Slide>(
-                &pool,
-                &session_id,
-                crate::services::wal::WalOpType::UpdateSlide,
-                &client_request_id,
-                std::time::Duration::from_secs(5),
-            )
-            .await?;
-            crate::services::wal::queued_success_response(&saved_slide)
-        }
-        crate::services::wal::AppendWalResult::Existing { response_payload } => {
-            let slide = deserialize_wal_response::<Slide>(response_payload)?;
-            crate::services::wal::queued_success_response(&slide)
-        }
-    }
+    sqlx::query(
+        "UPDATE slides SET type = ?, content = ?, version = version + 1
+         WHERE id = ? AND session_id = ? AND version = ?",
+    )
+    .bind(&updated_slide.slide_type)
+    .bind(&updated_slide.content)
+    .bind(&slide_id)
+    .bind(&session_id)
+    .bind(expected_version)
+    .execute(&mut *tx)
+    .await?;
+
+    let slide = load_slide(&mut tx, &slide_id, &session_id).await?;
+    enqueue_slides_update_event(&mut tx, &session_id, &[slide.clone()]).await?;
+
+    sqlx::query(
+        "INSERT IGNORE INTO wal_request_replays (session_id, op_type, client_request_id, response_payload)
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(&session_id)
+    .bind(crate::services::wal::WalOpType::UpdateSlide.to_string())
+    .bind(&client_request_id)
+    .bind(sqlx::types::Json(serde_json::to_value(&slide).expect("slide should serialize")))
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    app_state.session_service.invalidate_session_cache(&session_id).await;
+
+    Ok(crate::services::wal::queued_success_response(&slide))
 }
 
 fn build_slide_version_conflict(slide_id: &str, current_version: i64) -> AppError {
@@ -702,76 +460,52 @@ pub async fn delete_slide(
     )
     .await?
     {
-        return crate::services::wal::queued_success_response(&existing);
+        return Ok(crate::services::wal::queued_success_response(&existing));
     }
 
-    let slide_exists: i64 =
-        query_scalar("SELECT EXISTS(SELECT 1 FROM slides WHERE id = ? AND session_id = ?)")
-            .bind(&slide_id)
-            .bind(&session_id)
-            .fetch_one(&pool)
-            .await?;
-    if slide_exists == 0 {
+    let mut tx = pool.begin().await?;
+    lock_session(&mut tx, &session_id).await?;
+
+    let deleted = sqlx::query("DELETE FROM slides WHERE id = ? AND session_id = ?")
+        .bind(&slide_id)
+        .bind(&session_id)
+        .execute(&mut *tx)
+        .await?;
+
+    if deleted.rows_affected() == 0 {
         return Err(AppError::NotFound("Slide not found".to_string()));
     }
 
-    let append_result = app_state
-        .wal_store
-        .append_or_get_existing(crate::services::wal::AppendWalEntry {
-            op_type: crate::services::wal::WalOpType::DeleteSlide,
-            session_id: session_id.clone(),
-            client_request_id: client_request_id.clone(),
-            resource_id: Some(slide_id.clone()),
-            payload: serde_json::to_value(crate::services::wal::DeleteSlideWalPayload {
-                slide_id: slide_id.clone(),
-            })
-            .map_err(|error| {
-                AppError::Internal(format!("Failed to encode delete WAL payload: {error}"))
-            })?,
-            response_payload: response.clone(),
-            priority: 3,
-        })
-        .await?;
-
-    match append_result {
-        crate::services::wal::AppendWalResult::Appended => {
-            // Wait for the WAL entry to be flushed and replayed to MySQL
-            // before returning. This ensures the slide is actually deleted
-            // from the database when the response is received.
-            crate::services::wal::wait_for_replay_response::<serde_json::Value>(
-                &pool,
-                &session_id,
-                crate::services::wal::WalOpType::DeleteSlide,
-                &client_request_id,
-                std::time::Duration::from_secs(5),
-            )
-            .await?;
-            crate::services::wal::queued_success_response(&response)
-        }
-        crate::services::wal::AppendWalResult::Existing { response_payload } => {
-            let response = deserialize_wal_response::<serde_json::Value>(response_payload)?;
-            crate::services::wal::queued_success_response(&response)
-        }
-    }
-}
-
-async fn find_slide_delete_by_client_request_id(
-    tx: &mut Transaction<'_, MySql>,
-    session_id: &str,
-    client_request_id: &str,
-) -> Result<Option<String>> {
-    let slide_id = query_scalar::<_, String>(
-        "SELECT slide_id FROM slide_delete_requests WHERE session_id = ? AND client_request_id = ? LIMIT 1",
+    sqlx::query(
+        "INSERT IGNORE INTO slide_delete_requests (session_id, client_request_id, slide_id)
+         VALUES (?, ?, ?)",
     )
-    .bind(session_id)
-    .bind(client_request_id)
-    .fetch_optional(&mut **tx)
+    .bind(&session_id)
+    .bind(&client_request_id)
+    .bind(&slide_id)
+    .execute(&mut *tx)
     .await?;
 
-    Ok(slide_id)
+    enqueue_slides_update_event(&mut tx, &session_id, &[]).await?;
+
+    sqlx::query(
+        "INSERT IGNORE INTO wal_request_replays (session_id, op_type, client_request_id, response_payload)
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(&session_id)
+    .bind(crate::services::wal::WalOpType::DeleteSlide.to_string())
+    .bind(&client_request_id)
+    .bind(sqlx::types::Json(&response))
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    app_state.session_service.invalidate_session_cache(&session_id).await;
+
+    Ok(crate::services::wal::queued_success_response(&response))
 }
 
-/// Reorder slides
+/// Reorder slides by setting new order_index values
 pub async fn reorder_slides(
     State(app_state): State<crate::AppState>,
     AuthUser { user_id, .. }: AuthUser,
@@ -792,87 +526,56 @@ pub async fn reorder_slides(
     )
     .await?
     {
-        return crate::services::wal::queued_success_response(&existing);
+        return Ok(crate::services::wal::queued_success_response(&existing));
     }
 
     if payload.slide_ids.is_empty() {
         return Err(AppError::Input("No slides to reorder".to_string()));
     }
 
-    // Lock only the session row (single-row lock), not all slides.
-    // Validate that all requested slide IDs belong to this session using a
-    // non-locking read. The session-level lock from lock_owned_session provides
-    // isolation for this session's data.
+    let mut tx = pool.begin().await?;
+    lock_session(&mut tx, &session_id).await?;
+
     let session_slide_ids = query_scalar::<_, String>(
         "SELECT id FROM slides WHERE session_id = ? ORDER BY order_index ASC, id ASC",
     )
     .bind(&session_id)
-    .fetch_all(&pool)
+    .fetch_all(&mut *tx)
     .await?;
 
     validate_reorder_payload(&session_slide_ids, &payload.slide_ids)?;
 
-    if session_slide_ids == payload.slide_ids {
-        return Ok((StatusCode::OK, Json(ApiResponse::success(response))));
+    if session_slide_ids != payload.slide_ids {
+        let changed_slide_ids = collect_changed_slide_ids(&session_slide_ids, &payload.slide_ids);
+        let temporary_assignments = build_temporary_order_assignments(&changed_slide_ids);
+        let final_assignments = build_final_order_assignments(&session_slide_ids, &payload.slide_ids);
+
+        apply_order_assignments(&mut tx, &session_id, &temporary_assignments).await?;
+        apply_order_assignments(&mut tx, &session_id, &final_assignments).await?;
     }
 
-    let append_result = app_state
-        .wal_store
-        .append_or_get_existing(crate::services::wal::AppendWalEntry {
-            op_type: crate::services::wal::WalOpType::ReorderSlides,
-            session_id: session_id.clone(),
-            client_request_id: client_request_id.clone(),
-            resource_id: None,
-            payload: serde_json::to_value(crate::services::wal::ReorderSlidesWalPayload {
-                slide_ids: payload.slide_ids.clone(),
-            })
-            .map_err(|error| {
-                AppError::Internal(format!("Failed to encode reorder WAL payload: {error}"))
-            })?,
-            response_payload: response.clone(),
-            priority: 3,
-        })
+    sqlx::query("UPDATE sessions SET state_version = state_version + 1 WHERE id = ?")
+        .bind(&session_id)
+        .execute(&mut *tx)
         .await?;
 
-    match append_result {
-        crate::services::wal::AppendWalResult::Appended => {
-            // Wait for the WAL entry to be flushed and replayed to MySQL
-            // before returning. This ensures the reorder is actually applied
-            // in the database when the response is received.
-            crate::services::wal::wait_for_replay_response::<serde_json::Value>(
-                &pool,
-                &session_id,
-                crate::services::wal::WalOpType::ReorderSlides,
-                &client_request_id,
-                std::time::Duration::from_secs(5),
-            )
-            .await?;
-            crate::services::wal::queued_success_response(&response)
-        }
-        crate::services::wal::AppendWalResult::Existing { response_payload } => {
-            let response = deserialize_wal_response::<serde_json::Value>(response_payload)?;
-            crate::services::wal::queued_success_response(&response)
-        }
-    }
-}
+    enqueue_slides_update_event(&mut tx, &session_id, &[]).await?;
 
-async fn lock_owned_session(
-    tx: &mut Transaction<'_, MySql>,
-    session_id: &str,
-    user_id: &str,
-) -> Result<()> {
-    let exists = query_scalar::<_, String>(
-        "SELECT id FROM sessions WHERE id = ? AND creator_id = ? FOR UPDATE",
+    sqlx::query(
+        "INSERT IGNORE INTO wal_request_replays (session_id, op_type, client_request_id, response_payload)
+         VALUES (?, ?, ?, ?)",
     )
-    .bind(session_id)
-    .bind(user_id)
-    .fetch_optional(&mut **tx)
+    .bind(&session_id)
+    .bind(crate::services::wal::WalOpType::ReorderSlides.to_string())
+    .bind(&client_request_id)
+    .bind(sqlx::types::Json(&response))
+    .execute(&mut *tx)
     .await?;
 
-    match exists {
-        Some(_) => Ok(()),
-        None => Err(AppError::Auth("Unauthorized access to session".to_string())),
-    }
+    tx.commit().await?;
+    app_state.session_service.invalidate_session_cache(&session_id).await;
+
+    Ok(crate::services::wal::queued_success_response(&response))
 }
 
 pub(crate) async fn get_append_order_index(
@@ -1324,44 +1027,5 @@ mod tests {
             }
             _ => panic!("expected Conflict error"),
         }
-    }
-
-    // --- is_app_error_transient_slide_create/update tests ---
-
-    /// Deadlock errors are classified as transient and should be retried.
-    #[test]
-    fn is_app_error_transient_slide_create_identifies_deadlock() {
-        let deadlock = AppError::Database(sqlx::Error::Protocol(
-            "Deadlock found when trying to get lock".to_string(),
-        ));
-        // Note: The actual is_deadlock_error checks error codes, not message text.
-        // With a Protocol error it won't match — this tests the negative path.
-        assert!(!is_app_error_transient_slide_create(&deadlock));
-    }
-
-    /// Non-database errors are NOT transient.
-    #[test]
-    fn is_app_error_transient_slide_create_rejects_non_database_errors() {
-        let input_err = AppError::Input("bad input".to_string());
-        assert!(!is_app_error_transient_slide_create(&input_err));
-
-        let auth_err = AppError::Auth("unauthorized".to_string());
-        assert!(!is_app_error_transient_slide_create(&auth_err));
-
-        let conflict_err = AppError::Conflict {
-            message: "conflict".to_string(),
-            data: None,
-        };
-        assert!(!is_app_error_transient_slide_create(&conflict_err));
-    }
-
-    /// Same negative path for slide update — only deadlock is transient.
-    #[test]
-    fn is_app_error_transient_slide_update_rejects_non_database_errors() {
-        let input_err = AppError::Input("bad input".to_string());
-        assert!(!is_app_error_transient_slide_update(&input_err));
-
-        let not_found = AppError::NotFound("slide not found".to_string());
-        assert!(!is_app_error_transient_slide_update(&not_found));
     }
 }
