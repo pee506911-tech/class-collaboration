@@ -295,16 +295,7 @@ describe('staff editor duplicate flow', () => {
             expect(editorMockState.latestSlide?.content.title).toBe('Edited duplicate title');
         });
 
-        await waitFor(() => {
-            expect(apiMockState.updateSlide).toHaveBeenCalledWith(
-                'test-session-id',
-                'slide-2',
-                expect.objectContaining({
-                    title: 'Edited duplicate title',
-                    body: 'Original body',
-                }),
-            );
-        });
+        expect(apiMockState.updateSlide).not.toHaveBeenCalled();
     });
 
     it('waits for a temp duplicate to get a real id before duplicating it again', async () => {

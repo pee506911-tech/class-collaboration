@@ -142,6 +142,7 @@ function EditorContent({
     const [isSavingSettings, setIsSavingSettings] = useState(false);
     const [pendingDeleteServerIds, setPendingDeleteServerIds] = useState<string[]>([]);
     const [slides, setSlides] = useState<EditorSlide[]>(() => serverSlides.map(toEditorSlide));
+    const previousSlidesRef = useRef<EditorSlide[]>(slides);
     const slidesRef = useRef(slides);
     const queuedServerSlidesRef = useRef<Slide[] | null>(null);
     const deletedPendingCreateIdsRef = useRef(new Set<string>());
@@ -150,9 +151,7 @@ function EditorContent({
         slidesRef.current = slides;
     }, [slides]);
 
-    const hasBlockingLocalChanges = isReordering
-        || isTogglingVisibility
-        || slides.some((slide) => slide.pendingCreate);
+    const hasBlockingLocalChanges = isReordering || isTogglingVisibility;
 
     useEffect(() => {
         const nextServerSlides = queuedServerSlidesRef.current ?? serverSlides;
@@ -172,6 +171,26 @@ function EditorContent({
             return nextIds.length === prevIds.length ? prevIds : nextIds;
         });
     }, [hasBlockingLocalChanges, pendingDeleteServerIds, serverSlides]);
+
+    useEffect(() => {
+        const previousSlides = previousSlidesRef.current;
+
+        for (const slide of slides) {
+            const previousSlide = previousSlides.find((entry) => entry.id === slide.id);
+            if (!previousSlide) {
+                continue;
+            }
+
+            if (previousSlide.pendingCreate && !slide.pendingCreate && slide.hasLocalDraft && slide.serverId) {
+                slideEditCommitterRef.current.schedule({
+                    slideId: slide.serverId,
+                    content: slide.content,
+                });
+            }
+        }
+
+        previousSlidesRef.current = slides;
+    }, [slides]);
 
     // Refetch slides when server confirms changes via WS broadcast
     useEffect(() => {
@@ -381,12 +400,6 @@ function EditorContent({
                         hasLocalDraft: slide.hasLocalDraft,
                     };
                 })) as EditorSlide[]);
-                if (contentNeedingSync) {
-                    slideEditCommitterRef.current.schedule({
-                        slideId: serverSlide.id,
-                        content: contentNeedingSync,
-                    });
-                }
             })
             .catch((error) => {
                 console.error('Failed to create slide', error);
@@ -451,7 +464,7 @@ function EditorContent({
         );
 
         const slide = slidesRef.current.find((entry) => entry.id === slideId);
-        if (!slide?.serverId) {
+        if (!slide?.serverId || slide.pendingCreate) {
             return { status: 'queued' as const };
         }
 
@@ -566,12 +579,6 @@ function EditorContent({
                         hasLocalDraft: slide.hasLocalDraft,
                     };
                 })) as EditorSlide[]);
-                if (contentNeedingSync) {
-                    slideEditCommitterRef.current.schedule({
-                        slideId: serverSlide.id,
-                        content: contentNeedingSync,
-                    });
-                }
             })
             .catch((error) => {
                 console.error('Failed to duplicate slide', error);
@@ -676,7 +683,7 @@ function EditorContent({
     }
 
     const hasPendingCreates = slides.some((slide) => slide.pendingCreate || !slide.serverId);
-    const isStructuralSyncing = isReordering || hasPendingCreates;
+    const isStructuralSyncing = isReordering;
     const isReorderLocked = isReordering || hasPendingCreates;
     const isShareEnabled = !(isStructuralSyncing || isTogglingVisibility || isSavingSettings);
     const renderSlideCard = useCallback((
