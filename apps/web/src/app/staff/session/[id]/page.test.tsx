@@ -2,12 +2,15 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Slide, Session } from 'shared';
 
+type EditorLikeSlide = Slide & { serverId?: string | null };
+
 const dndState = vi.hoisted(() => ({
     dragEndHandlers: [] as Array<(result: unknown) => void | Promise<void>>,
 }));
 
 const apiMockState = vi.hoisted(() => ({
     createSlide: vi.fn(),
+    deleteSlide: vi.fn(),
     getSession: vi.fn(),
     getSlides: vi.fn(),
     updateSlide: vi.fn(),
@@ -41,7 +44,7 @@ const navigationMockState = vi.hoisted(() => ({
 }));
 
 const editorMockState = vi.hoisted(() => ({
-    latestSlide: null as Slide | null,
+    latestSlide: null as EditorLikeSlide | null,
     onUpdate: null as null | ((content: Slide['content']) => Promise<{ status: 'saved' | 'queued' }>),
 }));
 
@@ -105,6 +108,7 @@ vi.mock('@/lib/api', async () => {
     return {
         ...actual,
         createSlide: apiMockState.createSlide,
+        deleteSlide: apiMockState.deleteSlide,
         getSession: apiMockState.getSession,
         getSlides: apiMockState.getSlides,
         updateSlide: apiMockState.updateSlide,
@@ -145,7 +149,7 @@ vi.mock('@/components/slide-editor-panel', () => ({
         slide,
         onUpdate,
     }: {
-        slide: Slide;
+        slide: EditorLikeSlide;
         onUpdate: (content: Slide['content']) => Promise<{ status: 'saved' | 'queued' }>;
     }) => {
         editorMockState.latestSlide = slide;
@@ -153,6 +157,7 @@ vi.mock('@/components/slide-editor-panel', () => ({
         return (
             <div>
                 <div data-testid="editor-slide-id">{slide.id}</div>
+                <div data-testid="editor-slide-server-id">{slide.serverId ?? ''}</div>
                 <div data-testid="editor-slide-title">{slide.content.title || slide.content.question || ''}</div>
             </div>
         );
@@ -208,6 +213,7 @@ describe('staff editor duplicate flow', () => {
     beforeEach(() => {
         dndState.dragEndHandlers = [];
         apiMockState.createSlide.mockReset();
+        apiMockState.deleteSlide.mockReset();
         apiMockState.getSession.mockReset();
         apiMockState.getSlides.mockReset();
         apiMockState.updateSlide.mockReset();
@@ -224,6 +230,7 @@ describe('staff editor duplicate flow', () => {
 
         apiMockState.getSession.mockResolvedValue(makeSession());
         apiMockState.getSlides.mockResolvedValue([makeSlide()]);
+        apiMockState.deleteSlide.mockResolvedValue(undefined);
         apiMockState.updateSlide.mockImplementation(async (
             sessionId: string,
             slideId: string,
@@ -283,7 +290,8 @@ describe('staff editor duplicate flow', () => {
         });
 
         await waitFor(() => {
-            expect(editorMockState.latestSlide?.id).toBe('slide-2');
+            expect(editorMockState.latestSlide?.id).toMatch(/^temp-/);
+            expect(editorMockState.latestSlide?.serverId).toBe('slide-2');
             expect(editorMockState.latestSlide?.content.title).toBe('Edited duplicate title');
         });
 
@@ -348,8 +356,43 @@ describe('staff editor duplicate flow', () => {
         }));
 
         await waitFor(() => {
-            expect(editorMockState.latestSlide?.id).toBe('slide-3');
+            expect(editorMockState.latestSlide?.serverId).toBe('slide-3');
         });
         expect(toastMock.error).not.toHaveBeenCalledWith('Failed to duplicate slide');
+    });
+
+    it('deletes a pending-created slide using the real server id once create settles', async () => {
+        vi.stubGlobal('confirm', vi.fn(() => true));
+
+        const createRequest = deferred<Slide>();
+        apiMockState.createSlide.mockReturnValueOnce(createRequest.promise);
+
+        const { default: SlideEditorPage } = await import('./page');
+        render(<SlideEditorPage />);
+
+        await waitFor(() => {
+            expect(editorMockState.latestSlide?.id).toBe('slide-1');
+        });
+
+        fireEvent.click(screen.getByRole('button', { name: /duplicate/i }));
+
+        await waitFor(() => {
+            expect(editorMockState.latestSlide?.id).toMatch(/^temp-/);
+            expect(editorMockState.latestSlide?.serverId).toBeNull();
+        });
+
+        fireEvent.click(screen.getByRole('button', { name: /delete/i }));
+
+        createRequest.resolve(makeSlide({
+            id: 'slide-2',
+            orderIndex: 1,
+            version: 1,
+        }));
+
+        await waitFor(() => {
+            expect(apiMockState.deleteSlide).toHaveBeenCalledWith('test-session-id', 'slide-2');
+        });
+
+        expect(toastMock.error).not.toHaveBeenCalledWith('Failed to delete slide');
     });
 });
