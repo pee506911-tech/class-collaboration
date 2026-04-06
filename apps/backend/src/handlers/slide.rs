@@ -229,7 +229,19 @@ pub async fn create_slide(
 
     match append_result {
         crate::services::wal::AppendWalResult::Appended => {
-            crate::services::wal::queued_success_response(&slide)
+            // Wait for the WAL entry to be flushed and replayed to MySQL
+            // before returning. This ensures the slide actually exists in
+            // the database when the response is received, preventing
+            // race conditions with insert-after-slide-id references.
+            let saved_slide = crate::services::wal::wait_for_replay_response::<Slide>(
+                &pool,
+                &session_id,
+                crate::services::wal::WalOpType::CreateSlide,
+                &client_request_id,
+                std::time::Duration::from_secs(5),
+            )
+            .await?;
+            crate::services::wal::queued_success_response(&saved_slide)
         }
         crate::services::wal::AppendWalResult::Existing { response_payload } => {
             let slide = deserialize_wal_response::<Slide>(response_payload)?;
@@ -318,7 +330,7 @@ pub async fn create_slides_batch(
         .append_or_get_existing(crate::services::wal::AppendWalEntry {
             op_type: crate::services::wal::WalOpType::CreateSlidesBatch,
             session_id: session_id.clone(),
-            client_request_id,
+            client_request_id: client_request_id.clone(),
             resource_id: response.slides.first().map(|slide| slide.id.clone()),
             payload: serde_json::to_value(crate::services::wal::CreateSlidesBatchWalPayload {
                 slides: response
@@ -343,7 +355,18 @@ pub async fn create_slides_batch(
 
     match append_result {
         crate::services::wal::AppendWalResult::Appended => {
-            crate::services::wal::queued_success_response(&response)
+            // Wait for the WAL entry to be flushed and replayed to MySQL
+            // before returning. This ensures the slides actually exist in
+            // the database when the response is received.
+            let saved_response = crate::services::wal::wait_for_replay_response::<CreateSlidesBatchResponse>(
+                &pool,
+                &session_id,
+                crate::services::wal::WalOpType::CreateSlidesBatch,
+                &client_request_id,
+                std::time::Duration::from_secs(5),
+            )
+            .await?;
+            crate::services::wal::queued_success_response(&saved_response)
         }
         crate::services::wal::AppendWalResult::Existing { response_payload } => {
             let response = deserialize_wal_response::<CreateSlidesBatchResponse>(response_payload)?;
@@ -608,7 +631,7 @@ pub async fn update_slide(
         .append_or_get_existing(crate::services::wal::AppendWalEntry {
             op_type: crate::services::wal::WalOpType::UpdateSlide,
             session_id: session_id.clone(),
-            client_request_id,
+            client_request_id: client_request_id.clone(),
             resource_id: Some(slide_id.clone()),
             payload: serde_json::to_value(crate::services::wal::UpdateSlideWalPayload {
                 slide_id: slide_id.clone(),
@@ -628,7 +651,18 @@ pub async fn update_slide(
 
     match append_result {
         crate::services::wal::AppendWalResult::Appended => {
-            crate::services::wal::queued_success_response(&updated_slide)
+            // Wait for the WAL entry to be flushed and replayed to MySQL
+            // before returning. This ensures the slide update actually
+            // exists in the database when the response is received.
+            let saved_slide = crate::services::wal::wait_for_replay_response::<Slide>(
+                &pool,
+                &session_id,
+                crate::services::wal::WalOpType::UpdateSlide,
+                &client_request_id,
+                std::time::Duration::from_secs(5),
+            )
+            .await?;
+            crate::services::wal::queued_success_response(&saved_slide)
         }
         crate::services::wal::AppendWalResult::Existing { response_payload } => {
             let slide = deserialize_wal_response::<Slide>(response_payload)?;
@@ -686,7 +720,7 @@ pub async fn delete_slide(
         .append_or_get_existing(crate::services::wal::AppendWalEntry {
             op_type: crate::services::wal::WalOpType::DeleteSlide,
             session_id: session_id.clone(),
-            client_request_id,
+            client_request_id: client_request_id.clone(),
             resource_id: Some(slide_id.clone()),
             payload: serde_json::to_value(crate::services::wal::DeleteSlideWalPayload {
                 slide_id: slide_id.clone(),
@@ -701,6 +735,17 @@ pub async fn delete_slide(
 
     match append_result {
         crate::services::wal::AppendWalResult::Appended => {
+            // Wait for the WAL entry to be flushed and replayed to MySQL
+            // before returning. This ensures the slide is actually deleted
+            // from the database when the response is received.
+            crate::services::wal::wait_for_replay_response::<serde_json::Value>(
+                &pool,
+                &session_id,
+                crate::services::wal::WalOpType::DeleteSlide,
+                &client_request_id,
+                std::time::Duration::from_secs(5),
+            )
+            .await?;
             crate::services::wal::queued_success_response(&response)
         }
         crate::services::wal::AppendWalResult::Existing { response_payload } => {
@@ -776,7 +821,7 @@ pub async fn reorder_slides(
         .append_or_get_existing(crate::services::wal::AppendWalEntry {
             op_type: crate::services::wal::WalOpType::ReorderSlides,
             session_id: session_id.clone(),
-            client_request_id,
+            client_request_id: client_request_id.clone(),
             resource_id: None,
             payload: serde_json::to_value(crate::services::wal::ReorderSlidesWalPayload {
                 slide_ids: payload.slide_ids.clone(),
@@ -791,6 +836,17 @@ pub async fn reorder_slides(
 
     match append_result {
         crate::services::wal::AppendWalResult::Appended => {
+            // Wait for the WAL entry to be flushed and replayed to MySQL
+            // before returning. This ensures the reorder is actually applied
+            // in the database when the response is received.
+            crate::services::wal::wait_for_replay_response::<serde_json::Value>(
+                &pool,
+                &session_id,
+                crate::services::wal::WalOpType::ReorderSlides,
+                &client_request_id,
+                std::time::Duration::from_secs(5),
+            )
+            .await?;
             crate::services::wal::queued_success_response(&response)
         }
         crate::services::wal::AppendWalResult::Existing { response_payload } => {

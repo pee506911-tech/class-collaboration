@@ -558,6 +558,33 @@ pub async fn fetch_replay_response<T: DeserializeOwned>(
         .transpose()
 }
 
+/// Poll for a replay response to appear in MySQL after appending a WAL entry.
+/// This blocks until the WAL entry has been flushed and replayed, or times out.
+pub async fn wait_for_replay_response<T: DeserializeOwned>(
+    pool: &crate::db::DbPool,
+    session_id: &str,
+    op_type: WalOpType,
+    client_request_id: &str,
+    timeout: Duration,
+) -> Result<T> {
+    let deadline = std::time::Instant::now() + timeout;
+    let poll_interval = Duration::from_millis(20);
+
+    loop {
+        if let Some(response) = fetch_replay_response(pool, session_id, op_type, client_request_id).await? {
+            return Ok(response);
+        }
+
+        if std::time::Instant::now() >= deadline {
+            return Err(AppError::Internal(
+                format!("Timed out waiting for WAL replay response after {}ms", timeout.as_millis()),
+            ));
+        }
+
+        tokio::time::sleep(poll_interval).await;
+    }
+}
+
 async fn replay_exists(
     tx: &mut Transaction<'_, MySql>,
     session_id: &str,
