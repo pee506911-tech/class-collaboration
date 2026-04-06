@@ -142,8 +142,11 @@ async function saveEditorDocument(
         latestSavedSlidesById.delete(baseSlide.id);
     }
 
-    const currentBaseOrder = baseSlides.map((slide) => slide.id);
-    if (currentBaseOrder.length !== desiredServerIds.length || currentBaseOrder.some((slideId, index) => slideId !== desiredServerIds[index])) {
+    // Reorder only if the slide sets match in size but differ in order
+    // Skip reorder if there are pending creations/deletions to avoid count mismatch
+    const remainingBaseSlides = baseSlides.filter((slide) => latestSavedSlidesById.has(slide.id));
+    const currentBaseOrder = remainingBaseSlides.map((slide) => slide.id);
+    if (currentBaseOrder.length === desiredServerIds.length && currentBaseOrder.some((slideId, index) => slideId !== desiredServerIds[index])) {
         await reorderSlides(sessionId, desiredServerIds);
     }
 

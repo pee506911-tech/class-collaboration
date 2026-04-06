@@ -347,6 +347,16 @@ export async function deleteSlide(sessionId: string, slideId: string, options?: 
 }
 
 export async function reorderSlides(sessionId: string, slideIds: string[]): Promise<void> {
+    if (slideIds.length === 0) {
+        return;
+    }
+
+    const uniqueIds = new Set(slideIds);
+    if (uniqueIds.size !== slideIds.length) {
+        console.error('Reorder request contains duplicate slide IDs');
+        return;
+    }
+
     let res: Response;
 
     try {
