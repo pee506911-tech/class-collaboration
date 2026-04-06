@@ -5,9 +5,9 @@ export const runtime = 'edge';
 import { SetStateAction, startTransition, useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Slide, Session } from 'shared';
-import { getSlides, getSession, updateSession, updateSlideVisibility, goLiveSession, stopSession, ApiRequestError } from '@/lib/api';
+import { createSlide, deleteSlide, getSlides, getSession, reorderSlides, updateSession, updateSlide, updateSlideVisibility, goLiveSession, stopSession, ApiRequestError } from '@/lib/api';
 import { Button } from '@/components/ui/button';
-import { Plus, Layout, BarChart2, Play, X, CheckSquare, Smartphone, Share2, ArrowLeft, Settings, Edit2, MessageSquare, Users, Eye, Square, Copy, ExternalLink } from 'lucide-react';
+import { Plus, Layout, BarChart2, Play, X, Smartphone, Share2, Settings, Users, Eye, Square, Copy, ExternalLink, Loader2 } from 'lucide-react';
 import Link from 'next/link';
 import { WebSocketProvider, useWebSocket } from '@/lib/websocket';
 import { SlideRenderer } from '@/components/slide-renderer';
@@ -22,57 +22,35 @@ import { Breadcrumb } from '@/components/ui/breadcrumb';
 import { safeLocalStorageGet } from '@/lib/storage';
 import { formatRequestId, mapHttpErrorToUiMessage } from '@/lib/http-error-ui';
 import { SlideListItem } from '@/components/slide-list-item';
-import { reorderSlidesWithRollback } from '@/lib/slide-reorder';
 import { getNextPreviewSlideId } from '@/lib/slide-preview-selection';
 import {
-    createSlideCreateCommitter,
-    createSlideEditCommitter,
-    commitDeleteSlide,
-    commitReorderSlides,
     normalizeSlides,
-    reconcileCreatedSlide,
 } from '@/lib/editor-slide-sync';
 
 type EditorSlide = Slide & {
     serverId: string | null;
-    pendingCreate: boolean;
-    hasLocalDraft: boolean;
 };
+
+type EditorSaveState = 'saved' | 'dirty' | 'saving';
 
 function toEditorSlide(slide: Slide): EditorSlide {
     return {
         ...slide,
         serverId: slide.id,
-        pendingCreate: false,
-        hasLocalDraft: false,
     };
 }
 
-function reconcileServerSlides(
-    prevSlides: EditorSlide[],
-    serverSlides: Slide[],
-    pendingDeleteServerIds: Set<string> = new Set(),
-): EditorSlide[] {
-    const filteredServerSlides = serverSlides.filter((slide) => !pendingDeleteServerIds.has(slide.id));
+function projectServerSlidesToEditor(prevSlides: EditorSlide[], serverSlides: Slide[]): EditorSlide[] {
     const prevSlidesByServerId = new Map(
         prevSlides
             .filter((slide) => slide.serverId)
             .map((slide) => [slide.serverId!, slide]),
     );
-    const incomingServerIds = new Set(filteredServerSlides.map((slide) => slide.id));
 
-    const nextServerSlides = filteredServerSlides.map((serverSlide) => {
+    return serverSlides.map((serverSlide) => {
         const existingSlide = prevSlidesByServerId.get(serverSlide.id);
         if (!existingSlide) {
             return toEditorSlide(serverSlide);
-        }
-
-        if (existingSlide.hasLocalDraft || existingSlide.version > serverSlide.version) {
-            return {
-                ...existingSlide,
-                serverId: serverSlide.id,
-                pendingCreate: false,
-            };
         }
 
         return {
@@ -80,16 +58,8 @@ function reconcileServerSlides(
             ...serverSlide,
             id: existingSlide.id,
             serverId: serverSlide.id,
-            pendingCreate: false,
         };
     });
-
-    const pendingLocalSlides = prevSlides.filter((slide) => (
-        slide.pendingCreate
-        && (!slide.serverId || !incomingServerIds.has(slide.serverId))
-    ));
-
-    return normalizeSlides([...nextServerSlides, ...pendingLocalSlides]) as EditorSlide[];
 }
 
 function getDefaultSlideContent(type: Slide['type']) {
@@ -109,11 +79,126 @@ function getDefaultSlideContent(type: Slide['type']) {
     return { title: 'Leaderboard' };
 }
 
-function restoreSlideAtOrder(slides: Slide[], restoredSlide: Slide) {
-    const nextSlides = [...slides];
-    const insertAt = Math.min(Math.max(restoredSlide.orderIndex, 0), nextSlides.length);
-    nextSlides.splice(insertAt, 0, restoredSlide);
-    return normalizeSlides(nextSlides);
+function areContentsEqual(left: Slide['content'], right: Slide['content']) {
+    return JSON.stringify(left) === JSON.stringify(right);
+}
+
+async function saveEditorDocument(
+    sessionId: string,
+    baseSlides: Slide[],
+    localSlides: EditorSlide[],
+) {
+    const baseSlidesById = new Map(baseSlides.map((slide) => [slide.id, slide]));
+    const resolvedServerIdByClientId = new Map(
+        localSlides
+            .filter((slide) => slide.serverId)
+            .map((slide) => [slide.id, slide.serverId!]),
+    );
+    const latestSavedSlidesById = new Map(baseSlides.map((slide) => [slide.id, slide]));
+
+    for (const slide of localSlides) {
+        if (slide.serverId) {
+            continue;
+        }
+
+        const slideIndex = localSlides.findIndex((entry) => entry.id === slide.id);
+        const insertAfterSlide = [...localSlides.slice(0, slideIndex)]
+            .reverse()
+            .find((entry) => {
+                const resolvedServerId = resolvedServerIdByClientId.get(entry.id) ?? entry.serverId;
+                return Boolean(resolvedServerId);
+            });
+        const insertAfterSlideId = insertAfterSlide
+            ? (resolvedServerIdByClientId.get(insertAfterSlide.id) ?? insertAfterSlide.serverId ?? undefined)
+            : undefined;
+
+        const createdSlide = await createSlide(
+            sessionId,
+            slide.type,
+            slide.content,
+            insertAfterSlideId ? { insertAfterSlideId } : undefined,
+        );
+
+        resolvedServerIdByClientId.set(slide.id, createdSlide.id);
+        latestSavedSlidesById.set(createdSlide.id, {
+            ...createdSlide,
+            content: slide.content,
+            orderIndex: slide.orderIndex,
+            isHidden: slide.isHidden,
+        });
+    }
+
+    const desiredServerIds = localSlides
+        .map((slide) => slide.serverId ?? resolvedServerIdByClientId.get(slide.id))
+        .filter((slideId): slideId is string => Boolean(slideId));
+    const desiredServerIdSet = new Set(desiredServerIds);
+
+    for (const baseSlide of baseSlides) {
+        if (desiredServerIdSet.has(baseSlide.id)) {
+            continue;
+        }
+
+        await deleteSlide(sessionId, baseSlide.id);
+        latestSavedSlidesById.delete(baseSlide.id);
+    }
+
+    const currentBaseOrder = baseSlides.map((slide) => slide.id);
+    if (currentBaseOrder.length !== desiredServerIds.length || currentBaseOrder.some((slideId, index) => slideId !== desiredServerIds[index])) {
+        await reorderSlides(sessionId, desiredServerIds);
+    }
+
+    for (const slide of localSlides) {
+        const serverId = slide.serverId ?? resolvedServerIdByClientId.get(slide.id);
+        if (!serverId) {
+            continue;
+        }
+
+        const savedSlide = latestSavedSlidesById.get(serverId) ?? baseSlidesById.get(serverId);
+        if (savedSlide?.isHidden !== slide.isHidden) {
+            await updateSlideVisibility(sessionId, serverId, slide.isHidden ?? false);
+        }
+
+        const isNewSlide = !slide.serverId;
+        if (!isNewSlide && savedSlide && !areContentsEqual(savedSlide.content, slide.content)) {
+            const updatedSlide = await updateSlide(sessionId, serverId, slide.content);
+            latestSavedSlidesById.set(serverId, {
+                ...updatedSlide,
+                orderIndex: slide.orderIndex,
+                isHidden: slide.isHidden,
+            });
+            continue;
+        }
+
+        latestSavedSlidesById.set(serverId, {
+            ...(savedSlide ?? slide),
+            id: serverId,
+            sessionId,
+            type: slide.type,
+            content: slide.content,
+            orderIndex: slide.orderIndex,
+            isHidden: slide.isHidden,
+            version: savedSlide?.version ?? slide.version,
+        });
+    }
+
+    return localSlides.map((slide, index) => {
+        const serverId = slide.serverId ?? resolvedServerIdByClientId.get(slide.id);
+        if (!serverId) {
+            throw new Error(`Missing server id for slide ${slide.id}`);
+        }
+
+        const savedSlide = latestSavedSlidesById.get(serverId);
+        return {
+            ...(savedSlide ?? slide),
+            id: serverId,
+            sessionId,
+            type: slide.type,
+            content: slide.content,
+            orderIndex: index,
+            isHidden: slide.isHidden,
+            version: savedSlide?.version ?? slide.version,
+        } satisfies Slide;
+    });
 }
 
 function EditorContent({
@@ -134,62 +219,17 @@ function EditorContent({
     const [previewRole, setPreviewRole] = useState<'student' | 'projector'>('student');
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [showQAManager, setShowQAManager] = useState(false);
-    const [showDashboard, setShowDashboard] = useState(false);
     const [editTitle, setEditTitle] = useState('');
     const [showShareDialog, setShowShareDialog] = useState(false);
-    const [isReordering, setIsReordering] = useState(false);
-    const [isTogglingVisibility, setIsTogglingVisibility] = useState(false);
     const [isSavingSettings, setIsSavingSettings] = useState(false);
-    const [pendingDeleteServerIds, setPendingDeleteServerIds] = useState<string[]>([]);
-    const [slides, setSlides] = useState<EditorSlide[]>(() => serverSlides.map(toEditorSlide));
-    const previousSlidesRef = useRef<EditorSlide[]>(slides);
+    const [saveState, setSaveState] = useState<EditorSaveState>('saved');
+    const [baseSlides, setBaseSlides] = useState<Slide[]>(() => normalizeSlides(serverSlides));
+    const [slides, setSlides] = useState<EditorSlide[]>(() => normalizeSlides(serverSlides).map(toEditorSlide));
+    const localChangeVersionRef = useRef(0);
     const slidesRef = useRef(slides);
-    const queuedServerSlidesRef = useRef<Slide[] | null>(null);
-    const deletedPendingCreateIdsRef = useRef(new Set<string>());
 
     useEffect(() => {
         slidesRef.current = slides;
-    }, [slides]);
-
-    const hasBlockingLocalChanges = isReordering || isTogglingVisibility;
-
-    useEffect(() => {
-        const nextServerSlides = queuedServerSlidesRef.current ?? serverSlides;
-        const pendingDeleteSet = new Set(pendingDeleteServerIds);
-
-        if (hasBlockingLocalChanges) {
-            queuedServerSlidesRef.current = serverSlides;
-            return;
-        }
-
-        queuedServerSlidesRef.current = null;
-        setSlides((prevSlides) => reconcileServerSlides(prevSlides, nextServerSlides, pendingDeleteSet));
-
-        const incomingServerIds = new Set(nextServerSlides.map((slide) => slide.id));
-        setPendingDeleteServerIds((prevIds) => {
-            const nextIds = prevIds.filter((serverId) => incomingServerIds.has(serverId));
-            return nextIds.length === prevIds.length ? prevIds : nextIds;
-        });
-    }, [hasBlockingLocalChanges, pendingDeleteServerIds, serverSlides]);
-
-    useEffect(() => {
-        const previousSlides = previousSlidesRef.current;
-
-        for (const slide of slides) {
-            const previousSlide = previousSlides.find((entry) => entry.id === slide.id);
-            if (!previousSlide) {
-                continue;
-            }
-
-            if (previousSlide.pendingCreate && !slide.pendingCreate && slide.hasLocalDraft && slide.serverId) {
-                slideEditCommitterRef.current.schedule({
-                    slideId: slide.serverId,
-                    content: slide.content,
-                });
-            }
-        }
-
-        previousSlidesRef.current = slides;
     }, [slides]);
 
     // Refetch slides when server confirms changes via WS broadcast
@@ -211,40 +251,32 @@ function EditorContent({
         setSlides(updater);
     }, []);
 
-    const handleSlideSaveSuccess = useCallback((savedSlide: Slide, request: { slideId: string; content: Slide['content'] }) => {
-        setSlidesSynced((prev) => prev.map((slide) =>
-            slide.serverId === request.slideId
-                ? {
-                    ...slide,
-                    ...savedSlide,
-                    id: slide.id,
-                    serverId: savedSlide.id,
-                    pendingCreate: slide.pendingCreate,
-                    hasLocalDraft: false,
-                }
-                : slide,
-        ));
-    }, [setSlidesSynced]);
-
-    const handleSlideSaveError = useCallback((error: unknown) => {
-        console.error('Failed to save slide draft', error);
-        toast.error('Failed to save slide');
-        void loadSlides();
-    }, [loadSlides]);
-
-    // Slide edit committer — coalesces rapid edits on the same slide
-    const slideEditCommitterRef = useRef(createSlideEditCommitter(id, {
-        onSuccess: handleSlideSaveSuccess,
-        onError: handleSlideSaveError,
-    }));
-    const slideCreateCommitterRef = useRef(createSlideCreateCommitter(id));
     useEffect(() => {
-        slideEditCommitterRef.current = createSlideEditCommitter(id, {
-            onSuccess: handleSlideSaveSuccess,
-            onError: handleSlideSaveError,
-        });
-        slideCreateCommitterRef.current = createSlideCreateCommitter(id);
-    }, [handleSlideSaveError, handleSlideSaveSuccess, id]);
+        const normalizedServerSlides = normalizeSlides(serverSlides);
+        const incomingIds = new Set(normalizedServerSlides.map((slide) => slide.id));
+        const isStaleSnapshot = saveState === 'saved' && baseSlides.some((slide) => !incomingIds.has(slide.id));
+
+        if (isStaleSnapshot) {
+            return;
+        }
+
+        const isSameBaseSnapshot = baseSlides.length === normalizedServerSlides.length
+            && baseSlides.every((slide, index) => slide.id === normalizedServerSlides[index]?.id && slide.version === normalizedServerSlides[index]?.version);
+        if (!isSameBaseSnapshot) {
+            setBaseSlides(normalizedServerSlides);
+        }
+
+        if (saveState !== 'saved') {
+            return;
+        }
+
+        setSlidesSynced((prevSlides) => projectServerSlidesToEditor(prevSlides, normalizedServerSlides));
+    }, [baseSlides, saveState, serverSlides, setSlidesSynced]);
+
+    const markDirty = useCallback(() => {
+        localChangeVersionRef.current += 1;
+        setSaveState('dirty');
+    }, []);
 
     // SEPARATE PREVIEW STATE: This is for editor preview only, independent of student view
     const [previewSlideId, setPreviewSlideId] = useState<string | null>(null);
@@ -349,79 +381,16 @@ function EditorContent({
             orderIndex: slides.length,
             isHidden: false,
             version: 0,
-            pendingCreate: true,
-            hasLocalDraft: false,
         };
 
-        // Optimistic: add immediately to local state
         setSlidesSynced((prev) => [...prev, newSlide]);
+        markDirty();
 
         hasManualPreviewSelectionRef.current = true;
         startTransition(() => {
             setPreviewSlideId(tempId);
             setShowTypeSelector(false);
         });
-
-        // Fire-and-forget: server will broadcast SLIDES_UPDATE which triggers refetch
-        void slideCreateCommitterRef.current.schedule({
-            tempId,
-            slideType: type as Slide['type'],
-            content: newSlide.content,
-        })
-            .then((serverSlide) => {
-                const wasDeletedBeforeAck = deletedPendingCreateIdsRef.current.delete(tempId);
-                if (wasDeletedBeforeAck) {
-                    setPendingDeleteServerIds((prevIds) => prevIds.includes(serverSlide.id) ? prevIds : [...prevIds, serverSlide.id]);
-                    void commitDeleteSlide(id, serverSlide.id).catch((deleteError) => {
-                        console.error('Failed to delete slide after create settled', deleteError);
-                        toast.error('Failed to delete slide');
-                        setPendingDeleteServerIds((prevIds) => prevIds.filter((serverId) => serverId !== serverSlide.id));
-                        void loadSlides();
-                    });
-                    return;
-                }
-
-                let contentNeedingSync: Slide['content'] | null = null;
-                setSlidesSynced((prev) => normalizeSlides(prev.map((slide) => {
-                    if (slide.id !== tempId) {
-                        return slide;
-                    }
-
-                    const resolved = reconcileCreatedSlide({
-                        localSlide: slide,
-                        serverSlide,
-                    });
-                    contentNeedingSync = resolved.contentNeedingSync;
-                    return {
-                        ...(resolved.slide as EditorSlide),
-                        id: slide.id,
-                        serverId: serverSlide.id,
-                        pendingCreate: true,
-                        hasLocalDraft: slide.hasLocalDraft,
-                    };
-                })) as EditorSlide[]);
-            })
-            .catch((error) => {
-                console.error('Failed to create slide', error);
-                toast.error('Failed to create slide');
-                deletedPendingCreateIdsRef.current.delete(tempId);
-                setSlidesSynced((prev) => prev.filter((slide) => slide.id !== tempId));
-                setPreviewSlideId((currentPreviewSlideId) => {
-                    if (currentPreviewSlideId !== tempId) {
-                        return currentPreviewSlideId;
-                    }
-
-                    const liveSlide = state?.currentSlideId
-                        ? slides.find((slide) => slide.serverId === state.currentSlideId)
-                        : null;
-                    if (liveSlide) {
-                        return liveSlide.id;
-                    }
-
-                    return slides[0]?.id ?? null;
-                });
-                void loadSlides();
-            });
     }
 
     // NAVIGATION REMOVED: Use Mobile Clicker for slide navigation
@@ -432,24 +401,6 @@ function EditorContent({
     const previewSlide = previewIndex >= 0 ? slides[previewIndex] : null;
     const isPreviewLive = Boolean(state?.currentSlideId && previewSlide?.serverId === state.currentSlideId);
 
-    const handlePreviewNext = useCallback(() => {
-        if (previewIndex < slides.length - 1) {
-            hasManualPreviewSelectionRef.current = true;
-            startTransition(() => {
-                setPreviewSlideId(slides[previewIndex + 1].id);
-            });
-        }
-    }, [previewIndex, slides]);
-
-    const handlePreviewPrev = useCallback(() => {
-        if (previewIndex > 0) {
-            hasManualPreviewSelectionRef.current = true;
-            startTransition(() => {
-                setPreviewSlideId(slides[previewIndex - 1].id);
-            });
-        }
-    }, [previewIndex, slides]);
-
     const handleSelectSlide = useCallback((slideId: string) => {
         hasManualPreviewSelectionRef.current = true;
         startTransition(() => {
@@ -458,20 +409,11 @@ function EditorContent({
     }, []);
 
     async function handleUpdateSlide(slideId: string, content: Slide['content']) {
-        // Optimistic: update local state immediately
         setSlidesSynced((prev) =>
-            prev.map((s) => (s.id === slideId ? { ...s, content, hasLocalDraft: true } : s)),
+            prev.map((s) => (s.id === slideId ? { ...s, content } : s)),
         );
-
-        const slide = slidesRef.current.find((entry) => entry.id === slideId);
-        if (!slide?.serverId || slide.pendingCreate) {
-            return { status: 'queued' as const };
-        }
-
-        // Commit via coalescing committer — rapid edits only send latest
-        slideEditCommitterRef.current.schedule({ slideId: slide.serverId, content });
-
-        return { status: 'saved' as const };
+        markDirty();
+        return { status: 'queued' as const };
     }
 
     async function handleDeleteSlide(slideId: string) {
@@ -482,28 +424,12 @@ function EditorContent({
         const slideIds = slides.map((s) => s.id);
         const nextPreviewSlideId = getNextPreviewSlideId(slideIds, slideId, previewSlideId);
 
-        // Optimistic: remove from local state immediately
         setSlidesSynced((prev) => prev.filter((s) => s.id !== slideId));
+        markDirty();
 
         hasManualPreviewSelectionRef.current = true;
         startTransition(() => {
             setPreviewSlideId(nextPreviewSlideId);
-        });
-
-        if (!slide.serverId) {
-            deletedPendingCreateIdsRef.current.add(slide.id);
-            return;
-        }
-
-        setPendingDeleteServerIds((prevIds) => prevIds.includes(slide.serverId!) ? prevIds : [...prevIds, slide.serverId!]);
-
-        // Fire-and-forget: WS refetch will reconcile
-        void commitDeleteSlide(id, slide.serverId).catch((error) => {
-            console.error('Failed to delete slide', error);
-            toast.error('Failed to delete slide');
-            setPendingDeleteServerIds((prevIds) => prevIds.filter((serverId) => serverId !== slide.serverId));
-            setSlidesSynced((prev) => restoreSlideAtOrder(prev, slide) as EditorSlide[]);
-            void loadSlides();
         });
     }
 
@@ -523,102 +449,82 @@ function EditorContent({
             orderIndex: sourceIndex + 1,
             isHidden: false,
             version: 0,
-            pendingCreate: true,
-            hasLocalDraft: false,
         };
 
-        // Optimistic: insert immediately
         setSlidesSynced((prev) => {
             const next = [...prev];
             next.splice(sourceIndex + 1, 0, duplicatedSlide);
-            // Re-index orderIndex
             return next.map((s, i) => ({ ...s, orderIndex: i })) as EditorSlide[];
         });
+        markDirty();
 
         hasManualPreviewSelectionRef.current = true;
         startTransition(() => {
             setPreviewSlideId(tempId);
         });
-
-        // Fire-and-forget
-        void slideCreateCommitterRef.current.schedule({
-            tempId,
-            slideType: sourceSlide.type,
-            content: sourceSlide.content,
-            insertAfterSlideId: sourceSlide.id,
-        })
-            .then((serverSlide) => {
-                const wasDeletedBeforeAck = deletedPendingCreateIdsRef.current.delete(tempId);
-                if (wasDeletedBeforeAck) {
-                    setPendingDeleteServerIds((prevIds) => prevIds.includes(serverSlide.id) ? prevIds : [...prevIds, serverSlide.id]);
-                    void commitDeleteSlide(id, serverSlide.id).catch((deleteError) => {
-                        console.error('Failed to delete duplicated slide after create settled', deleteError);
-                        toast.error('Failed to delete slide');
-                        setPendingDeleteServerIds((prevIds) => prevIds.filter((serverId) => serverId !== serverSlide.id));
-                        void loadSlides();
-                    });
-                    return;
-                }
-
-                let contentNeedingSync: Slide['content'] | null = null;
-                setSlidesSynced((prev) => normalizeSlides(prev.map((slide) => {
-                    if (slide.id !== tempId) {
-                        return slide;
-                    }
-
-                    const resolved = reconcileCreatedSlide({
-                        localSlide: slide,
-                        serverSlide,
-                    });
-                    contentNeedingSync = resolved.contentNeedingSync;
-                    return {
-                        ...(resolved.slide as EditorSlide),
-                        id: slide.id,
-                        serverId: serverSlide.id,
-                        pendingCreate: true,
-                        hasLocalDraft: slide.hasLocalDraft,
-                    };
-                })) as EditorSlide[]);
-            })
-            .catch((error) => {
-                console.error('Failed to duplicate slide', error);
-                toast.error('Failed to duplicate slide');
-                deletedPendingCreateIdsRef.current.delete(tempId);
-                setSlidesSynced((prev) => prev.filter((slide) => slide.id !== tempId).map((slide, index) => ({
-                    ...slide,
-                    orderIndex: index,
-                })) as EditorSlide[]);
-                setPreviewSlideId((currentPreviewSlideId) => currentPreviewSlideId === tempId ? sourceSlide.id : currentPreviewSlideId);
-                void loadSlides();
-            });
     }
 
-    const handleToggleVisibility = useCallback(async (e: React.MouseEvent, slide: Slide) => {
+    const handleToggleVisibility = useCallback((e: React.MouseEvent, slide: Slide) => {
         e.stopPropagation();
 
         const slideId = slide.id;
-        const targetSlide = slidesRef.current.find((entry) => entry.id === slideId);
         setSlidesSynced((prevSlides) =>
             prevSlides.map((entry) => entry.id === slideId ? { ...entry, isHidden: !slide.isHidden } : entry),
         );
+        markDirty();
+    }, [markDirty, setSlidesSynced]);
 
-        if (!targetSlide?.serverId) {
+    const handleSaveSlides = useCallback(async () => {
+        if (saveState === 'saving') {
             return;
         }
 
-        setIsTogglingVisibility(true);
+        const saveVersion = localChangeVersionRef.current;
+        const localSnapshot = slidesRef.current.map((slide, index) => ({
+            ...slide,
+            orderIndex: index,
+        }));
+        setSaveState('saving');
+
         try {
-            await updateSlideVisibility(id, targetSlide.serverId, !slide.isHidden);
-            toast.success(slide.isHidden ? 'Slide is now visible' : 'Slide is now hidden');
-        } catch (e) {
-            toast.error('Failed to update visibility');
-            setSlidesSynced((prevSlides) =>
-                prevSlides.map((entry) => entry.id === slideId ? { ...entry, isHidden: slide.isHidden } : entry),
+            const savedSlides = await saveEditorDocument(id, baseSlides, localSnapshot);
+            setBaseSlides(savedSlides);
+            void loadSlides();
+
+            if (localChangeVersionRef.current === saveVersion) {
+                setSlidesSynced(localSnapshot.map((slide, index) => ({
+                    ...slide,
+                    serverId: savedSlides[index].id,
+                    version: savedSlides[index].version,
+                    orderIndex: index,
+                })));
+                setSaveState('saved');
+                toast.success('Saved');
+                return;
+            }
+
+            const savedByClientId = new Map(
+                localSnapshot.map((slide, index) => [slide.id, savedSlides[index]]),
             );
-        } finally {
-            setIsTogglingVisibility(false);
+            setSlidesSynced((prevSlides) => prevSlides.map((slide) => {
+                const savedSlide = savedByClientId.get(slide.id);
+                if (!savedSlide) {
+                    return slide;
+                }
+
+                return {
+                    ...slide,
+                    serverId: savedSlide.id,
+                };
+            }));
+            setSaveState('dirty');
+        } catch (error) {
+            console.error('Failed to save slides', error);
+            toast.error('Failed to save changes');
+            setSaveState('dirty');
+            void loadSlides();
         }
-    }, [id, setSlidesSynced]);
+    }, [baseSlides, id, loadSlides, saveState, setSlidesSynced]);
 
     async function handleToggleLive() {
         if (!session) return;
@@ -645,47 +551,22 @@ function EditorContent({
 
     async function onDragEnd(result: DropResult) {
         if (!result.destination) return;
-        if (slides.some((slide) => slide.pendingCreate || !slide.serverId)) {
-            toast.info('Wait for new slides to finish syncing before reordering');
-            return;
-        }
 
         const sourceIndex = result.source.index;
         const destinationIndex = result.destination.index;
 
         if (sourceIndex === destinationIndex) return;
 
-        setIsReordering(true);
-        try {
-            const result = await reorderSlidesWithRollback({
-                slides,
-                sourceIndex,
-                destinationIndex,
-                applySlides: setSlidesSynced as (slides: Slide[]) => void,
-                saveOrder: async () => {
-                    const slideIds = slidesRef.current
-                        .map((slide) => slide.serverId)
-                        .filter((slideId): slideId is string => Boolean(slideId));
-                    await commitReorderSlides(id, slideIds);
-                },
-            });
-
-            if (result.status === 'saved') {
-                toast.success('Slide order updated');
-            } else {
-                toast.error('Failed to save slide order');
-            }
-        } catch (e) {
-            toast.error('Failed to save slide order');
-        } finally {
-            setIsReordering(false);
-        }
+        const nextSlides = [...slides];
+        const [movedSlide] = nextSlides.splice(sourceIndex, 1);
+        nextSlides.splice(destinationIndex, 0, movedSlide);
+        setSlidesSynced(nextSlides.map((slide, index) => ({ ...slide, orderIndex: index })) as EditorSlide[]);
+        markDirty();
     }
 
-    const hasPendingCreates = slides.some((slide) => slide.pendingCreate || !slide.serverId);
-    const isStructuralSyncing = isReordering;
-    const isReorderLocked = isReordering || hasPendingCreates;
-    const isShareEnabled = !(isStructuralSyncing || isTogglingVisibility || isSavingSettings);
+    const isStructuralSyncing = saveState === 'saving';
+    const isReorderLocked = false;
+    const isShareEnabled = saveState === 'saved' && !isSavingSettings;
     const renderSlideCard = useCallback((
         slide: EditorSlide,
         index: number,
@@ -935,8 +816,22 @@ function EditorContent({
                     <div className="flex flex-col h-full">
                         {/* Simplified Header */}
                         <div className="h-14 px-4 border-b border-slate-100 flex items-center justify-between bg-white shrink-0">
-                            <span className="font-semibold text-sm text-slate-800">Slide Properties</span>
+                            <div className="flex items-center gap-3">
+                                <span className="font-semibold text-sm text-slate-800">Slide Properties</span>
+                                <span className={`text-xs font-medium ${saveState === 'saved' ? 'text-emerald-600' : saveState === 'saving' ? 'text-amber-600' : 'text-slate-500'}`}>
+                                    {saveState === 'saved' ? 'Saved' : saveState === 'saving' ? 'Saving...' : 'Not saved'}
+                                </span>
+                            </div>
                             <div className="flex items-center gap-1">
+                                <Button
+                                    size="sm"
+                                    onClick={() => { void handleSaveSlides(); }}
+                                    disabled={saveState === 'saving' || saveState === 'saved'}
+                                    className="mr-1 bg-blue-600 hover:bg-blue-700"
+                                >
+                                    {saveState === 'saving' && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                                    Save
+                                </Button>
                                 <Button
                                     variant="ghost"
                                     size="icon"
@@ -964,8 +859,6 @@ function EditorContent({
                             <SlideEditorPanel
                                 slide={previewSlide}
                                 onUpdate={(content) => handleUpdateSlide(previewSlide.id, content)}
-                                disabled={isStructuralSyncing}
-                                disabledReason={isStructuralSyncing ? 'Syncing changes...' : undefined}
                             />
                         </div>
                     </div>

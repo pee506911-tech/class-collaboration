@@ -11,7 +11,6 @@ import { PollSlideEditor } from '@/components/slide-editors/poll-slide-editor';
 import { QuizSlideEditor } from '@/components/slide-editors/quiz-slide-editor';
 import { MultipleChoiceSlideEditor } from '@/components/slide-editors/multiple-choice-slide-editor';
 
-export type SlideEditorSaveResult = { status: 'saved' | 'queued' };
 type SlideOption = { id: string; text: string; isCorrect?: boolean };
 type SlideContentDraft = {
     title?: string;
@@ -38,7 +37,7 @@ function areOptionListsEqual(left: SlideOption[], right: SlideOption[]) {
 
 interface SlideEditorPanelProps {
     slide: Slide;
-    onUpdate: (content: SlideContentDraft) => Promise<SlideEditorSaveResult>;
+    onUpdate: (content: SlideContentDraft) => void | Promise<unknown>;
     onSave?: () => void;
     disabled?: boolean;
     disabledReason?: string;
@@ -47,20 +46,9 @@ interface SlideEditorPanelProps {
 export function SlideEditorPanel({ slide, onUpdate, disabled = false, disabledReason }: SlideEditorPanelProps) {
     const [localContent, setLocalContent] = useState<SlideContentDraft>(slide.content as SlideContentDraft);
 
-    const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
     const optionCaptureTimerRef = useRef<NodeJS.Timeout | null>(null);
     const optionInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
-
     const latestContentRef = useRef<SlideContentDraft>(slide.content as SlideContentDraft);
-    const lastSyncedVersionRef = useRef(slide.version);
-    const pendingFlushRef = useRef(false);
-    const inFlightRef = useRef(false);
-    const hasLocalDraftRef = useRef(false);
-
-    const onUpdateRef = useRef(onUpdate);
-    useEffect(() => {
-        onUpdateRef.current = onUpdate;
-    }, [onUpdate]);
 
     const clearOptionCaptureTimer = useCallback(() => {
         if (optionCaptureTimerRef.current) {
@@ -69,121 +57,32 @@ export function SlideEditorPanel({ slide, onUpdate, disabled = false, disabledRe
         }
     }, []);
 
-    const pump = useCallback(async () => {
-        if (inFlightRef.current) {
-            return;
-        }
-
-        inFlightRef.current = true;
-
-        try {
-            while (pendingFlushRef.current) {
-                pendingFlushRef.current = false;
-                const contentToSave = latestContentRef.current;
-
-                try {
-                    await onUpdateRef.current(contentToSave);
-                } catch (err: unknown) {
-                    console.error('Failed to save slide draft', err);
-                    return;
-                }
-
-                if (latestContentRef.current === contentToSave && !pendingFlushRef.current) {
-                    hasLocalDraftRef.current = false;
-                }
-            }
-        } finally {
-            inFlightRef.current = false;
-        }
-    }, []);
-
-    const flushSave = useCallback(async (contentToSave = latestContentRef.current) => {
-        if (debounceTimerRef.current) {
-            clearTimeout(debounceTimerRef.current);
-            debounceTimerRef.current = null;
-        }
-        latestContentRef.current = contentToSave;
-        pendingFlushRef.current = true;
-        await pump();
-    }, [pump]);
-
-    const scheduleDebouncedSave = useCallback(() => {
-        if (debounceTimerRef.current) {
-            clearTimeout(debounceTimerRef.current);
-        }
-
-        debounceTimerRef.current = setTimeout(() => {
-            pendingFlushRef.current = true;
-            void pump();
-        }, 500);
-    }, [pump]);
-
     const stageDraft = useCallback((nextContent: SlideContentDraft) => {
         setLocalContent(nextContent);
         latestContentRef.current = nextContent;
-        hasLocalDraftRef.current = true;
-    }, []);
+        Promise.resolve(onUpdate(nextContent)).catch((error: unknown) => {
+            console.error('Failed to save slide draft', error);
+        });
+    }, [onUpdate]);
 
-    const updateContent = useCallback((updater: (currentContent: SlideContentDraft) => SlideContentDraft, immediate = false) => {
+    const updateContent = useCallback((updater: (currentContent: SlideContentDraft) => SlideContentDraft) => {
         const nextContent = updater(latestContentRef.current);
         stageDraft(nextContent);
-
-        if (immediate) {
-            void flushSave(nextContent);
-            return;
-        }
-
-        scheduleDebouncedSave();
-    }, [flushSave, scheduleDebouncedSave, stageDraft]);
+    }, [stageDraft]);
 
     const handleContentEditorChange = useCallback((nextContent: SlideContentDraft) => {
         stageDraft(nextContent);
-        scheduleDebouncedSave();
-    }, [scheduleDebouncedSave, stageDraft]);
+    }, [stageDraft]);
 
-    // Reset local state only when switching to a different slide.
     useEffect(() => {
         setLocalContent(slide.content);
         latestContentRef.current = slide.content;
-        lastSyncedVersionRef.current = slide.version;
-        pendingFlushRef.current = false;
-        hasLocalDraftRef.current = false;
-
-        if (debounceTimerRef.current) {
-            clearTimeout(debounceTimerRef.current);
-            debounceTimerRef.current = null;
-        }
         clearOptionCaptureTimer();
 
         return () => {
-            // Clear any pending debounce timer to prevent saves after unmount
-            if (debounceTimerRef.current) {
-                clearTimeout(debounceTimerRef.current);
-                debounceTimerRef.current = null;
-            }
             clearOptionCaptureTimer();
-            // Do NOT flush here — if the slide was deleted, a flush would
-            // attempt to save to a non-existent slide. The parent component
-            // is responsible for flushing before structural changes.
         };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [clearOptionCaptureTimer, slide.id]);
-
-    // Rebase to the latest server snapshot only when there is no local draft in flight.
-    useEffect(() => {
-        if (slide.version === lastSyncedVersionRef.current) {
-            return;
-        }
-
-        lastSyncedVersionRef.current = slide.version;
-
-        if (hasLocalDraftRef.current || inFlightRef.current || pendingFlushRef.current) {
-            return;
-        }
-
-        setLocalContent(slide.content);
-        latestContentRef.current = slide.content;
-    }, [slide.content, slide.version]);
 
     useEffect(() => {
         for (const option of (localContent.options || []) as SlideOption[]) {
@@ -194,8 +93,8 @@ export function SlideEditorPanel({ slide, onUpdate, disabled = false, disabledRe
         }
     }, [localContent.options]);
 
-    const updateField = <K extends keyof SlideContentDraft>(field: K, value: SlideContentDraft[K], immediate = false) => {
-        updateContent((currentContent) => ({ ...currentContent, [field]: value }), immediate);
+    const updateField = <K extends keyof SlideContentDraft>(field: K, value: SlideContentDraft[K]) => {
+        updateContent((currentContent) => ({ ...currentContent, [field]: value }));
     };
 
     const readCurrentOptions = useCallback((): SlideOption[] => {
@@ -206,39 +105,29 @@ export function SlideEditorPanel({ slide, onUpdate, disabled = false, disabledRe
         }));
     }, []);
 
-    const captureOptionEdits = useCallback((immediate = false) => {
+    const captureOptionEdits = useCallback(() => {
         const currentOptions = (latestContentRef.current.options || []) as SlideOption[];
         const nextOptions = readCurrentOptions();
 
         if (areOptionListsEqual(currentOptions, nextOptions)) {
-            if (immediate) {
-                void flushSave();
-            }
             return;
         }
 
         const nextContent = { ...latestContentRef.current, options: nextOptions };
         stageDraft(nextContent);
-
-        if (immediate) {
-            void flushSave(nextContent);
-            return;
-        }
-
-        scheduleDebouncedSave();
-    }, [flushSave, readCurrentOptions, scheduleDebouncedSave, stageDraft]);
+    }, [readCurrentOptions, stageDraft]);
 
     const scheduleOptionCapture = useCallback(() => {
         clearOptionCaptureTimer();
         optionCaptureTimerRef.current = setTimeout(() => {
-            captureOptionEdits(false);
+            captureOptionEdits();
             optionCaptureTimerRef.current = null;
-        }, 2000);
+        }, 200);
     }, [captureOptionEdits, clearOptionCaptureTimer]);
 
     const flushOptionCapture = useCallback(() => {
         clearOptionCaptureTimer();
-        captureOptionEdits(true);
+        captureOptionEdits();
     }, [captureOptionEdits, clearOptionCaptureTimer]);
 
     const handleAddOption = () => {
@@ -420,7 +309,7 @@ export function SlideEditorPanel({ slide, onUpdate, disabled = false, disabledRe
                             <StaticSlideEditor
                                 content={localContent as StaticSlideContent}
                                 onChange={(next) => handleContentEditorChange(next)}
-                                onBlur={() => { void flushSave(); }}
+                                onBlur={() => undefined}
                                 disabled={disabled}
                             />
                         )}
@@ -429,7 +318,7 @@ export function SlideEditorPanel({ slide, onUpdate, disabled = false, disabledRe
                             <PollSlideEditor
                                 content={localContent as PollSlideContent}
                                 onChange={(next) => handleContentEditorChange(next as SlideContentDraft)}
-                                onBlur={() => { void flushSave(); }}
+                                onBlur={() => undefined}
                                 disabled={disabled}
                             />
                         )}
@@ -438,7 +327,7 @@ export function SlideEditorPanel({ slide, onUpdate, disabled = false, disabledRe
                             <QuizSlideEditor
                                 content={localContent as QuizSlideContent}
                                 onChange={(next) => handleContentEditorChange(next as SlideContentDraft)}
-                                onBlur={() => { void flushSave(); }}
+                                onBlur={() => undefined}
                                 disabled={disabled}
                             />
                         )}
@@ -447,7 +336,7 @@ export function SlideEditorPanel({ slide, onUpdate, disabled = false, disabledRe
                             <MultipleChoiceSlideEditor
                                 content={localContent as MultipleChoiceSlideContent}
                                 onChange={(next) => handleContentEditorChange(next as SlideContentDraft)}
-                                onBlur={() => { void flushSave(); }}
+                                onBlur={() => undefined}
                                 disabled={disabled}
                             />
                         )}
