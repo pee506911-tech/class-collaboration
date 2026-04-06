@@ -51,18 +51,28 @@ function toEditorSlide(slide: Slide): EditorSlide {
 function reconcileServerSlides(
     prevSlides: EditorSlide[],
     serverSlides: Slide[],
+    pendingDeleteServerIds: Set<string> = new Set(),
 ): EditorSlide[] {
+    const filteredServerSlides = serverSlides.filter((slide) => !pendingDeleteServerIds.has(slide.id));
     const prevSlidesByServerId = new Map(
         prevSlides
             .filter((slide) => slide.serverId)
             .map((slide) => [slide.serverId!, slide]),
     );
-    const incomingServerIds = new Set(serverSlides.map((slide) => slide.id));
+    const incomingServerIds = new Set(filteredServerSlides.map((slide) => slide.id));
 
-    const nextServerSlides = serverSlides.map((serverSlide) => {
+    const nextServerSlides = filteredServerSlides.map((serverSlide) => {
         const existingSlide = prevSlidesByServerId.get(serverSlide.id);
         if (!existingSlide) {
             return toEditorSlide(serverSlide);
+        }
+
+        if (existingSlide.hasLocalDraft || existingSlide.version > serverSlide.version) {
+            return {
+                ...existingSlide,
+                serverId: serverSlide.id,
+                pendingCreate: false,
+            };
         }
 
         return {
@@ -70,7 +80,6 @@ function reconcileServerSlides(
             ...serverSlide,
             id: existingSlide.id,
             serverId: serverSlide.id,
-            content: existingSlide.hasLocalDraft ? existingSlide.content : serverSlide.content,
             pendingCreate: false,
         };
     });
@@ -131,17 +140,38 @@ function EditorContent({
     const [isReordering, setIsReordering] = useState(false);
     const [isTogglingVisibility, setIsTogglingVisibility] = useState(false);
     const [isSavingSettings, setIsSavingSettings] = useState(false);
+    const [pendingDeleteServerIds, setPendingDeleteServerIds] = useState<string[]>([]);
     const [slides, setSlides] = useState<EditorSlide[]>(() => serverSlides.map(toEditorSlide));
     const slidesRef = useRef(slides);
+    const queuedServerSlidesRef = useRef<Slide[] | null>(null);
     const deletedPendingCreateIdsRef = useRef(new Set<string>());
 
     useEffect(() => {
         slidesRef.current = slides;
     }, [slides]);
 
+    const hasBlockingLocalChanges = isReordering
+        || isTogglingVisibility
+        || slides.some((slide) => slide.pendingCreate);
+
     useEffect(() => {
-        setSlides((prevSlides) => reconcileServerSlides(prevSlides, serverSlides));
-    }, [serverSlides]);
+        const nextServerSlides = queuedServerSlidesRef.current ?? serverSlides;
+        const pendingDeleteSet = new Set(pendingDeleteServerIds);
+
+        if (hasBlockingLocalChanges) {
+            queuedServerSlidesRef.current = serverSlides;
+            return;
+        }
+
+        queuedServerSlidesRef.current = null;
+        setSlides((prevSlides) => reconcileServerSlides(prevSlides, nextServerSlides, pendingDeleteSet));
+
+        const incomingServerIds = new Set(nextServerSlides.map((slide) => slide.id));
+        setPendingDeleteServerIds((prevIds) => {
+            const nextIds = prevIds.filter((serverId) => incomingServerIds.has(serverId));
+            return nextIds.length === prevIds.length ? prevIds : nextIds;
+        });
+    }, [hasBlockingLocalChanges, pendingDeleteServerIds, serverSlides]);
 
     // Refetch slides when server confirms changes via WS broadcast
     useEffect(() => {
@@ -170,7 +200,7 @@ function EditorContent({
                     ...savedSlide,
                     id: slide.id,
                     serverId: savedSlide.id,
-                    pendingCreate: false,
+                    pendingCreate: slide.pendingCreate,
                     hasLocalDraft: false,
                 }
                 : slide,
@@ -322,9 +352,11 @@ function EditorContent({
             .then((serverSlide) => {
                 const wasDeletedBeforeAck = deletedPendingCreateIdsRef.current.delete(tempId);
                 if (wasDeletedBeforeAck) {
+                    setPendingDeleteServerIds((prevIds) => prevIds.includes(serverSlide.id) ? prevIds : [...prevIds, serverSlide.id]);
                     void commitDeleteSlide(id, serverSlide.id).catch((deleteError) => {
                         console.error('Failed to delete slide after create settled', deleteError);
                         toast.error('Failed to delete slide');
+                        setPendingDeleteServerIds((prevIds) => prevIds.filter((serverId) => serverId !== serverSlide.id));
                         void loadSlides();
                     });
                     return;
@@ -345,7 +377,7 @@ function EditorContent({
                         ...(resolved.slide as EditorSlide),
                         id: slide.id,
                         serverId: serverSlide.id,
-                        pendingCreate: false,
+                        pendingCreate: true,
                         hasLocalDraft: slide.hasLocalDraft,
                     };
                 })) as EditorSlide[]);
@@ -450,10 +482,13 @@ function EditorContent({
             return;
         }
 
+        setPendingDeleteServerIds((prevIds) => prevIds.includes(slide.serverId!) ? prevIds : [...prevIds, slide.serverId!]);
+
         // Fire-and-forget: WS refetch will reconcile
         void commitDeleteSlide(id, slide.serverId).catch((error) => {
             console.error('Failed to delete slide', error);
             toast.error('Failed to delete slide');
+            setPendingDeleteServerIds((prevIds) => prevIds.filter((serverId) => serverId !== slide.serverId));
             setSlidesSynced((prev) => restoreSlideAtOrder(prev, slide) as EditorSlide[]);
             void loadSlides();
         });
@@ -502,9 +537,11 @@ function EditorContent({
             .then((serverSlide) => {
                 const wasDeletedBeforeAck = deletedPendingCreateIdsRef.current.delete(tempId);
                 if (wasDeletedBeforeAck) {
+                    setPendingDeleteServerIds((prevIds) => prevIds.includes(serverSlide.id) ? prevIds : [...prevIds, serverSlide.id]);
                     void commitDeleteSlide(id, serverSlide.id).catch((deleteError) => {
                         console.error('Failed to delete duplicated slide after create settled', deleteError);
                         toast.error('Failed to delete slide');
+                        setPendingDeleteServerIds((prevIds) => prevIds.filter((serverId) => serverId !== serverSlide.id));
                         void loadSlides();
                     });
                     return;
@@ -525,7 +562,7 @@ function EditorContent({
                         ...(resolved.slide as EditorSlide),
                         id: slide.id,
                         serverId: serverSlide.id,
-                        pendingCreate: false,
+                        pendingCreate: true,
                         hasLocalDraft: slide.hasLocalDraft,
                     };
                 })) as EditorSlide[]);
