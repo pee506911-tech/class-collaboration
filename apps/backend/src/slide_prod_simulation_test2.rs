@@ -32,7 +32,11 @@ mod tests {
         }
     }
 
-    fn make_batch_update(slide_id: &str, content: serde_json::Value, base_version: Option<i64>) -> BatchSlideUpdate {
+    fn make_batch_update(
+        slide_id: &str,
+        content: serde_json::Value,
+        base_version: Option<i64>,
+    ) -> BatchSlideUpdate {
         BatchSlideUpdate {
             slide_id: slide_id.to_string(),
             content,
@@ -66,7 +70,11 @@ mod tests {
             vec!["slide-B", "slide-A"]
         };
 
-        assert_eq!(server_order, vec!["slide-B", "slide-A"], "B arrived first so appears first");
+        assert_eq!(
+            server_order,
+            vec!["slide-B", "slide-A"],
+            "B arrived first so appears first"
+        );
         // Fix: Client should reorder via the reorder endpoint after all slides are created
     }
 
@@ -85,7 +93,10 @@ mod tests {
         let server_processed = true; // original request completed
         let retry_found_in_cache = server_processed; // wal_request_replays has the entry
 
-        assert!(retry_found_in_cache, "retry should find the original response via idempotency");
+        assert!(
+            retry_found_in_cache,
+            "retry should find the original response via idempotency"
+        );
         // Without X-Client-Request-Id, the retry would create a duplicate slide
     }
 
@@ -118,7 +129,16 @@ mod tests {
             }
         }
 
-        assert_eq!(results, vec!["ok", "409_conflict", "409_conflict", "409_conflict", "409_conflict"]);
+        assert_eq!(
+            results,
+            vec![
+                "ok",
+                "409_conflict",
+                "409_conflict",
+                "409_conflict",
+                "409_conflict"
+            ]
+        );
         // Fix: Client should use batch endpoint with all edits, or implement exponential backoff retry
     }
 
@@ -162,8 +182,13 @@ mod tests {
         let client_edit_version = Some(10i64); // even older — from before disconnect
         let server_slide_version = 5i64; // current version of the slide on server
 
-        let will_conflict = client_edit_version.map(|v| v != server_slide_version).unwrap_or(false);
-        assert!(will_conflict, "stale edit after WS disconnect should conflict");
+        let will_conflict = client_edit_version
+            .map(|v| v != server_slide_version)
+            .unwrap_or(false);
+        assert!(
+            will_conflict,
+            "stale edit after WS disconnect should conflict"
+        );
         // Fix: On WS reconnect, client should fetch full session state before sending edits
     }
 
@@ -181,7 +206,10 @@ mod tests {
         // With slow TLS: all 3 arrive after 2s, all see the same stale version.
         let edits_sent_in_1s = 3;
         let all_see_same_version = slow_tls_rtt_ms > 1000;
-        assert!(all_see_same_version, "all edits arrive after the same stale snapshot");
+        assert!(
+            all_see_same_version,
+            "all edits arrive after the same stale snapshot"
+        );
         assert_eq!(edits_sent_in_1s, 3);
         // Only the first edit succeeds, the other 2 get 409
     }
@@ -205,7 +233,10 @@ mod tests {
             let edit_a_server_version = 4i64;
 
             let client_rejects_stale = edit_a_server_version < client_local_version_after_b;
-            assert!(client_rejects_stale, "client should detect Edit-A is stale relative to local state");
+            assert!(
+                client_rejects_stale,
+                "client should detect Edit-A is stale relative to local state"
+            );
             // The actual slide on server IS at version 4 (Edit-A was first).
             // Edit-B then bumped it to 5. So Edit-A's response is correct, just late.
             // Fix: Client should track in-flight edits and ignore stale responses
@@ -234,7 +265,10 @@ mod tests {
                 individual_results.push("409");
             }
         }
-        assert_eq!(individual_results, vec!["ok", "409", "409", "409", "409", "409", "409", "409", "409", "409"]);
+        assert_eq!(
+            individual_results,
+            vec!["ok", "409", "409", "409", "409", "409", "409", "409", "409", "409"]
+        );
 
         // Scenario B: Same 10 updates via single batch endpoint
         // Batch pre-validates all versions, processes atomically
@@ -262,13 +296,19 @@ mod tests {
         let total_request_time_ms = lock_wait_time_ms + 500; // 500ms for actual work
 
         let client_timed_out = total_request_time_ms > client_timeout_ms;
-        assert!(!client_timed_out, "request B should complete before client timeout in this scenario");
+        assert!(
+            !client_timed_out,
+            "request B should complete before client timeout in this scenario"
+        );
 
         // But if lock wait is longer:
         let longer_lock_wait_ms = 6000;
         let total_with_longer_wait = longer_lock_wait_ms + 500;
         let client_timed_out_longer = total_with_longer_wait > client_timeout_ms;
-        assert!(client_timed_out_longer, "longer lock wait causes client timeout");
+        assert!(
+            client_timed_out_longer,
+            "longer lock wait causes client timeout"
+        );
         // Server still processes the request to completion — client just never sees the response
         // On retry, idempotency key returns the cached response
     }
@@ -291,7 +331,10 @@ mod tests {
 
         assert_eq!(immediate, 20);
         assert_eq!(queued, 20);
-        assert_eq!(timed_out, 10, "10 requests should timeout waiting for connection");
+        assert_eq!(
+            timed_out, 10,
+            "10 requests should timeout waiting for connection"
+        );
 
         // In production, the timed-out requests return 503 (transient error)
         // Client should implement exponential backoff retry
@@ -309,8 +352,14 @@ mod tests {
         let transaction_killed = true; // one of the two
         let survivor_commits = true;
 
-        assert!(transaction_killed, "MySQL kills one transaction on deadlock");
-        assert!(survivor_commits, "the other transaction commits successfully");
+        assert!(
+            transaction_killed,
+            "MySQL kills one transaction on deadlock"
+        );
+        assert!(
+            survivor_commits,
+            "the other transaction commits successfully"
+        );
 
         // Killed transaction client should retry with exponential backoff
         // On retry, it will see updated versions and need to rebase its edits
@@ -355,7 +404,10 @@ mod tests {
         assert!(!transaction_committed, "transaction should NOT commit");
         // After rollback, zero slides are persisted in the database
         let slides_persisted_after_rollback = 0i32;
-        assert_eq!(slides_persisted_after_rollback, 0, "no slides persisted after rollback");
+        assert_eq!(
+            slides_persisted_after_rollback, 0,
+            "no slides persisted after rollback"
+        );
         // This is the correct behavior: atomicity guarantees no partial state
     }
 
@@ -388,8 +440,14 @@ mod tests {
         let leader_transfer_duration_ms = 100;
         let write_during_transfer_fails = true;
 
-        assert!(write_during_transfer_fails, "writes during leader transfer should fail");
-        assert_eq!(leader_transfer_duration_ms, 100, "typical TiDB leader transfer takes ~100ms");
+        assert!(
+            write_during_transfer_fails,
+            "writes during leader transfer should fail"
+        );
+        assert_eq!(
+            leader_transfer_duration_ms, 100,
+            "typical TiDB leader transfer takes ~100ms"
+        );
 
         // Failed writes are transient — client should retry
         // The transaction rolls back cleanly, no partial state
@@ -414,7 +472,10 @@ mod tests {
 
         let connection_wait_timeout_ms = 5000;
         let tail_request_times_out = estimated_wait_for_tail_ms > connection_wait_timeout_ms;
-        assert!(tail_request_times_out, "tail request times out waiting for connection");
+        assert!(
+            tail_request_times_out,
+            "tail request times out waiting for connection"
+        );
         // In practice, the wait isn't perfectly FIFO — some connections free faster
     }
 
@@ -435,7 +496,10 @@ mod tests {
         let client_timeout_ms = 3000;
         let retry_before_commit_finishes = client_timeout_ms < commit_time_ms;
 
-        assert!(retry_before_commit_finishes, "client retries before original commit finishes");
+        assert!(
+            retry_before_commit_finishes,
+            "client retries before original commit finishes"
+        );
 
         // Without idempotency guard, the update is applied TWICE
         // With X-Client-Request-Id: the retry also INSERT IGNOREs into wal_request_replays
@@ -459,7 +523,10 @@ mod tests {
 
         if all_were_evicted {
             let total_reprepare_overhead_ms = 10 * reprepare_ms;
-            assert_eq!(total_reprepare_overhead_ms, 50, "50ms overhead from re-preparing");
+            assert_eq!(
+                total_reprepare_overhead_ms, 50,
+                "50ms overhead from re-preparing"
+            );
 
             // 50ms isn't enough to cause timeouts, but it adds up with other latency sources
             // Combined with 200ms RTT and 3s lock wait → pushes request over the edge
@@ -507,7 +574,10 @@ mod tests {
             let queries_per_rebuild = 3; // simplified
             let total_queries = concurrent_reads * queries_per_rebuild;
 
-            assert_eq!(total_queries, 30, "10 concurrent reads × 3 queries each = 30 queries");
+            assert_eq!(
+                total_queries, 30,
+                "10 concurrent reads × 3 queries each = 30 queries"
+            );
 
             // Only the first rebuild should populate the cache; the others should
             // ideally wait for it (thundering herd prevention).
@@ -527,7 +597,10 @@ mod tests {
         // T3: Cache entry expires (TTL reached)
         // T5: Batch update commits, tries to invalidate → key already gone
         let entry_expired_before_invalidation = operation_duration_secs > cache_ttl_secs;
-        assert!(entry_expired_before_invalidation, "cache entry expires before invalidation runs");
+        assert!(
+            entry_expired_before_invalidation,
+            "cache entry expires before invalidation runs"
+        );
 
         // This is harmless — the next read will miss and rebuild correctly.
         // But it means the cache provides no benefit for slow operations.
@@ -567,7 +640,10 @@ mod tests {
         let first_invalidation_removed_entry = true;
         let second_invalidation_is_noop = first_invalidation_removed_entry;
 
-        assert!(second_invalidation_is_noop, "second invalidation is a harmless no-op");
+        assert!(
+            second_invalidation_is_noop,
+            "second invalidation is a harmless no-op"
+        );
         // After both commits, cache is empty → next read rebuilds from DB → correct state
     }
 
@@ -585,7 +661,10 @@ mod tests {
         if read_hits_cache && !invalidation_ran && delete_committed {
             let returned_slides = vec!["A", "B", "C"];
             let actual_slides = vec!["A", "C"];
-            assert_ne!(returned_slides, actual_slides, "cache returns ghost slide B");
+            assert_ne!(
+                returned_slides, actual_slides,
+                "cache returns ghost slide B"
+            );
             // Window is very brief (microseconds in-process), but exists
         }
     }
@@ -644,7 +723,10 @@ mod tests {
         let key_a = session_a;
         let key_b = session_b;
 
-        assert_ne!(key_a, key_b, "similar session IDs must produce distinct cache keys");
+        assert_ne!(
+            key_a, key_b,
+            "similar session IDs must produce distinct cache keys"
+        );
         // The SessionStateCache uses the session_id string directly as the key,
         // so collisions are impossible unless two sessions share the same UUID
     }
@@ -682,7 +764,11 @@ mod tests {
             .collect();
 
         assert!(tab_a_succeeds);
-        assert_eq!(tab_b_conflicts, vec![true, true, true], "Tab B conflicts on ALL slides");
+        assert_eq!(
+            tab_b_conflicts,
+            vec![true, true, true],
+            "Tab B conflicts on ALL slides"
+        );
         // Tab B's entire batch rolls back → client gets 409 for the first conflicting slide
     }
 
@@ -814,7 +900,10 @@ mod tests {
             // Batch changes slide version 3→4
             // Single update's WHERE version = 3 → rows_affected = 0 → 409
             let single_update_succeeds = false;
-            assert!(!single_update_succeeds, "single update conflicts with batch");
+            assert!(
+                !single_update_succeeds,
+                "single update conflicts with batch"
+            );
         } else {
             // Batch updates different slides → no conflict
             let single_update_succeeds = true;
@@ -942,7 +1031,10 @@ mod tests {
         let response_sent = false;
         let idempotency_entry_exists = db_committed;
 
-        assert!(idempotency_entry_exists, "wal_request_replays has the entry");
+        assert!(
+            idempotency_entry_exists,
+            "wal_request_replays has the entry"
+        );
         // BUT: the wal_request_replays INSERT is inside the same transaction as the updates.
         // If the transaction committed, the replay entry is there.
         // The retry finds it and returns the stored response. ✓
@@ -984,7 +1076,10 @@ mod tests {
         let total_drain_time_ms = batches_needed * poll_interval_ms;
 
         assert_eq!(batches_needed, 20);
-        assert_eq!(total_drain_time_ms, 2000, "takes 2 seconds to drain backlog");
+        assert_eq!(
+            total_drain_time_ms, 2000,
+            "takes 2 seconds to drain backlog"
+        );
 
         // SLIDES_UPDATE events are mixed with STATE_UPDATE and VOTE_UPDATE
         // STATE_UPDATE has priority (processed first)
@@ -1083,7 +1178,10 @@ mod tests {
         let rotation_window_seconds = 30;
         let request_fails_during_rotation = true;
 
-        assert!(request_fails_during_rotation, "some requests fail during cert rotation");
+        assert!(
+            request_fails_during_rotation,
+            "some requests fail during cert rotation"
+        );
 
         // Failed requests get TLS handshake error → client retries
         // Retry succeeds once rotation completes
@@ -1105,7 +1203,10 @@ mod tests {
         // But they miss any SLIDES_UPDATE events published during the disconnect window
         let reconnect_time_ms = 1000;
         let events_missed_during_reconnect = reconnect_time_ms / 100; // poll interval
-        assert_eq!(events_missed_during_reconnect, 10, "may miss up to 10 poll cycles");
+        assert_eq!(
+            events_missed_during_reconnect, 10,
+            "may miss up to 10 poll cycles"
+        );
 
         // On reconnect, client should do a full state refetch
     }
@@ -1146,7 +1247,10 @@ mod tests {
         let num_slides = 10;
 
         let order_indices: Vec<i32> = (0..num_slides).map(|i| i as i32 * order_step).collect();
-        assert_eq!(order_indices, vec![0, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216]);
+        assert_eq!(
+            order_indices,
+            vec![0, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192, 9216]
+        );
 
         // Large gaps are intentional — they allow insertions between existing slides
         // Without gaps, inserting between slide 0 and 1 would require reordering all slides
@@ -1261,7 +1365,10 @@ mod tests {
         // with full ORDER_STEP spacing
         let reallocate_threshold = 2;
         let reallocate_needed = gap_after_n_insertions < reallocate_threshold;
-        assert!(!reallocate_needed, "20 reorder operations don't exhaust gap (reallocate not needed yet)");
+        assert!(
+            !reallocate_needed,
+            "20 reorder operations don't exhaust gap (reallocate not needed yet)"
+        );
         // But many more reorder operations between the same two adjacent slides would trigger it
     }
 
@@ -1278,7 +1385,10 @@ mod tests {
         let edit_base_version = 0i64;
 
         let version_matches = create_version == edit_base_version;
-        assert!(version_matches, "edit should match the freshly-created slide's version");
+        assert!(
+            version_matches,
+            "edit should match the freshly-created slide's version"
+        );
 
         // Edit succeeds: version 0→1
         // Both operations complete successfully

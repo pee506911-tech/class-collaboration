@@ -1135,7 +1135,9 @@ pub async fn upvote_question(
 
     let (sequence, questions) = next_qa_sequence_and_questions(&mut tx, &session_id).await?;
 
-    let updated_upvotes = question.upvotes.saturating_add(if already_upvoted { 0 } else { 1 });
+    let updated_upvotes = question
+        .upvotes
+        .saturating_add(if already_upvoted { 0 } else { 1 });
     let response = serde_json::json!({
         "message": "Question upvoted",
         "upvotes": updated_upvotes,

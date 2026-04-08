@@ -107,12 +107,10 @@ async fn verify_session_exists(pool: &sqlx::MySqlPool, session_id: &str) -> Resu
 
 async fn lock_session(tx: &mut Transaction<'_, MySql>, session_id: &str) -> Result<()> {
     let lock_start = std::time::Instant::now();
-    let exists = query_scalar::<_, String>(
-        "SELECT id FROM sessions WHERE id = ? FOR UPDATE",
-    )
-    .bind(session_id)
-    .fetch_optional(&mut **tx)
-    .await?;
+    let exists = query_scalar::<_, String>("SELECT id FROM sessions WHERE id = ? FOR UPDATE")
+        .bind(session_id)
+        .fetch_optional(&mut **tx)
+        .await?;
 
     let lock_duration_ms = lock_start.elapsed().as_millis();
     if lock_duration_ms > 100 {
@@ -168,7 +166,9 @@ pub async fn create_slide(
     )
     .await?
     {
-        return Ok(crate::services::wal::queued_success_response(&existing_slide));
+        return Ok(crate::services::wal::queued_success_response(
+            &existing_slide,
+        ));
     }
 
     let slide_id = Uuid::new_v4().to_string();
@@ -180,7 +180,8 @@ pub async fn create_slide(
     // The order allocation queries only touch the slides table, not the session row.
     let order_index = {
         let mut order_tx = pool.begin().await?;
-        let idx = compute_insert_order_index(&mut order_tx, &session_id, insert_after.as_deref()).await?;
+        let idx =
+            compute_insert_order_index(&mut order_tx, &session_id, insert_after.as_deref()).await?;
         order_tx.commit().await?;
         idx
     };
@@ -220,7 +221,10 @@ pub async fn create_slide(
     tx.commit().await?;
 
     broadcast_slides_update(&app_state, &session_id, std::slice::from_ref(&slide)).await;
-    app_state.session_service.invalidate_session_cache(&session_id).await;
+    app_state
+        .session_service
+        .invalidate_session_cache(&session_id)
+        .await;
 
     Ok(crate::services::wal::queued_success_response(&slide))
 }
@@ -262,13 +266,17 @@ pub async fn create_slides_batch(
         return Ok(crate::services::wal::queued_success_response(&existing));
     }
 
-    let slide_specs: Vec<_> = payload.slides.iter().map(|s| {
-        (
-            Uuid::new_v4().to_string(),
-            s.slide_type.clone(),
-            s.content.clone(),
-        )
-    }).collect();
+    let slide_specs: Vec<_> = payload
+        .slides
+        .iter()
+        .map(|s| {
+            (
+                Uuid::new_v4().to_string(),
+                s.slide_type.clone(),
+                s.content.clone(),
+            )
+        })
+        .collect();
 
     let mut tx = pool.begin().await?;
     lock_session(&mut tx, &session_id).await?;
@@ -317,17 +325,23 @@ pub async fn create_slides_batch(
     tx.commit().await?;
 
     broadcast_slides_update(&app_state, &session_id, &created_slides).await;
-    app_state.session_service.invalidate_session_cache(&session_id).await;
+    app_state
+        .session_service
+        .invalidate_session_cache(&session_id)
+        .await;
 
-    let state_version = sqlx::query_scalar::<_, i64>("SELECT state_version FROM sessions WHERE id = ?")
-        .bind(&session_id)
-        .fetch_one(&pool)
-        .await?;
+    let state_version =
+        sqlx::query_scalar::<_, i64>("SELECT state_version FROM sessions WHERE id = ?")
+            .bind(&session_id)
+            .fetch_one(&pool)
+            .await?;
 
-    Ok(crate::services::wal::queued_success_response(&CreateSlidesBatchResponse {
-        slides: created_slides,
-        state_version,
-    }))
+    Ok(crate::services::wal::queued_success_response(
+        &CreateSlidesBatchResponse {
+            slides: created_slides,
+            state_version,
+        },
+    ))
 }
 
 /// Update multiple slides in a single atomic operation.
@@ -401,7 +415,10 @@ pub async fn update_slides_batch(
         let slide = existing_slides_map.get(&update.slide_id).unwrap();
         if let Some(base_version) = update.base_version {
             if base_version != slide.version {
-                return Err(build_slide_version_conflict(&update.slide_id, slide.version));
+                return Err(build_slide_version_conflict(
+                    &update.slide_id,
+                    slide.version,
+                ));
             }
         }
     }
@@ -430,7 +447,10 @@ pub async fn update_slides_batch(
 
         if result.rows_affected() == 0 {
             // This should not happen given pre-check, but guard anyway
-            return Err(build_slide_version_conflict(&update.slide_id, expected_version));
+            return Err(build_slide_version_conflict(
+                &update.slide_id,
+                expected_version,
+            ));
         }
 
         let slide = load_slide(&mut tx, &update.slide_id, &session_id).await?;
@@ -462,17 +482,23 @@ pub async fn update_slides_batch(
     tx.commit().await?;
 
     broadcast_slides_update(&app_state, &session_id, &updated_slides).await;
-    app_state.session_service.invalidate_session_cache(&session_id).await;
+    app_state
+        .session_service
+        .invalidate_session_cache(&session_id)
+        .await;
 
-    let state_version = sqlx::query_scalar::<_, i64>("SELECT state_version FROM sessions WHERE id = ?")
-        .bind(&session_id)
-        .fetch_one(&pool)
-        .await?;
+    let state_version =
+        sqlx::query_scalar::<_, i64>("SELECT state_version FROM sessions WHERE id = ?")
+            .bind(&session_id)
+            .fetch_one(&pool)
+            .await?;
 
-    Ok(crate::services::wal::queued_success_response(&UpdateSlidesBatchResponse {
-        slides: updated_slides,
-        state_version,
-    }))
+    Ok(crate::services::wal::queued_success_response(
+        &UpdateSlidesBatchResponse {
+            slides: updated_slides,
+            state_version,
+        },
+    ))
 }
 
 fn extract_client_request_id(headers: &HeaderMap) -> Result<Option<String>> {
@@ -526,7 +552,10 @@ pub async fn update_slide(
 
     if let Some(base_version) = payload.base_version {
         if base_version != existing_slide.version {
-            return Err(build_slide_version_conflict(&slide_id, existing_slide.version));
+            return Err(build_slide_version_conflict(
+                &slide_id,
+                existing_slide.version,
+            ));
         }
     }
 
@@ -570,14 +599,13 @@ pub async fn update_slide(
 
     if result.rows_affected() == 0 {
         // Version mismatch — the slide changed between our pre-check and this UPDATE.
-        let current_version = query_scalar::<_, i64>(
-            "SELECT version FROM slides WHERE id = ? AND session_id = ?",
-        )
-        .bind(&slide_id)
-        .bind(&session_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .unwrap_or(expected_version);
+        let current_version =
+            query_scalar::<_, i64>("SELECT version FROM slides WHERE id = ? AND session_id = ?")
+                .bind(&slide_id)
+                .bind(&session_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .unwrap_or(expected_version);
 
         return Err(build_slide_version_conflict(&slide_id, current_version));
     }
@@ -598,7 +626,10 @@ pub async fn update_slide(
     tx.commit().await?;
 
     broadcast_slides_update(&app_state, &session_id, std::slice::from_ref(&slide)).await;
-    app_state.session_service.invalidate_session_cache(&session_id).await;
+    app_state
+        .session_service
+        .invalidate_session_cache(&session_id)
+        .await;
 
     Ok(crate::services::wal::queued_success_response(&slide))
 }
@@ -674,7 +705,10 @@ pub async fn delete_slide(
     tx.commit().await?;
 
     broadcast_slides_update(&app_state, &session_id, &[]).await;
-    app_state.session_service.invalidate_session_cache(&session_id).await;
+    app_state
+        .session_service
+        .invalidate_session_cache(&session_id)
+        .await;
 
     Ok(crate::services::wal::queued_success_response(&response))
 }
@@ -722,7 +756,8 @@ pub async fn reorder_slides(
     if session_slide_ids != payload.slide_ids {
         let changed_slide_ids = collect_changed_slide_ids(&session_slide_ids, &payload.slide_ids);
         let temporary_assignments = build_temporary_order_assignments(&changed_slide_ids);
-        let final_assignments = build_final_order_assignments(&session_slide_ids, &payload.slide_ids);
+        let final_assignments =
+            build_final_order_assignments(&session_slide_ids, &payload.slide_ids);
 
         apply_order_assignments(&mut tx, &session_id, &temporary_assignments).await?;
         apply_order_assignments(&mut tx, &session_id, &final_assignments).await?;
@@ -747,7 +782,10 @@ pub async fn reorder_slides(
     tx.commit().await?;
 
     broadcast_slides_update(&app_state, &session_id, &[]).await;
-    app_state.session_service.invalidate_session_cache(&session_id).await;
+    app_state
+        .session_service
+        .invalidate_session_cache(&session_id)
+        .await;
 
     Ok(crate::services::wal::queued_success_response(&response))
 }

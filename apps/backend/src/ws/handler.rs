@@ -162,19 +162,22 @@ async fn handle_socket(
         match receiver.recv().await {
             Ok(message) => {
                 let forward_started_at = std::time::Instant::now();
-                
+
                 // Extract event metadata for audit logging
-                let event_type = message.get("type").and_then(|v| v.as_str()).unwrap_or("UNKNOWN");
+                let event_type = message
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("UNKNOWN");
                 let sequence_id = message.get("sequence").and_then(|v| v.as_u64());
-                
+
                 if let Ok(json_str) = serde_json::to_string(&message) {
                     if ws_sender.send(Message::Text(json_str)).await.is_err() {
                         // Client disconnected
                         break;
                     }
-                    
+
                     let delivery_duration_ms = forward_started_at.elapsed().as_millis();
-                    
+
                     // Log delivery timing for audit profiling
                     tracing::info!(
                         session_id = %session_id_forward,

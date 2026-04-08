@@ -40,7 +40,11 @@ mod tests {
         }
     }
 
-    fn make_batch_update(slide_id: &str, content: serde_json::Value, base_version: Option<i64>) -> BatchSlideUpdate {
+    fn make_batch_update(
+        slide_id: &str,
+        content: serde_json::Value,
+        base_version: Option<i64>,
+    ) -> BatchSlideUpdate {
         BatchSlideUpdate {
             slide_id: slide_id.to_string(),
             content,
@@ -103,13 +107,17 @@ mod tests {
         // Client A reads v1, Client B reads v1 (same stale snapshot)
         // Client A sends update first with baseVersion=1 → succeeds, bumps to v2
         let client_a_version = Some(1i64);
-        let a_wins = client_a_version.map(|v| v == slide_v1.version).unwrap_or(true);
+        let a_wins = client_a_version
+            .map(|v| v == slide_v1.version)
+            .unwrap_or(true);
         assert!(a_wins, "Client A should succeed (version matches)");
 
         // Client B sends update with baseVersion=1, but server now has v2
         let server_version_after_a = 2;
         let client_b_version = Some(1i64);
-        let b_conflicts = client_b_version.map(|v| v != server_version_after_a).unwrap_or(false);
+        let b_conflicts = client_b_version
+            .map(|v| v != server_version_after_a)
+            .unwrap_or(false);
         assert!(b_conflicts, "Client B should conflict (version stale)");
     }
 
@@ -138,14 +146,21 @@ mod tests {
         let mut conflicts = Vec::new();
         for update in &batch_request.updates {
             if let Some(base) = update.base_version {
-                let server_slide = server_slides.iter().find(|s| s.id == update.slide_id).unwrap();
+                let server_slide = server_slides
+                    .iter()
+                    .find(|s| s.id == update.slide_id)
+                    .unwrap();
                 if base != server_slide.version {
                     conflicts.push(&update.slide_id);
                 }
             }
         }
 
-        assert_eq!(conflicts, vec!["slide-1", "slide-3"], "should detect all stale versions");
+        assert_eq!(
+            conflicts,
+            vec!["slide-1", "slide-3"],
+            "should detect all stale versions"
+        );
         // In production, the entire batch is rolled back — none of the updates apply
     }
 
@@ -167,13 +182,19 @@ mod tests {
 
         // Scenario A: cache invalidation succeeds
         let cache_invalidated = true;
-        assert!(cache_invalidated, "cache should be invalidated after batch update");
+        assert!(
+            cache_invalidated,
+            "cache should be invalidated after batch update"
+        );
 
         // Scenario B: cache invalidation fails (e.g., network partition to cache layer)
         let cache_invalidated_b = false;
         // Next read from cache returns stale data
         if !cache_invalidated_b {
-            assert_eq!(cached_state_version, 1, "cache still serves stale state_version");
+            assert_eq!(
+                cached_state_version, 1,
+                "cache still serves stale state_version"
+            );
             // The client would detect this via state_version mismatch on the WebSocket
             // SLIDES_UPDATE message and force a hard refetch.
         }
@@ -194,10 +215,16 @@ mod tests {
         // Cache was invalidated twice — the second invalidation is idempotent
         // (invalidating an already-empty cache entry is a no-op)
         let invalidation_count = 2;
-        assert!(invalidation_count >= 1, "cache should be invalidated at least once");
+        assert!(
+            invalidation_count >= 1,
+            "cache should be invalidated at least once"
+        );
 
         // Next read misses cache and fetches state_version=12 from DB
-        assert_eq!(final_version, 12, "next read should see latest state_version");
+        assert_eq!(
+            final_version, 12,
+            "next read should see latest state_version"
+        );
     }
 
     /// Cache eviction during long-running operation:
@@ -212,7 +239,10 @@ mod tests {
         // Operation commits at T=5
         let cache_still_valid = operation_duration_secs < cache_ttl_secs;
 
-        assert!(!cache_still_valid, "cache entry should have expired by commit time");
+        assert!(
+            !cache_still_valid,
+            "cache entry should have expired by commit time"
+        );
         // The invalidate() call at T=5 is a no-op (key already evicted)
         // This is fine — the next read will miss and rebuild from DB.
     }
@@ -239,7 +269,10 @@ mod tests {
             0
         };
 
-        assert_eq!(rows_affected, 0, "UPDATE should affect 0 rows due to version mismatch");
+        assert_eq!(
+            rows_affected, 0,
+            "UPDATE should affect 0 rows due to version mismatch"
+        );
         // Handler should detect rows_affected==0 and return 409 with current version
     }
 
@@ -259,14 +292,22 @@ mod tests {
         let slide_versions_at_update = vec![2, 6, 1]; // slide-2 changed by another writer
 
         let mut failure_index: Option<usize> = None;
-        for (i, (&pre_ver, &actual_ver)) in slide_versions_at_precheck.iter().zip(slide_versions_at_update.iter()).enumerate() {
+        for (i, (&pre_ver, &actual_ver)) in slide_versions_at_precheck
+            .iter()
+            .zip(slide_versions_at_update.iter())
+            .enumerate()
+        {
             if pre_ver != actual_ver {
                 failure_index = Some(i);
                 break;
             }
         }
 
-        assert_eq!(failure_index, Some(1), "slide-2 should fail due to race window");
+        assert_eq!(
+            failure_index,
+            Some(1),
+            "slide-2 should fail due to race window"
+        );
         // In production, the entire transaction rolls back — no partial updates
     }
 
@@ -279,13 +320,12 @@ mod tests {
         // Tab A: tries to update slide-X → server returns 404
         let slide_exists = false;
 
-        let result = if slide_exists {
-            "ok"
-        } else {
-            "not_found"
-        };
+        let result = if slide_exists { "ok" } else { "not_found" };
 
-        assert_eq!(result, "not_found", "updating a deleted slide should return 404");
+        assert_eq!(
+            result, "not_found",
+            "updating a deleted slide should return 404"
+        );
     }
 
     // ============================================================
@@ -301,10 +341,13 @@ mod tests {
         // The middleware classifies pool exhaustion as transient (retryable).
         // We test the classification logic here conceptually:
         let error_description = "pool timed out while waiting for an open connection";
-        let is_transient_by_design = error_description.contains("timed out")
-            || error_description.contains("pool");
+        let is_transient_by_design =
+            error_description.contains("timed out") || error_description.contains("pool");
 
-        assert!(is_transient_by_design, "pool exhaustion should be classified as transient");
+        assert!(
+            is_transient_by_design,
+            "pool exhaustion should be classified as transient"
+        );
     }
 
     /// Database connection reset mid-transaction.
@@ -314,10 +357,13 @@ mod tests {
         // sqlx wraps this as AppError::Database(sqlx::Error::Pool(...))
         // Connection reset is always transient — the operation may have partially applied.
         let error_description = "connection reset by peer";
-        let is_transient_by_design = error_description.contains("reset")
-            || error_description.contains("broken pipe");
+        let is_transient_by_design =
+            error_description.contains("reset") || error_description.contains("broken pipe");
 
-        assert!(is_transient_by_design, "connection reset should be transient");
+        assert!(
+            is_transient_by_design,
+            "connection reset should be transient"
+        );
     }
 
     /// Deadlock detected during batch commit.
@@ -327,8 +373,8 @@ mod tests {
         // MySQL error 1213: "Deadlock found when trying to get lock"
         // sqlx surfaces this as a database error; the handler should classify as transient.
         let error_description = "Deadlock found when trying to get lock";
-        let is_transient_by_design = error_description.contains("Deadlock")
-            || error_description.contains("lock");
+        let is_transient_by_design =
+            error_description.contains("Deadlock") || error_description.contains("lock");
 
         assert!(is_transient_by_design, "deadlock should be transient");
     }
@@ -341,7 +387,10 @@ mod tests {
         // AppError::Input is never transient — retrying won't fix bad input
         match &error {
             AppError::Input(msg) => {
-                assert!(msg.contains("No slides"), "should preserve the original message");
+                assert!(
+                    msg.contains("No slides"),
+                    "should preserve the original message"
+                );
             }
             _ => panic!("expected Input error"),
         }
@@ -367,7 +416,10 @@ mod tests {
         let outbox_enqueue_succeeded = false;
         let transaction_committed = outbox_enqueue_succeeded;
 
-        assert!(!transaction_committed, "transaction should NOT commit if outbox fails");
+        assert!(
+            !transaction_committed,
+            "transaction should NOT commit if outbox fails"
+        );
     }
 
     /// Outbox event is enqueued but the WebSocket publisher crashes before
@@ -382,7 +434,10 @@ mod tests {
 
         // Event is still in the outbox table, awaiting poll
         let event_available_for_retry = outbox_enqueued && websocket_delivery_failed;
-        assert!(event_available_for_retry, "outbox event should be available for next poll cycle");
+        assert!(
+            event_available_for_retry,
+            "outbox event should be available for next poll cycle"
+        );
     }
 
     /// Multiple slide updates in a batch produce exactly ONE outbox event
@@ -395,8 +450,14 @@ mod tests {
         // with all updated slides as the payload.
         let outbox_events_enqueued = 1; // not num_slides_in_batch
 
-        assert_eq!(outbox_events_enqueued, 1, "batch should produce exactly one outbox event");
-        assert!(outbox_events_enqueued < num_slides_in_batch, "single event is more efficient than N events");
+        assert_eq!(
+            outbox_events_enqueued, 1,
+            "batch should produce exactly one outbox event"
+        );
+        assert!(
+            outbox_events_enqueued < num_slides_in_batch,
+            "single event is more efficient than N events"
+        );
     }
 
     // ============================================================
@@ -420,11 +481,13 @@ mod tests {
     fn oversized_batch_rejected() {
         const MAX_BATCH_SLIDE_COUNT: usize = 50;
         let updates: Vec<BatchSlideUpdate> = (0..51)
-            .map(|i| make_batch_update(
-                &format!("slide-{i}"),
-                json!({"title": format!("slide {i}")}),
-                Some(0),
-            ))
+            .map(|i| {
+                make_batch_update(
+                    &format!("slide-{i}"),
+                    json!({"title": format!("slide {i}")}),
+                    Some(0),
+                )
+            })
             .collect();
 
         let exceeds_limit = updates.len() > MAX_BATCH_SLIDE_COUNT;
@@ -444,7 +507,11 @@ mod tests {
             .filter(|id| !existing_slide_ids.contains(id))
             .collect();
 
-        assert_eq!(missing_slides, vec![&"slide-2"], "should detect missing slide before transaction");
+        assert_eq!(
+            missing_slides,
+            vec![&"slide-2"],
+            "should detect missing slide before transaction"
+        );
         // In production, the handler returns 404 without starting a transaction
     }
 
@@ -460,8 +527,15 @@ mod tests {
             state_version: 42,
         };
 
-        assert_eq!(response.state_version, 42, "response should include state_version");
-        assert_eq!(response.slides.len(), 2, "response should include all updated slides");
+        assert_eq!(
+            response.state_version, 42,
+            "response should include state_version"
+        );
+        assert_eq!(
+            response.slides.len(),
+            2,
+            "response should include all updated slides"
+        );
     }
 
     // ============================================================
@@ -483,7 +557,10 @@ mod tests {
         assert!(is_valid(truncated_id));
 
         // Idempotency is per-ID — truncated ID is treated as a different request
-        assert_ne!(original_id, truncated_id, "truncated ID is a different idempotency key");
+        assert_ne!(
+            original_id, truncated_id,
+            "truncated ID is a different idempotency key"
+        );
     }
 
     /// Client request ID exceeds maximum length (64 chars).
@@ -510,7 +587,10 @@ mod tests {
         if idempotency_hit {
             // Server returns the ORIGINAL response without re-processing
             // This prevents double-updates if the client retries due to network issues
-            assert!(idempotency_hit, "duplicate request should hit idempotency cache");
+            assert!(
+                idempotency_hit,
+                "duplicate request should hit idempotency cache"
+            );
         }
     }
 
@@ -543,7 +623,10 @@ mod tests {
         let state_version_before = 10i64;
         let state_version_after = state_version_before + 1;
 
-        assert_eq!(state_version_after, 11, "batch update should bump state_version by 1");
+        assert_eq!(
+            state_version_after, 11,
+            "batch update should bump state_version by 1"
+        );
     }
 
     /// Multiple concurrent batch updates each bump state_version independently.
@@ -556,7 +639,10 @@ mod tests {
         let version_after_b = version_after_a + 1;
         let version_after_c = version_after_b + 1;
 
-        assert_eq!(version_after_c, 13, "three batch updates should bump state_version by 3");
+        assert_eq!(
+            version_after_c, 13,
+            "three batch updates should bump state_version by 3"
+        );
     }
 
     // ============================================================
@@ -611,7 +697,10 @@ mod tests {
         let deserialized: Slide = serde_json::from_str(&serialized).expect("should deserialize");
 
         assert_eq!(deserialized.id, "slide-big");
-        assert_eq!(deserialized.content.0["options"].as_array().unwrap().len(), 100);
+        assert_eq!(
+            deserialized.content.0["options"].as_array().unwrap().len(),
+            100
+        );
     }
 
     /// Slide content with Unicode characters should survive roundtrip.
@@ -714,7 +803,10 @@ mod tests {
         // If they do, deleting the user cascades to session deletion.
         // If not, the session persists orphaned.
         let access_allowed = session_exists && creator_exists;
-        assert!(!access_allowed, "deleted creator should not be able to update slides");
+        assert!(
+            !access_allowed,
+            "deleted creator should not be able to update slides"
+        );
     }
 
     // ============================================================
@@ -732,10 +824,16 @@ mod tests {
         let slide_3_reached = false;
 
         let transaction_rolled_back = slide_2_error;
-        assert!(transaction_rolled_back, "any DB error in batch should roll back the entire transaction");
+        assert!(
+            transaction_rolled_back,
+            "any DB error in batch should roll back the entire transaction"
+        );
 
         // After rollback, NONE of the slides should be updated in the DB
-        assert!(!slide_1_updated || transaction_rolled_back, "slide-1 should NOT be persisted after rollback");
+        assert!(
+            !slide_1_updated || transaction_rolled_back,
+            "slide-1 should NOT be persisted after rollback"
+        );
         assert!(!slide_3_reached, "slide-3 should not be reached");
     }
 
@@ -751,7 +849,11 @@ mod tests {
         let mut conflict_detected = false;
         let conflict_slide: Option<usize> = None;
 
-        for (_i, (&client_ver, &server_ver)) in client_versions.iter().zip(server_versions.iter()).enumerate() {
+        for (_i, (&client_ver, &server_ver)) in client_versions
+            .iter()
+            .zip(server_versions.iter())
+            .enumerate()
+        {
             if client_ver != server_ver {
                 conflict_detected = true;
                 assert_eq!(conflict_slide, None, "first conflict should be detected");
@@ -759,7 +861,10 @@ mod tests {
             }
         }
 
-        assert!(conflict_detected, "pre-validation should detect version conflict");
+        assert!(
+            conflict_detected,
+            "pre-validation should detect version conflict"
+        );
         // No transaction was started — this is efficient (no wasted DB work)
     }
 
@@ -807,7 +912,10 @@ mod tests {
         let key_a = (client_a_session, "UpdateSlidesBatch", shared_request_id);
         let key_b = (client_b_session, "UpdateSlidesBatch", shared_request_id);
 
-        assert_ne!(key_a, key_b, "idempotency keys should be distinct for different sessions");
+        assert_ne!(
+            key_a, key_b,
+            "idempotency keys should be distinct for different sessions"
+        );
     }
 
     // ============================================================
@@ -833,10 +941,18 @@ mod tests {
     fn batch_with_single_slide() {
         let request = UpdateSlidesBatchRequest {
             client_request_id: None,
-            updates: vec![make_batch_update("slide-1", json!({"title": "solo"}), Some(5))],
+            updates: vec![make_batch_update(
+                "slide-1",
+                json!({"title": "solo"}),
+                Some(5),
+            )],
         };
 
-        assert_eq!(request.updates.len(), 1, "batch should accept a single slide");
+        assert_eq!(
+            request.updates.len(),
+            1,
+            "batch should accept a single slide"
+        );
         // This produces the same result as calling the individual update endpoint,
         // but uses the batch path (one session lock, one outbox event)
     }
@@ -863,6 +979,10 @@ mod tests {
 
         // These are "no-op" from a content perspective, but the handler
         // still bumps versions and publishes an outbox event.
-        assert_eq!(request.updates.len(), 2, "no-op updates should still be processed");
+        assert_eq!(
+            request.updates.len(),
+            2,
+            "no-op updates should still be processed"
+        );
     }
 }

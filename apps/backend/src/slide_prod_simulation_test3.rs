@@ -42,9 +42,7 @@ mod tests {
         let options_json: serde_json::Value = serde_json::Value::Array(
             options
                 .into_iter()
-                .map(|(opt_id, opt_text)| {
-                    serde_json::json!({ "id": opt_id, "text": opt_text })
-                })
+                .map(|(opt_id, opt_text)| serde_json::json!({ "id": opt_id, "text": opt_text }))
                 .collect(),
         );
 
@@ -64,7 +62,11 @@ mod tests {
         }
     }
 
-    fn make_batch_update(slide_id: &str, content: serde_json::Value, base_version: Option<i64>) -> BatchSlideUpdate {
+    fn make_batch_update(
+        slide_id: &str,
+        content: serde_json::Value,
+        base_version: Option<i64>,
+    ) -> BatchSlideUpdate {
         BatchSlideUpdate {
             slide_id: slide_id.to_string(),
             content,
@@ -120,7 +122,10 @@ mod tests {
         let time_to_flush_ms = total_typing_time_ms + debounce_ms;
 
         assert_eq!(debounce_resets, 29, "29 debounce resets for 30 chars");
-        assert_eq!(time_to_flush_ms, 5000, "flush happens 2s after last keystroke");
+        assert_eq!(
+            time_to_flush_ms, 5000,
+            "flush happens 2s after last keystroke"
+        );
 
         // During those 5 seconds, no server request is made.
         // The teacher clicks Save → blur → flush → save → HTTP request.
@@ -222,7 +227,10 @@ mod tests {
         // No validation on the backend rejects empty question text
         let empty_question_accepted = true;
 
-        assert!(empty_question_accepted, "server accepts empty question text");
+        assert!(
+            empty_question_accepted,
+            "server accepts empty question text"
+        );
         // This may be intentional (clearing a draft question) or a bug
         // Could add validation: question must be non-empty and non-whitespace
     }
@@ -268,7 +276,10 @@ mod tests {
         // T500: No more typing → debounce fires, captures "Red"
 
         let time_to_capture = 300 + debounce_ms;
-        assert_eq!(time_to_capture, 500, "debounce fires 200ms after last keystroke");
+        assert_eq!(
+            time_to_capture, 500,
+            "debounce fires 200ms after last keystroke"
+        );
 
         // 200ms is much shorter than question text debounce (2000ms),
         // because option edits are shorter and more frequent
@@ -288,7 +299,10 @@ mod tests {
         // Each option edit triggers onUpdate() → local state update → mark dirty
         // No server request until Save is clicked
         let server_requests_before_save = 0;
-        assert_eq!(server_requests_before_save, 0, "no server requests until save");
+        assert_eq!(
+            server_requests_before_save, 0,
+            "no server requests until save"
+        );
     }
 
     /// Teacher adds a new option to a poll.
@@ -302,7 +316,11 @@ mod tests {
 
         let options_before = vec![("opt-1", "Red"), ("opt-2", "Blue")];
         let new_option = ("opt-new", "Option 3");
-        let options_after: Vec<(&str, &str)> = options_before.iter().copied().chain(std::iter::once(new_option)).collect();
+        let options_after: Vec<(&str, &str)> = options_before
+            .iter()
+            .copied()
+            .chain(std::iter::once(new_option))
+            .collect();
 
         assert_eq!(options_after.len(), 3);
         assert_eq!(options_after[2], ("opt-new", "Option 3"));
@@ -457,7 +475,9 @@ mod tests {
 
         let slides_before = vec!["A", "B", "C", "D", "E"];
         let mut slides_after = slides_before.clone();
-        let [moved] = slides_after.splice(2..3, []).collect::<Vec<_>>()[..] else { unreachable!() };
+        let [moved] = slides_after.splice(2..3, []).collect::<Vec<_>>()[..] else {
+            unreachable!()
+        };
         slides_after.insert(1, moved);
 
         assert_eq!(slides_after, vec!["A", "C", "B", "D", "E"]);
@@ -569,12 +589,19 @@ mod tests {
         // Drag C → pos 2: [A, B, C, D, E] — back to original!
 
         let _final_order = vec!["A", "B", "C", "D", "E"];
-        assert_eq!(_final_order, vec!["A", "B", "C", "D", "E"], "back to original position");
+        assert_eq!(
+            _final_order,
+            vec!["A", "B", "C", "D", "E"],
+            "back to original position"
+        );
 
         // On Save: server detects order is the same → no reorder request sent
         // (saveEditorDocument compares slide order before sending reorder)
         let reorder_request_sent = false;
-        assert!(!reorder_request_sent, "no reorder needed — back to original");
+        assert!(
+            !reorder_request_sent,
+            "no reorder needed — back to original"
+        );
     }
 
     /// Teacher reorders slides, and during the reorder request, another teacher
@@ -891,7 +918,10 @@ mod tests {
         // The duplicate captured a SNAPSHOT of the content at duplication time
 
         let duplicate_captured_snapshot = true;
-        assert!(duplicate_captured_snapshot, "duplicate captures content at duplication time");
+        assert!(
+            duplicate_captured_snapshot,
+            "duplicate captures content at duplication time"
+        );
     }
 
     /// Teacher duplicates a poll slide that has student votes.
@@ -1190,7 +1220,10 @@ mod tests {
         // Only when they manually refresh or reconnect do they see the new slide
 
         let other_tabs_miss_update = true;
-        assert!(other_tabs_miss_update, "disconnected tabs don't see the new slide");
+        assert!(
+            other_tabs_miss_update,
+            "disconnected tabs don't see the new slide"
+        );
 
         // On reconnect, tabs should refetch session state
         // But the reconnect handler might not trigger a full refetch
