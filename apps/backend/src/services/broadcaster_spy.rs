@@ -10,6 +10,7 @@ use crate::ws::registry::{BroadcastError, Broadcaster};
 ///
 /// Records all broadcast calls so tests can verify what was broadcast,
 /// how many times, and to which sessions.
+#[allow(dead_code)]
 pub struct BroadcasterSpy {
     /// Each call to broadcast() appends to this vector.
     pub calls: Arc<Mutex<Vec<(String, Value)>>>,
@@ -21,6 +22,7 @@ pub struct BroadcasterSpy {
     pub failure_count: AtomicUsize,
 }
 
+#[allow(dead_code)]
 impl BroadcasterSpy {
     pub fn new() -> Self {
         Self {

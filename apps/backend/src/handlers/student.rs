@@ -19,6 +19,7 @@ const MAX_NAME_LENGTH: usize = 100;
 const MAX_OPTION_IDS: usize = 10;
 const MAX_DEADLOCK_RETRIES: u32 = 3;
 const MY_VOTES_SLIDE_ID_CHUNK_SIZE: usize = 128;
+#[allow(dead_code)]
 const VOTE_COUNT_SHARD_COUNT: u32 = 16;
 
 fn resolve_client_request_id(headers: &HeaderMap) -> Result<String> {
@@ -76,6 +77,7 @@ fn is_app_error_deadlock(e: &AppError) -> bool {
 
 /// Returns the response as-is. Reserved for future use if a real-time
 /// degradation flag is needed (e.g. to signal fallback mode to the frontend).
+#[allow(dead_code)]
 fn with_degraded_header<T: serde::Serialize>(body: ApiResponse<T>) -> axum::response::Response {
     Json(body).into_response()
 }
@@ -144,6 +146,7 @@ async fn get_votes_for_participant_by_slide_ids(
     Ok(votes)
 }
 
+#[allow(dead_code)]
 pub(crate) fn vote_count_shard_id(participant_id: &str) -> u32 {
     let mut hash = 0x811c9dc5u32;
     for byte in participant_id.as_bytes() {
@@ -153,6 +156,7 @@ pub(crate) fn vote_count_shard_id(participant_id: &str) -> u32 {
     hash % VOTE_COUNT_SHARD_COUNT
 }
 
+#[allow(dead_code)]
 pub(crate) fn build_vote_update_payload(
     slide_id: &str,
     shard_id: u32,

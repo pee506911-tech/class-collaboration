@@ -219,7 +219,7 @@ pub async fn create_slide(
 
     tx.commit().await?;
 
-    broadcast_slides_update(&app_state, &session_id, &[slide.clone()]).await;
+    broadcast_slides_update(&app_state, &session_id, std::slice::from_ref(&slide)).await;
     app_state.session_service.invalidate_session_cache(&session_id).await;
 
     Ok(crate::services::wal::queued_success_response(&slide))
@@ -597,7 +597,7 @@ pub async fn update_slide(
 
     tx.commit().await?;
 
-    broadcast_slides_update(&app_state, &session_id, &[slide.clone()]).await;
+    broadcast_slides_update(&app_state, &session_id, std::slice::from_ref(&slide)).await;
     app_state.session_service.invalidate_session_cache(&session_id).await;
 
     Ok(crate::services::wal::queued_success_response(&slide))

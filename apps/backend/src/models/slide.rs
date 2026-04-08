@@ -65,6 +65,7 @@ pub struct BatchSlideUpdate {
     pub slide_id: String,
     pub content: serde_json::Value,
     #[serde(rename = "type")]
+    #[allow(dead_code)]
     pub slide_type: Option<String>,
     pub base_version: Option<i64>,
 }
