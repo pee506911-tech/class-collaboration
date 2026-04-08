@@ -392,7 +392,7 @@ pub async fn submit_vote(
         )
         .await
         {
-            Ok(maybe_slide_id) => {
+            Ok(Some(slide_id)) => {
                 sqlx::query(
                     "INSERT IGNORE INTO wal_request_replays (session_id, op_type, client_request_id, response_payload)
                      VALUES (?, ?, ?, ?)",
@@ -406,16 +406,14 @@ pub async fn submit_vote(
 
                 tx.commit().await?;
 
-                if let Some(slide_id) = maybe_slide_id {
-                    crate::services::broadcast::broadcast_vote_update(
-                        &pool,
-                        &*app_state.registry,
-                        &session_id,
-                        &slide_id,
-                        0, // sequence not needed for dedup on vote
-                    )
-                    .await;
-                }
+                crate::services::broadcast::broadcast_vote_update(
+                    &pool,
+                    &*app_state.registry,
+                    &session_id,
+                    &slide_id,
+                    0, // sequence not needed for dedup on vote
+                )
+                .await;
 
                 app_state
                     .session_service
@@ -433,6 +431,24 @@ pub async fn submit_vote(
                 return Ok((
                     StatusCode::OK,
                     Json(ApiResponse::success(response_payload.clone())),
+                )
+                    .into_response());
+            }
+            Ok(None) => {
+                // Vote was rejected (duplicate submission or no rows affected)
+                tx.rollback().await?;
+                tracing::info!(
+                    session_id,
+                    slide_id = %payload.slide_id,
+                    participant_id = %payload.participant_id,
+                    "Vote rejected: duplicate submission"
+                );
+                return Ok((
+                    StatusCode::CONFLICT,
+                    Json(ApiResponse::error(
+                        "Vote already submitted for this slide".to_string(),
+                        serde_json::Value::Null,
+                    )),
                 )
                     .into_response());
             }
