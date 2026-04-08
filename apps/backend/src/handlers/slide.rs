@@ -623,6 +623,23 @@ pub async fn update_slide(
     .execute(&mut *tx)
     .await?;
 
+    // Enqueue outbox event for reliable delivery
+    let outbox_id = uuid::Uuid::new_v4().to_string();
+    let event_payload = serde_json::json!({
+        "slideId": slide_id,
+        "sessionId": session_id,
+        "slide": slide
+    });
+    sqlx::query(
+        "INSERT INTO outbox_events (id, session_id, event_type, payload, status)
+         VALUES (?, ?, 'SLIDES_UPDATE', ?, 'pending')",
+    )
+    .bind(&outbox_id)
+    .bind(&session_id)
+    .bind(sqlx::types::Json(&event_payload))
+    .execute(&mut *tx)
+    .await?;
+
     tx.commit().await?;
 
     broadcast_slides_update(&app_state, &session_id, std::slice::from_ref(&slide)).await;

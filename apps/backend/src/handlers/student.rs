@@ -393,6 +393,26 @@ pub async fn submit_vote(
         .await
         {
             Ok(Some(slide_id)) => {
+                // Increment vote sequence for monotonic realtime ordering
+                sqlx::query("UPDATE sessions SET vote_sequence = vote_sequence + 1 WHERE id = ?")
+                    .bind(&session_id)
+                    .execute(&mut *tx)
+                    .await?;
+
+                // Update vote_counts read model for each inserted option
+                for option_id in &option_ids {
+                    sqlx::query(
+                        "INSERT INTO vote_counts (session_id, slide_id, option_id, vote_count)
+                         VALUES (?, ?, ?, 1)
+                         ON DUPLICATE KEY UPDATE vote_count = vote_count + 1",
+                    )
+                    .bind(&session_id)
+                    .bind(&payload.slide_id)
+                    .bind(option_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+
                 sqlx::query(
                     "INSERT IGNORE INTO wal_request_replays (session_id, op_type, client_request_id, response_payload)
                      VALUES (?, ?, ?, ?)",
@@ -1048,7 +1068,7 @@ pub async fn submit_question(
 
     let mut tx = pool.begin().await?;
 
-    sqlx::query(
+    let insert_result = sqlx::query(
         "INSERT INTO questions (id, session_id, slide_id, participant_id, content, client_request_id)
          VALUES (?, ?, ?, ?, ?, ?)",
     )
@@ -1059,7 +1079,49 @@ pub async fn submit_question(
     .bind(&question.content)
     .bind(&client_request_id)
     .execute(&mut *tx)
-    .await?;
+    .await;
+
+    // Handle concurrent duplicate requests with same client_request_id
+    if let Err(ref e) = insert_result {
+        if is_mysql_duplicate_key(e) {
+            tx.rollback().await?;
+            // Another request already committed; replay their result
+            if let Some(existing) = crate::services::wal::fetch_replay_response::<QuestionResponse>(
+                &pool,
+                &session_id,
+                crate::services::wal::WalOpType::SubmitQuestion,
+                &client_request_id,
+            )
+            .await?
+            {
+                return Ok(
+                    (StatusCode::ACCEPTED, Json(ApiResponse::success(existing))).into_response()
+                );
+            }
+            // WAL replay not found; fetch the committed question directly
+            let committed: Option<crate::models::student::Question> = sqlx::query_as(
+                "SELECT id, session_id, slide_id, participant_id, content, upvotes, is_approved, created_at
+                 FROM questions WHERE session_id = ? AND participant_id = ? AND content = ?
+                 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(&session_id)
+            .bind(&payload.participant_id)
+            .bind(&sanitized_content)
+            .fetch_optional(&pool)
+            .await?;
+            if let Some(q) = committed {
+                return Ok((
+                    StatusCode::ACCEPTED,
+                    Json(ApiResponse::success(QuestionResponse::from(q))),
+                )
+                    .into_response());
+            }
+            return Err(AppError::ServiceUnavailable(
+                "Question submission conflict; please retry".to_string(),
+            ));
+        }
+    }
+    insert_result?;
 
     let (sequence, questions) = next_qa_sequence_and_questions(&mut tx, &session_id).await?;
 
