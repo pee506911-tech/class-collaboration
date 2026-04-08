@@ -178,7 +178,7 @@ jobs:
           DATABASE_URL: mysql://root:root@localhost:3306/test_db
           JWT_SECRET: test-secret-for-ci
           ALLOWED_ORIGINS: http://localhost:3000
-        run: cargo test --test concurrency -- --ignored
+        run: cargo test --test concurrency -- --ignored --test-threads=1
 
       - name: Stop backend server
         if: always()
