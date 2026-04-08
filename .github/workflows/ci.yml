@@ -147,12 +147,46 @@ jobs:
         env:
           DATABASE_URL: mysql://root:root@localhost:3306/test_db
 
+      - name: Build backend
+        run: cargo build --release
+
+      - name: Start backend server
+        run: |
+          ./target/release/backend-rust > /tmp/backend-rust.log 2>&1 &
+          echo "Backend PID: $!"
+          echo $! > /tmp/backend.pid
+          # Wait for server to be ready
+          for i in $(seq 1 30); do
+            if curl -s http://localhost:8080/health/ready > /dev/null 2>&1; then
+              echo "Backend is ready!"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Backend failed to start"
+          cat /tmp/backend-rust.log || true
+          exit 1
+        env:
+          DATABASE_URL: mysql://root:root@localhost:3306/test_db
+          JWT_SECRET: test-secret-for-ci
+          ALLOWED_ORIGINS: http://localhost:3000
+          ENVIRONMENT: test
+        shell: bash
+
       - name: Run integration tests
         env:
           DATABASE_URL: mysql://root:root@localhost:3306/test_db
           JWT_SECRET: test-secret-for-ci
           ALLOWED_ORIGINS: http://localhost:3000
         run: cargo test --test concurrency -- --ignored
+
+      - name: Stop backend server
+        if: always()
+        run: |
+          if [ -f /tmp/backend.pid ]; then
+            kill $(cat /tmp/backend.pid) || true
+          fi
+        shell: bash
 
   # ── T3: Playwright E2E tests (on PR) ────────────────────────
   playwright-e2e:
