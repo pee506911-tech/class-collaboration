@@ -58,3 +58,27 @@ pub struct CreateSlidesBatchResponse {
     pub slides: Vec<Slide>,
     pub state_version: i64,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchSlideUpdate {
+    pub slide_id: String,
+    pub content: serde_json::Value,
+    #[serde(rename = "type")]
+    pub slide_type: Option<String>,
+    pub base_version: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSlidesBatchRequest {
+    pub updates: Vec<BatchSlideUpdate>,
+    pub client_request_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSlidesBatchResponse {
+    pub slides: Vec<Slide>,
+    pub state_version: i64,
+}

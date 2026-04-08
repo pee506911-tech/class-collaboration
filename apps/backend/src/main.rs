@@ -5,7 +5,6 @@ use axum::{
     Extension, Router,
 };
 use std::sync::Arc;
-use tokio::sync::{watch, Notify};
 use tower::buffer::BufferLayer;
 use tower::limit::ConcurrencyLimitLayer;
 use tower::{BoxError, ServiceBuilder};
@@ -28,6 +27,9 @@ mod middleware;
 mod models;
 mod repositories;
 mod services;
+mod slide_prod_simulation_test;
+mod slide_prod_simulation_test2;
+mod slide_prod_simulation_test3;
 mod tidb_ru;
 mod ws;
 
@@ -59,7 +61,6 @@ pub struct AppState {
     pub db_pool: LazyDbPool,
     pub session_service: Arc<SessionService>,
     pub registry: Arc<ws::registry::InMemoryRegistry>,
-    pub outbox_flush_notify: Arc<Notify>,
 }
 
 #[tokio::main]
@@ -134,37 +135,6 @@ async fn main() -> anyhow::Result<()> {
     // WebSocket session registry — in-memory broadcast registry for real-time
     // event delivery to connected WebSocket clients.
     let registry = Arc::new(ws::registry::InMemoryRegistry::new());
-    let outbox_flush_notify = Arc::new(Notify::new());
-    // Spawn the outbox worker in the background once the DB pool is ready.
-    // The worker accepts a shutdown signal so it can flush pending events before exit.
-    let (outbox_shutdown_tx, outbox_shutdown_rx) = watch::channel(false);
-    let registry_for_outbox = registry.clone();
-    let pool_for_outbox = lazy_pool.clone();
-    let outbox_flush_notify_for_worker = outbox_flush_notify.clone();
-
-    tokio::spawn(async move {
-        match pool_for_outbox.pool().await {
-            Ok(pool) => {
-                crate::services::outbox::run_outbox_worker(
-                    pool,
-                    registry_for_outbox,
-                    outbox_flush_notify_for_worker,
-                    outbox_shutdown_rx,
-                )
-                .await;
-            }
-            Err(e) => {
-                tracing::error!("Failed to get DB pool for outbox worker: {}", e);
-            }
-        }
-    });
-
-    // Spawn a task that relays the process shutdown signal to the outbox worker.
-    let outbox_tx = outbox_shutdown_tx.clone();
-    tokio::spawn(async move {
-        shutdown_signal().await;
-        let _ = outbox_tx.send(true);
-    });
 
     tracing::info!("App state created in {:?}", startup_time.elapsed());
 
@@ -189,7 +159,6 @@ async fn main() -> anyhow::Result<()> {
         db_pool: lazy_pool.clone(),
         session_service: session_service.clone(),
         registry: registry.clone(),
-        outbox_flush_notify: outbox_flush_notify.clone(),
     };
 
     // Rate limiting configuration
@@ -355,6 +324,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/sessions/:session_id/slides/:slide_id",
             axum::routing::put(handlers::slide::update_slide).delete(handlers::slide::delete_slide),
+        )
+        .route(
+            "/api/sessions/:id/slides/batch-update",
+            axum::routing::put(handlers::slide::update_slides_batch),
         )
         .route(
             "/api/sessions/:session_id/slides/:slide_id/visibility",

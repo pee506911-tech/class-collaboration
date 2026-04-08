@@ -9,7 +9,6 @@ use crate::error::{AppError, Result};
 use crate::middleware::auth::AuthUser;
 use crate::models::response::ApiResponse;
 use crate::models::session::Session;
-use crate::services::outbox::{self, OutboxEventType};
 
 /// State update payload for real-time broadcast
 #[derive(Serialize)]
@@ -61,30 +60,18 @@ pub async fn set_current_slide(
         .await?;
 
     let session = fetch_session(&mut tx, &session_id).await?;
-    let should_flush_outbox = update_result.rows_affected() > 0;
-    if should_flush_outbox {
-        let state_payload = build_state_payload(&session);
-        let enqueued_event = outbox::enqueue_event(
-            &mut tx,
-            &session_id,
-            OutboxEventType::StateUpdate,
-            &state_payload,
-        )
-        .await?;
-        
-        tracing::info!(
-            session_id = %session_id,
-            state_version = session.state_version,
-            current_slide_id = ?session.current_slide_id,
-            correlation_id = %enqueued_event.id,
-            sequence_id = enqueued_event.sequence_id,
-            "SPEED_AUDIT: STATE_UPDATE enqueued from set_current_slide"
-        );
-    }
+    let should_broadcast = update_result.rows_affected() > 0;
 
     tx.commit().await?;
-    if should_flush_outbox {
-        app_state.outbox_flush_notify.notify_one();
+
+    if should_broadcast {
+        let state_payload = build_state_payload(&session);
+        crate::services::broadcast::broadcast_state_update(
+            &*app_state.registry,
+            &session_id,
+            &serde_json::to_value(state_payload).expect("state payload should serialize"),
+        )
+        .await;
     }
 
     Ok(Json(ApiResponse::success(session)))
@@ -112,30 +99,18 @@ pub async fn set_results_visibility(
         .await?;
 
     let session = fetch_session(&mut tx, &session_id).await?;
-    let should_flush_outbox = update_result.rows_affected() > 0;
-    if should_flush_outbox {
-        let state_payload = build_state_payload(&session);
-        let enqueued_event = outbox::enqueue_event(
-            &mut tx,
-            &session_id,
-            OutboxEventType::StateUpdate,
-            &state_payload,
-        )
-        .await?;
-        
-        tracing::info!(
-            session_id = %session_id,
-            state_version = session.state_version,
-            is_results_visible = session.is_results_visible,
-            correlation_id = %enqueued_event.id,
-            sequence_id = enqueued_event.sequence_id,
-            "SPEED_AUDIT: STATE_UPDATE enqueued from set_results_visibility"
-        );
-    }
+    let should_broadcast = update_result.rows_affected() > 0;
 
     tx.commit().await?;
-    if should_flush_outbox {
-        app_state.outbox_flush_notify.notify_one();
+
+    if should_broadcast {
+        let state_payload = build_state_payload(&session);
+        crate::services::broadcast::broadcast_state_update(
+            &*app_state.registry,
+            &session_id,
+            &serde_json::to_value(state_payload).expect("state payload should serialize"),
+        )
+        .await;
     }
 
     Ok(Json(ApiResponse::success(session)))
@@ -160,32 +135,23 @@ pub async fn update_slide_visibility(
         .execute(&mut *tx)
         .await?;
 
-    // Bump state version and enqueue outbox event
+    // Bump state version
     sqlx::query("UPDATE sessions SET state_version = state_version + 1 WHERE id = ?")
         .bind(&session_id)
         .execute(&mut *tx)
         .await?;
 
     let session = fetch_session(&mut tx, &session_id).await?;
-    let state_payload = build_state_payload(&session);
-    let enqueued_event = outbox::enqueue_event(
-        &mut tx,
-        &session_id,
-        OutboxEventType::StateUpdate,
-        &state_payload,
-    )
-    .await?;
-    
-    tracing::info!(
-        session_id = %session_id,
-        state_version = session.state_version,
-        correlation_id = %enqueued_event.id,
-        sequence_id = enqueued_event.sequence_id,
-        "SPEED_AUDIT: STATE_UPDATE enqueued from update_slide_visibility"
-    );
 
     tx.commit().await?;
-    app_state.outbox_flush_notify.notify_one();
+
+    let state_payload = build_state_payload(&session);
+    crate::services::broadcast::broadcast_state_update(
+        &*app_state.registry,
+        &session_id,
+        &serde_json::to_value(state_payload).expect("state payload should serialize"),
+    )
+    .await;
 
     Ok(Json(ApiResponse::success(
         serde_json::json!({ "message": "Slide visibility updated" }),
@@ -211,29 +177,18 @@ pub async fn go_live(
         .await?;
 
     let session = fetch_session(&mut tx, &session_id).await?;
-    let should_flush_outbox = update_result.rows_affected() > 0;
-    if should_flush_outbox {
-        let state_payload = build_state_payload(&session);
-        let enqueued_event = outbox::enqueue_event(
-            &mut tx,
-            &session_id,
-            OutboxEventType::StateUpdate,
-            &state_payload,
-        )
-        .await?;
-        
-        tracing::info!(
-            session_id = %session_id,
-            state_version = session.state_version,
-            correlation_id = %enqueued_event.id,
-            sequence_id = enqueued_event.sequence_id,
-            "SPEED_AUDIT: STATE_UPDATE enqueued from go_live"
-        );
-    }
+    let should_broadcast = update_result.rows_affected() > 0;
 
     tx.commit().await?;
-    if should_flush_outbox {
-        app_state.outbox_flush_notify.notify_one();
+
+    if should_broadcast {
+        let state_payload = build_state_payload(&session);
+        crate::services::broadcast::broadcast_state_update(
+            &*app_state.registry,
+            &session_id,
+            &serde_json::to_value(state_payload).expect("state payload should serialize"),
+        )
+        .await;
     }
 
     Ok(Json(ApiResponse::success(session)))
@@ -258,29 +213,18 @@ pub async fn stop_live(
         .await?;
 
     let session = fetch_session(&mut tx, &session_id).await?;
-    let should_flush_outbox = update_result.rows_affected() > 0;
-    if should_flush_outbox {
-        let state_payload = build_state_payload(&session);
-        let enqueued_event = outbox::enqueue_event(
-            &mut tx,
-            &session_id,
-            OutboxEventType::StateUpdate,
-            &state_payload,
-        )
-        .await?;
-        
-        tracing::info!(
-            session_id = %session_id,
-            state_version = session.state_version,
-            correlation_id = %enqueued_event.id,
-            sequence_id = enqueued_event.sequence_id,
-            "SPEED_AUDIT: STATE_UPDATE enqueued from stop_live"
-        );
-    }
+    let should_broadcast = update_result.rows_affected() > 0;
 
     tx.commit().await?;
-    if should_flush_outbox {
-        app_state.outbox_flush_notify.notify_one();
+
+    if should_broadcast {
+        let state_payload = build_state_payload(&session);
+        crate::services::broadcast::broadcast_state_update(
+            &*app_state.registry,
+            &session_id,
+            &serde_json::to_value(state_payload).expect("state payload should serialize"),
+        )
+        .await;
     }
 
     Ok(Json(ApiResponse::success(session)))

@@ -834,4 +834,449 @@ describe('SlideEditorPanel', () => {
             });
         });
     });
+
+    // ── Integration: Option Drag and Drop ──
+
+    describe('option drag and drop', () => {
+        it('renders draggable option rows', async () => {
+            const onUpdate = vi.fn().mockResolvedValue(undefined);
+
+            render(
+                <SlideEditorPanel
+                    slide={makePollSlide()}
+                    onUpdate={onUpdate}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            // Get the option rows
+            const redInput = screen.getByDisplayValue('Red');
+            const blueInput = screen.getByDisplayValue('Blue');
+            
+            expect(redInput).toBeTruthy();
+            expect(blueInput).toBeTruthy();
+
+            // Verify the options are rendered
+            expect(screen.getByText('2 options')).toBeTruthy();
+        });
+    });
+
+    // ── Integration: Disabled State Propagation ──
+
+    describe('disabled state propagation', () => {
+        it('disables option inputs when panel is disabled', () => {
+            render(
+                <SlideEditorPanel
+                    slide={makePollSlide()}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                    disabled={true}
+                />,
+            );
+
+            const redInput = screen.getByDisplayValue('Red');
+            const blueInput = screen.getByDisplayValue('Blue');
+
+            expect(redInput).toBeDisabled();
+            expect(blueInput).toBeDisabled();
+        });
+
+        it('disables add option button when panel is disabled', () => {
+            render(
+                <SlideEditorPanel
+                    slide={makePollSlide()}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                    disabled={true}
+                />,
+            );
+
+            const addOptionBtn = screen.getByRole('button', { name: /add option/i });
+            expect(addOptionBtn).toBeDisabled();
+        });
+
+        it('disables delete option buttons when panel is disabled', () => {
+            render(
+                <SlideEditorPanel
+                    slide={makePollSlide()}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                    disabled={true}
+                />,
+            );
+
+            const deleteBtns = screen.getAllByRole('button', { name: '' });
+            const trashBtns = deleteBtns.filter(btn => btn.querySelector('svg'));
+            
+            trashBtns.forEach(btn => {
+                expect(btn).toBeDisabled();
+            });
+        });
+
+        it('disables settings controls when panel is disabled', async () => {
+            render(
+                <SlideEditorPanel
+                    slide={makePollSlide()}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                    disabled={true}
+                />,
+            );
+
+            await act(async () => {
+                fireEvent.click(screen.getByRole('tab', { name: /settings/i }));
+            });
+
+            const barChartBtn = screen.getByRole('button', { name: /bar chart/i });
+            const pieChartBtn = screen.getByRole('button', { name: /pie chart/i });
+            
+            expect(barChartBtn).toBeDisabled();
+            expect(pieChartBtn).toBeDisabled();
+            
+            // Find checkbox by role
+            const limitSubmissionCheckbox = screen.getByRole('checkbox');
+            expect(limitSubmissionCheckbox).toBeDisabled();
+        });
+
+        it('disables quiz mark correct buttons when panel is disabled', () => {
+            render(
+                <SlideEditorPanel
+                    slide={makeQuizSlide()}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                    disabled={true}
+                />,
+            );
+
+            const markCorrectBtns = screen.getAllByRole('button', { name: /mark correct/i });
+            markCorrectBtns.forEach(btn => {
+                expect(btn).toBeDisabled();
+            });
+        });
+    });
+
+    // ── Integration: Option Label Generation ──
+
+    describe('option label generation', () => {
+        it('generates A, B, C labels for options', () => {
+            render(
+                <SlideEditorPanel
+                    slide={makePollSlide()}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            // Should have option labels A and B
+            const optionLabels = screen.getAllByText(/^[A-Z]$/, { selector: 'div' });
+            expect(optionLabels.length).toBeGreaterThanOrEqual(2);
+        });
+
+        it('updates labels when options are added', async () => {
+            render(
+                <SlideEditorPanel
+                    slide={makePollSlide()}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            const addOptionBtn = screen.getByRole('button', { name: /add option/i });
+            await act(async () => {
+                fireEvent.click(addOptionBtn);
+            });
+
+            // Should now have A, B, C
+            const optionLabels = screen.getAllByText(/^[A-Z]$/, { selector: 'div' });
+            expect(optionLabels.length).toBeGreaterThanOrEqual(3);
+        });
+
+        it('updates labels when options are removed', async () => {
+            render(
+                <SlideEditorPanel
+                    slide={makePollSlide()}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            const redInput = screen.getByDisplayValue('Red');
+            const redOptionRow = redInput.closest('[class*="flex items-center gap-2"]');
+            const deleteBtn = redOptionRow?.querySelector('button:last-child');
+
+            await act(async () => {
+                fireEvent.click(deleteBtn!);
+            });
+
+            // After removing Red (A), Blue becomes the first option and gets label A
+            const optionLabels = screen.getAllByText(/^[A-Z]$/, { selector: 'div' });
+            expect(optionLabels.length).toBe(1);
+            expect(screen.getByText('A')).toBeTruthy();
+        });
+    });
+
+    // ── Integration: Option Count Display ──
+
+    describe('option count display', () => {
+        it('shows correct option count', () => {
+            render(
+                <SlideEditorPanel
+                    slide={makePollSlide()}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            expect(screen.getByText('2 options')).toBeTruthy();
+        });
+
+        it('updates count when option is added', async () => {
+            render(
+                <SlideEditorPanel
+                    slide={makePollSlide()}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            await act(async () => {
+                fireEvent.click(screen.getByRole('button', { name: /add option/i }));
+            });
+
+            expect(screen.getByText('3 options')).toBeTruthy();
+        });
+
+        it('updates count when option is removed', async () => {
+            render(
+                <SlideEditorPanel
+                    slide={makePollSlide()}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            const redInput = screen.getByDisplayValue('Red');
+            const redOptionRow = redInput.closest('[class*="flex items-center gap-2"]');
+            const deleteBtn = redOptionRow?.querySelector('button:last-child');
+
+            await act(async () => {
+                fireEvent.click(deleteBtn!);
+            });
+
+            expect(screen.getByText('1 options')).toBeTruthy();
+        });
+    });
+
+    // ── Integration: Multiple Concurrent Option Edits ──
+
+    describe('multiple concurrent option edits', () => {
+        it('handles editing multiple options before save', async () => {
+            vi.useFakeTimers();
+            const onUpdate = vi.fn().mockResolvedValue(undefined);
+
+            render(
+                <SlideEditorPanel
+                    slide={makePollSlide()}
+                    onUpdate={onUpdate}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            const redInput = screen.getByDisplayValue('Red');
+            const blueInput = screen.getByDisplayValue('Blue');
+
+            await act(async () => {
+                fireEvent.change(redInput, { target: { value: 'Crimson' } });
+                fireEvent.change(blueInput, { target: { value: 'Navy' } });
+            });
+
+            expect(onUpdate).not.toHaveBeenCalled();
+
+            await act(async () => {
+                vi.advanceTimersByTime(250);
+            });
+
+            expect(onUpdate).toHaveBeenCalledWith(expect.objectContaining({
+                options: expect.arrayContaining([
+                    expect.objectContaining({ text: 'Crimson' }),
+                    expect.objectContaining({ text: 'Navy' }),
+                ]),
+            }));
+        });
+
+        it('preserves latest edits when adding option before save', async () => {
+            vi.useFakeTimers();
+            const onUpdate = vi.fn().mockResolvedValue(undefined);
+
+            render(
+                <SlideEditorPanel
+                    slide={makePollSlide()}
+                    onUpdate={onUpdate}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            const redInput = screen.getByDisplayValue('Red');
+
+            await act(async () => {
+                fireEvent.change(redInput, { target: { value: 'Crimson' } });
+            });
+
+            await act(async () => {
+                fireEvent.click(screen.getByRole('button', { name: /add option/i }));
+            });
+
+            // Crimson should still be in the input
+            expect(screen.getByDisplayValue('Crimson')).toBeTruthy();
+            expect(screen.getByDisplayValue('Option 3')).toBeTruthy();
+        });
+    });
+
+    // ── Integration: Edge Cases ──
+
+    describe('edge cases', () => {
+        it('handles single option deletion', async () => {
+            const singleOptionSlide = makePollSlide();
+            singleOptionSlide.content = {
+                ...singleOptionSlide.content,
+                options: [{ id: 'opt-1', text: 'Only Option' }],
+            };
+
+            render(
+                <SlideEditorPanel
+                    slide={singleOptionSlide}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            expect(screen.getByDisplayValue('Only Option')).toBeTruthy();
+            expect(screen.getByText('1 options')).toBeTruthy();
+        });
+
+        it('handles empty options array', () => {
+            const noOptionsSlide = makePollSlide();
+            noOptionsSlide.content = {
+                ...noOptionsSlide.content,
+                options: [],
+            };
+
+            render(
+                <SlideEditorPanel
+                    slide={noOptionsSlide}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            expect(screen.getByText('0 options')).toBeTruthy();
+            expect(screen.queryByDisplayValue('Red')).toBeNull();
+        });
+
+        it('handles rapid tab switching without losing data', async () => {
+            render(
+                <SlideEditorPanel
+                    slide={makePollSlide()}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            const redInput = screen.getByDisplayValue('Red');
+
+            await act(async () => {
+                fireEvent.change(redInput, { target: { value: 'Crimson' } });
+            });
+
+            // Rapid tab switching
+            for (let i = 0; i < 5; i++) {
+                await act(async () => {
+                    fireEvent.click(screen.getByRole('tab', { name: /settings/i }));
+                    fireEvent.click(screen.getByRole('tab', { name: /content/i }));
+                });
+            }
+
+            // Data should be preserved
+            expect(screen.getByDisplayValue('Crimson')).toBeTruthy();
+        });
+
+        it('handles poll slide with all settings', async () => {
+            const pollSlide = makePollSlide();
+            pollSlide.content = {
+                question: 'Complete poll?',
+                options: [{ id: 'opt-1', text: 'A' }],
+                chartType: 'pie',
+                limitSubmissions: false,
+            };
+
+            render(
+                <SlideEditorPanel
+                    slide={pollSlide}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            await act(async () => {
+                fireEvent.click(screen.getByRole('tab', { name: /settings/i }));
+            });
+
+            // Pie chart button should be active
+            const pieChartBtn = screen.getByRole('button', { name: /pie chart/i });
+            expect(pieChartBtn).toBeTruthy();
+            
+            expect(screen.getByText(/limit to one submission/i)).toBeTruthy();
+        });
+
+        it('handles quiz slide with all settings', () => {
+            const quizSlide = makeQuizSlide();
+            quizSlide.content = {
+                question: 'Complete quiz?',
+                options: [
+                    { id: 'opt-1', text: 'A', isCorrect: true },
+                    { id: 'opt-2', text: 'B', isCorrect: false },
+                ],
+                points: 500,
+                timerDuration: 60,
+                limitSubmissions: false,
+            };
+
+            render(
+                <SlideEditorPanel
+                    slide={quizSlide}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            expect(screen.getByDisplayValue('Complete quiz?')).toBeTruthy();
+            expect(screen.getByDisplayValue('A')).toBeTruthy();
+            expect(screen.getByDisplayValue('B')).toBeTruthy();
+        });
+
+        it('handles multiple choice slide with all settings', async () => {
+            const mcSlide = makeMultipleChoiceSlide();
+            mcSlide.content = {
+                question: 'Complete MC?',
+                options: [{ id: 'opt-1', text: 'A' }],
+                allowMultipleSelection: true,
+                limitSubmissions: false,
+            };
+
+            render(
+                <SlideEditorPanel
+                    slide={mcSlide}
+                    onUpdate={vi.fn().mockResolvedValue(undefined)}
+                    onSave={vi.fn()}
+                />,
+            );
+
+            await act(async () => {
+                fireEvent.click(screen.getByRole('tab', { name: /settings/i }));
+            });
+
+            expect(screen.getByText(/allow multiple selection/i)).toBeTruthy();
+            expect(screen.getByText(/limit to one submission/i)).toBeTruthy();
+        });
+    });
 });

@@ -324,6 +324,35 @@ export async function updateSlide(
     return json.data;
 }
 
+export async function updateSlidesBatch(
+    sessionId: string,
+    updates: Array<{ slideId: string; content: unknown; type?: string; baseVersion?: number }>,
+): Promise<Slide[]> {
+    let res: Response;
+
+    try {
+        res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides/batch-update`, {
+            method: 'PUT',
+            headers: getHeaders(),
+            body: JSON.stringify({
+                updates: updates.map((u) => ({
+                    slideId: u.slideId,
+                    content: u.content,
+                    ...(u.type ? { type: u.type } : {}),
+                    ...(u.baseVersion !== undefined ? { baseVersion: u.baseVersion } : {}),
+                })),
+            }),
+        });
+    } catch (error) {
+        throw toApiRequestError(error, 'Failed to batch update slides');
+    }
+    if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
+    if (!res.ok) throw await buildApiError(res, 'Failed to batch update slides');
+    const json: ApiResponse<{ slides: Slide[]; stateVersion: number }> = await res.json();
+    if (!json.success) throw new ApiRequestError(json.error || 'Failed to batch update slides', { status: res.status });
+    return json.data.slides;
+}
+
 export async function deleteSlide(sessionId: string, slideId: string, options?: { clientRequestId?: string }): Promise<void> {
     const headers = { ...(getHeaders() as Record<string, string>) };
     if (options?.clientRequestId) {

@@ -3,8 +3,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::{broadcast, RwLock};
 
-use crate::services::circuit_breaker::CircuitBreaker;
-
 /// Capacity of the per-session broadcast channel. 256 messages is far more
 /// than any classroom session would generate between consumer reads.
 const BROADCAST_CHANNEL_CAPACITY: usize = 256;
@@ -19,9 +17,9 @@ pub enum BroadcastError {
 
 /// Trait abstracting the broadcast mechanism for session events.
 ///
-/// The outbox worker depends on this trait, not a concrete implementation,
+/// Handlers depend on this trait, not a concrete implementation,
 /// so that the transport can be swapped (e.g. Redis Pub/Sub) without
-/// changing outbox logic.
+/// changing handler logic.
 #[async_trait]
 pub trait Broadcaster: Send + Sync {
     /// Broadcast a message to all connected clients in the given session.
@@ -39,14 +37,12 @@ pub trait Broadcaster: Send + Sync {
 /// the next broadcast attempt.
 pub struct InMemoryRegistry {
     sessions: RwLock<HashMap<String, broadcast::Sender<Value>>>,
-    circuit_breaker: CircuitBreaker,
 }
 
 impl InMemoryRegistry {
     pub fn new() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
-            circuit_breaker: CircuitBreaker::new(5, 30),
         }
     }
 
@@ -112,10 +108,7 @@ impl Broadcaster for InMemoryRegistry {
         drop(sessions);
 
         match sender.send(message.clone()) {
-            Ok(received_count) => {
-                self.circuit_breaker.record_success();
-                Ok(received_count)
-            }
+            Ok(received_count) => Ok(received_count),
             Err(_) => {
                 // All receivers have been dropped. Prune the dead session.
                 tracing::debug!(
@@ -123,7 +116,6 @@ impl Broadcaster for InMemoryRegistry {
                     "Broadcast: all receivers closed, pruning"
                 );
                 self.prune_dead_sessions(session_id).await;
-                self.circuit_breaker.record_success();
                 Ok(0)
             }
         }
@@ -329,16 +321,6 @@ mod tests {
 
         drop(rx2);
         assert_eq!(registry.active_connections().await, 1);
-    }
-
-    // === circuit breaker ===
-
-    #[test]
-    fn circuit_breaker_starts_closed() {
-        let _registry = InMemoryRegistry::new();
-        // Circuit breaker is internal, but we can verify successful broadcasts
-        // don't trip it. The CB for in-memory should effectively never trip
-        // since broadcast errors (no receivers) are not real failures.
     }
 
     // === concurrent access ===

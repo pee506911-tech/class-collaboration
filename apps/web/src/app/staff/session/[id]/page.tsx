@@ -5,7 +5,7 @@ export const runtime = 'edge';
 import { SetStateAction, startTransition, useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Slide, Session } from 'shared';
-import { createSlide, deleteSlide, getSlides, getSession, reorderSlides, updateSession, updateSlide, updateSlideVisibility, goLiveSession, stopSession, ApiRequestError } from '@/lib/api';
+import { createSlide, deleteSlide, getSlides, getSession, reorderSlides, updateSession, updateSlide, updateSlidesBatch, updateSlideVisibility, goLiveSession, stopSession, ApiRequestError } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Plus, Layout, BarChart2, Play, X, Smartphone, Share2, Settings, Users, Eye, Square, Copy, ExternalLink, Loader2 } from 'lucide-react';
 import Link from 'next/link';
@@ -160,28 +160,78 @@ async function saveEditorDocument(
         if (savedSlide?.isHidden !== slide.isHidden) {
             await updateSlideVisibility(sessionId, serverId, slide.isHidden ?? false);
         }
+    }
 
-        const isNewSlide = !slide.serverId;
-        if (!isNewSlide && savedSlide && !areContentsEqual(savedSlide.content, slide.content)) {
-            const updatedSlide = await updateSlide(sessionId, serverId, slide.content);
-            latestSavedSlidesById.set(serverId, {
-                ...updatedSlide,
-                orderIndex: slide.orderIndex,
-                isHidden: slide.isHidden,
-            });
+    // Batch content updates: collect all slides that need content updates
+    const contentUpdates: Array<{ slideId: string; content: Slide['content']; baseVersion?: number }> = [];
+    const contentUpdateIndexes: Map<string, number> = new Map();
+
+    for (let i = 0; i < localSlides.length; i++) {
+        const slide = localSlides[i];
+        const serverId = slide.serverId ?? resolvedServerIdByClientId.get(slide.id);
+        if (!serverId) {
             continue;
         }
 
-        latestSavedSlidesById.set(serverId, {
-            ...(savedSlide ?? slide),
-            id: serverId,
-            sessionId,
-            type: slide.type,
-            content: slide.content,
-            orderIndex: slide.orderIndex,
-            isHidden: slide.isHidden,
-            version: savedSlide?.version ?? slide.version,
+        const savedSlide = latestSavedSlidesById.get(serverId) ?? baseSlidesById.get(serverId);
+        const isNewSlide = !slide.serverId;
+        if (!isNewSlide && savedSlide && !areContentsEqual(savedSlide.content, slide.content)) {
+            contentUpdateIndexes.set(serverId, i);
+            contentUpdates.push({
+                slideId: serverId,
+                content: slide.content,
+                baseVersion: savedSlide.version,
+            });
+        }
+    }
+
+    // Use batch endpoint if there are multiple content updates
+    if (contentUpdates.length > 1) {
+        const updatedSlides = await updateSlidesBatch(sessionId, contentUpdates);
+        for (const updatedSlide of updatedSlides) {
+            const localIndex = contentUpdateIndexes.get(updatedSlide.id);
+            if (localIndex !== undefined) {
+                const localSlide = localSlides[localIndex];
+                latestSavedSlidesById.set(updatedSlide.id, {
+                    ...updatedSlide,
+                    orderIndex: localSlide.orderIndex,
+                    isHidden: localSlide.isHidden,
+                });
+            }
+        }
+    } else if (contentUpdates.length === 1) {
+        // Single update — use the individual endpoint to avoid batch overhead
+        const update = contentUpdates[0];
+        const localIndex = contentUpdateIndexes.get(update.slideId)!;
+        const localSlide = localSlides[localIndex];
+        const updatedSlide = await updateSlide(sessionId, update.slideId, update.content);
+        latestSavedSlidesById.set(update.slideId, {
+            ...updatedSlide,
+            orderIndex: localSlide.orderIndex,
+            isHidden: localSlide.isHidden,
         });
+    }
+
+    // Ensure latestSavedSlidesById has entries for ALL slides (including unchanged ones)
+    for (const slide of localSlides) {
+        const serverId = slide.serverId ?? resolvedServerIdByClientId.get(slide.id);
+        if (!serverId) {
+            continue;
+        }
+
+        if (!latestSavedSlidesById.has(serverId)) {
+            const baseSlide = baseSlidesById.get(serverId);
+            latestSavedSlidesById.set(serverId, {
+                ...(baseSlide ?? slide),
+                id: serverId,
+                sessionId,
+                type: slide.type,
+                content: slide.content,
+                orderIndex: slide.orderIndex,
+                isHidden: slide.isHidden,
+                version: baseSlide?.version ?? slide.version,
+            });
+        }
     }
 
     return localSlides.map((slide, index) => {

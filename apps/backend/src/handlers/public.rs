@@ -11,7 +11,6 @@ use uuid::Uuid;
 use crate::error::Result;
 use crate::models::response::ApiResponse;
 use crate::models::session::Session;
-use crate::services::outbox::{self, OutboxEventType};
 use crate::ws::registry::Broadcaster;
 
 /// Cache policy for read-mostly public session metadata.
@@ -87,7 +86,7 @@ struct ClickerWritePathTimings {
     validate_slide_ms: u128,
     update_session_ms: u128,
     fetch_session_ms: u128,
-    enqueue_outbox_ms: u128,
+    broadcast_ms: u128,
     commit_ms: u128,
     post_commit_ms: u128,
 }
@@ -98,7 +97,7 @@ impl ClickerWritePathTimings {
             + self.validate_slide_ms
             + self.update_session_ms
             + self.fetch_session_ms
-            + self.enqueue_outbox_ms
+            + self.broadcast_ms
             + self.commit_ms
     }
 }
@@ -193,10 +192,10 @@ pub async fn public_set_current_slide(
     };
     let session_fetched_at = std::time::Instant::now();
 
-    let should_flush_outbox = update_result.rows_affected() > 0;
-    let outbox_enqueued_at = std::time::Instant::now();
-    let committed_at = outbox_enqueued_at;
-    if should_flush_outbox {
+    let should_broadcast = update_result.rows_affected() > 0;
+    let broadcast_start = std::time::Instant::now();
+    let committed_at = broadcast_start;
+    if should_broadcast {
         broadcast_state_update_fast_lane(app_state.registry.as_ref(), &session_id, &state_payload)
             .await;
     }
@@ -208,10 +207,10 @@ pub async fn public_set_current_slide(
         validate_slide_ms: validated_at.duration_since(tx_started_at).as_millis(),
         update_session_ms: updated_at.duration_since(validated_at).as_millis(),
         fetch_session_ms: session_fetched_at.duration_since(updated_at).as_millis(),
-        enqueue_outbox_ms: outbox_enqueued_at
+        broadcast_ms: broadcast_start
             .duration_since(session_fetched_at)
             .as_millis(),
-        commit_ms: committed_at.duration_since(outbox_enqueued_at).as_millis(),
+        commit_ms: committed_at.duration_since(broadcast_start).as_millis(),
         post_commit_ms: post_commit_finished_at
             .duration_since(committed_at)
             .as_millis(),
@@ -223,13 +222,13 @@ pub async fn public_set_current_slide(
         requested_slide_id = ?requested_slide_id,
         applied_slide_id = ?state_payload.current_slide_id,
         state_version = state_payload.state_version,
-        outbox_enqueued = false,
+        broadcast_direct = true,
         pool_acquire_ms = timings.pool_acquire_ms,
         begin_tx_ms = timings.begin_tx_ms,
         validate_slide_ms = timings.validate_slide_ms,
         update_session_ms = timings.update_session_ms,
         fetch_session_ms = timings.fetch_session_ms,
-        enqueue_outbox_ms = timings.enqueue_outbox_ms,
+        broadcast_ms = timings.broadcast_ms,
         commit_ms = timings.commit_ms,
         post_commit_ms = timings.post_commit_ms,
         db_path_ms = timings.total_db_path_ms(),
@@ -260,21 +259,18 @@ pub async fn public_set_results_visibility(
         .await?;
 
     let session = fetch_session(&mut *tx, &session_id).await?;
-    let should_flush_outbox = update_result.rows_affected() > 0;
-    if should_flush_outbox {
-        let state_payload = build_state_payload(&session);
-        outbox::enqueue_event(
-            &mut tx,
-            &session_id,
-            OutboxEventType::StateUpdate,
-            &state_payload,
-        )
-        .await?;
-    }
+    let should_broadcast = update_result.rows_affected() > 0;
 
     tx.commit().await?;
-    if should_flush_outbox {
-        app_state.outbox_flush_notify.notify_one();
+
+    if should_broadcast {
+        let state_payload = build_state_payload(&session);
+        crate::services::broadcast::broadcast_state_update(
+            &*app_state.registry,
+            &session_id,
+            &serde_json::to_value(state_payload).expect("state payload should serialize"),
+        )
+        .await;
     }
 
     Ok(Json(ApiResponse::success(
@@ -453,7 +449,7 @@ mod tests {
             validate_slide_ms: 11,
             update_session_ms: 13,
             fetch_session_ms: 17,
-            enqueue_outbox_ms: 19,
+            broadcast_ms: 19,
             commit_ms: 23,
             post_commit_ms: 29,
         };

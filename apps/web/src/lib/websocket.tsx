@@ -118,6 +118,17 @@ export function WebSocketProvider({
     const voteSequenceRef = useRef<number>(0);
     const qaSequenceRef = useRef<number>(0);
 
+    // Reconnect state persisted across effect re-runs
+    const reconnectAttemptRef = useRef<number>(0);
+    const reconnectTimeoutIdRef = useRef<NodeJS.Timeout | null>(null);
+    const maxReconnectAttempts = 10;
+
+    // Name ref to avoid triggering effect re-run when name prop changes
+    const nameRef = useRef<string | undefined>(name);
+    useEffect(() => {
+        nameRef.current = name;
+    }, [name]);
+
     useEffect(() => {
         stateRef.current = state;
     }, [state]);
@@ -311,13 +322,14 @@ export function WebSocketProvider({
                 // Only register participant if they have a name
                 // When requireName is true, students must provide a name before joining
                 // When requireName is false, we still register them but only if they provided a name
-                if (name && name.trim()) {
+                const currentName = nameRef.current;
+                if (currentName && currentName.trim()) {
                     void httpFetch(`${apiBase}/sessions/${sessionId}/register-participant`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             participantId: participantIdRef.current,
-                            name: name.trim()
+                            name: currentName.trim()
                         }),
                         idempotent: true,
                         throwOnHttpError: false,
@@ -364,6 +376,7 @@ export function WebSocketProvider({
                 setIsConnected(true);
                 setIsConnecting(false);
                 setConnectionError(null);
+                resetReconnect();
 
                 const hasOpenedBefore = hasOpenedSocketRef.current;
                 hasOpenedSocketRef.current = true;
@@ -419,38 +432,34 @@ export function WebSocketProvider({
         }
     };
 
-    let reconnectAttempt = 0;
-    const maxReconnectAttempts = 10;
-    let reconnectTimeoutId: NodeJS.Timeout | null = null;
-
     const scheduleReconnect = () => {
-        if (reconnectTimeoutId) {
-            clearTimeout(reconnectTimeoutId);
+        if (reconnectTimeoutIdRef.current) {
+            clearTimeout(reconnectTimeoutIdRef.current);
         }
 
-        if (reconnectAttempt >= maxReconnectAttempts) {
+        if (reconnectAttemptRef.current >= maxReconnectAttempts) {
             setConnectionError('Connection lost. Please refresh the page.');
             return;
         }
 
         const baseDelay = 1000;
         const maxDelay = 30000;
-        const delay = Math.min(baseDelay * Math.pow(2, reconnectAttempt), maxDelay);
+        const delay = Math.min(baseDelay * Math.pow(2, reconnectAttemptRef.current), maxDelay);
         const jitteredDelay = delay * (0.5 + Math.random());
 
-        console.log(`[WS] Scheduling reconnect in ${jitteredDelay}ms (attempt ${reconnectAttempt + 1})`);
+        console.log(`[WS] Scheduling reconnect in ${jitteredDelay}ms (attempt ${reconnectAttemptRef.current + 1})`);
 
-        reconnectTimeoutId = setTimeout(() => {
-            reconnectAttempt++;
+        reconnectTimeoutIdRef.current = setTimeout(() => {
+            reconnectAttemptRef.current++;
             createWebSocketConnection();
         }, jitteredDelay);
     };
 
     const resetReconnect = () => {
-        reconnectAttempt = 0;
-        if (reconnectTimeoutId) {
-            clearTimeout(reconnectTimeoutId);
-            reconnectTimeoutId = null;
+        reconnectAttemptRef.current = 0;
+        if (reconnectTimeoutIdRef.current) {
+            clearTimeout(reconnectTimeoutIdRef.current);
+            reconnectTimeoutIdRef.current = null;
         }
     };
 
@@ -461,9 +470,9 @@ export function WebSocketProvider({
             isMountedRef.current = false;
             fetchAbortController.abort();
 
-            if (reconnectTimeoutId) {
-                clearTimeout(reconnectTimeoutId);
-                reconnectTimeoutId = null;
+            if (reconnectTimeoutIdRef.current) {
+                clearTimeout(reconnectTimeoutIdRef.current);
+                reconnectTimeoutIdRef.current = null;
             }
 
             if (ws) {
@@ -478,7 +487,7 @@ export function WebSocketProvider({
                 setWsConnection(null);
             }
         };
-    }, [sessionId, role, name, handleAblyMessage]);
+    }, [sessionId, role, handleAblyMessage]);
 
     const refreshState = useCallback(async (
         options?: { includeMyVotes?: boolean }

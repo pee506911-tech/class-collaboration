@@ -107,4 +107,143 @@ describe('PollSlideEditor', () => {
         expect(screen.queryByRole('button', { name: /pie chart/i })).toBeNull();
         expect(screen.queryByText(/limit to one submission/i)).toBeNull();
     });
+
+    it('disables the question input when disabled is true', () => {
+        const onChange = vi.fn();
+        render(
+            <PollSlideEditor
+                content={makeContent()}
+                onChange={onChange}
+                disabled={true}
+            />,
+        );
+
+        const questionInput = screen.getByDisplayValue('Favorite color?');
+        expect(questionInput).toBeDisabled();
+    });
+
+    it('handles empty question gracefully', () => {
+        const onChange = vi.fn();
+        render(
+            <PollSlideEditor
+                content={makeContent({ question: '' })}
+                onChange={onChange}
+                disabled={false}
+            />,
+        );
+
+        const questionInput = screen.getByPlaceholderText(/enter your question/i);
+        expect(questionInput).toHaveValue('');
+    });
+
+    it('syncs input value when content prop changes', () => {
+        const onChange = vi.fn();
+        const { rerender } = render(
+            <PollSlideEditor
+                content={makeContent({ question: 'First poll question' })}
+                onChange={onChange}
+                disabled={false}
+            />,
+        );
+
+        expect(screen.getByDisplayValue('First poll question')).toBeTruthy();
+
+        rerender(
+            <PollSlideEditor
+                content={makeContent({ question: 'Second poll question' })}
+                onChange={onChange}
+                disabled={false}
+            />,
+        );
+
+        expect(screen.getByDisplayValue('Second poll question')).toBeTruthy();
+    });
+
+    it('preserves uncontrolled input value until content changes', async () => {
+        const onChange = vi.fn();
+        const { rerender } = render(
+            <PollSlideEditor
+                content={makeContent({ question: 'Original poll question' })}
+                onChange={onChange}
+                disabled={false}
+            />,
+        );
+
+        const questionInput = screen.getByDisplayValue('Original poll question');
+
+        // Manually change input (simulates user typing)
+        fireEvent.change(questionInput, { target: { value: 'User typed answer' } });
+
+        // Input should still show user input (uncontrolled)
+        expect(questionInput).toHaveValue('User typed answer');
+
+        // Now change content prop - should sync
+        rerender(
+            <PollSlideEditor
+                content={makeContent({ question: 'Server updated question' })}
+                onChange={onChange}
+                disabled={false}
+            />,
+        );
+
+        expect(questionInput).toHaveValue('Server updated question');
+    });
+
+    it('includes chartType and other fields in onChange', async () => {
+        vi.useFakeTimers();
+        const onChange = vi.fn();
+        const content = makeContent({
+            question: 'Test?',
+            chartType: 'pie' as const,
+            limitSubmissions: false,
+        });
+
+        render(
+            <PollSlideEditor
+                content={content}
+                onChange={onChange}
+                disabled={false}
+            />,
+        );
+
+        const questionInput = screen.getByDisplayValue('Test?');
+        fireEvent.change(questionInput, { target: { value: 'Updated?' } });
+
+        await act(async () => {
+            vi.advanceTimersByTime(2000);
+        });
+
+        expect(onChange).toHaveBeenCalledWith({
+            question: 'Updated?',
+            options: content.options,
+            chartType: 'pie',
+            limitSubmissions: false,
+        });
+    });
+
+    it('handles missing options array gracefully', () => {
+        const onChange = vi.fn();
+        render(
+            <PollSlideEditor
+                content={{ question: 'No options poll' }}
+                onChange={onChange}
+                disabled={false}
+            />,
+        );
+
+        expect(screen.getByDisplayValue('No options poll')).toBeTruthy();
+    });
+
+    it('handles chartType defaults', () => {
+        const onChange = vi.fn();
+        render(
+            <PollSlideEditor
+                content={{ question: 'Default chart?' }}
+                onChange={onChange}
+                disabled={false}
+            />,
+        );
+
+        expect(screen.getByDisplayValue('Default chart?')).toBeTruthy();
+    });
 });

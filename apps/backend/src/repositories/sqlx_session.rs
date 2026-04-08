@@ -271,11 +271,7 @@ impl SessionRepository for SqlxSessionRepository {
                     s.is_presentation_active,
                     s.is_results_visible,
                     s.state_version,
-                    CAST(COALESCE((
-                        SELECT MAX(oe.sequence_id)
-                        FROM outbox_events oe
-                        WHERE oe.session_id = s.id AND oe.event_type = 'VOTE_UPDATE'
-                    ), 0) AS UNSIGNED) AS vote_sequence,
+                    0 AS vote_sequence,
                     s.qa_sequence
                  FROM sessions s
                  WHERE s.id = ?",
@@ -292,11 +288,7 @@ impl SessionRepository for SqlxSessionRepository {
                     s.is_presentation_active,
                     s.is_results_visible,
                     s.state_version,
-                    CAST(COALESCE((
-                        SELECT MAX(oe.sequence_id)
-                        FROM outbox_events oe
-                        WHERE oe.session_id = s.id AND oe.event_type = 'VOTE_UPDATE'
-                    ), 0) AS UNSIGNED) AS vote_sequence,
+                    0 AS vote_sequence,
                     s.qa_sequence
                  FROM sessions s
                  WHERE s.id = ?",
@@ -437,11 +429,7 @@ impl SessionRepository for SqlxSessionRepository {
         let pool = self.get_pool().await?;
         let sequences: Option<(u64, u64)> = sqlx::query_as(
             "SELECT
-                CAST(COALESCE((
-                    SELECT MAX(oe.sequence_id)
-                    FROM outbox_events oe
-                    WHERE oe.session_id = s.id AND oe.event_type = 'VOTE_UPDATE'
-                ), 0) AS UNSIGNED) AS vote_sequence,
+                0 AS vote_sequence,
                 s.qa_sequence
              FROM sessions s
              WHERE s.id = ?",

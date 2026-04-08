@@ -74,7 +74,8 @@ fn is_app_error_deadlock(e: &AppError) -> bool {
     }
 }
 
-/// Returns the response unchanged (degraded header removed since Ably is gone)
+/// Returns the response as-is. Reserved for future use if a real-time
+/// degradation flag is needed (e.g. to signal fallback mode to the frontend).
 fn with_degraded_header<T: serde::Serialize>(body: ApiResponse<T>) -> axum::response::Response {
     Json(body).into_response()
 }
@@ -173,7 +174,7 @@ pub(crate) async fn commit_vote_submission(
     participant_id: &str,
     option_ids: &[String],
     limit_submissions: bool,
-) -> Result<bool> {
+) -> Result<Option<String>> {
     if limit_submissions {
         let reserve_result = sqlx::query(
             "INSERT INTO vote_submissions (slide_id, participant_id, session_id) VALUES (?, ?, ?)",
@@ -186,7 +187,7 @@ pub(crate) async fn commit_vote_submission(
 
         match reserve_result {
             Ok(_) => {}
-            Err(error) if is_mysql_duplicate_key(&error) => return Ok(false),
+            Err(error) if is_mysql_duplicate_key(&error) => return Ok(None),
             Err(error) => return Err(error.into()),
         }
     }
@@ -216,20 +217,10 @@ pub(crate) async fn commit_vote_submission(
     }
 
     if should_skip_vote_snapshot(limit_submissions, inserted_option_ids.len() as u64) {
-        return Ok(false);
+        return Ok(None);
     }
 
-    let shard_id = vote_count_shard_id(participant_id);
-
-    crate::services::outbox::enqueue_event(
-        tx,
-        session_id,
-        crate::services::outbox::OutboxEventType::VoteUpdate,
-        &build_vote_update_payload(slide_id, shard_id, &inserted_option_ids),
-    )
-    .await?;
-
-    Ok(true)
+    Ok(Some(slide_id.to_string()))
 }
 /// Helper function: Atomically increment qa_sequence and fetch questions.
 /// Returns (sequence, Vec<Question>)
@@ -397,7 +388,7 @@ pub async fn submit_vote(
         )
         .await
         {
-            Ok(_) => {
+            Ok(maybe_slide_id) => {
                 sqlx::query(
                     "INSERT IGNORE INTO wal_request_replays (session_id, op_type, client_request_id, response_payload)
                      VALUES (?, ?, ?, ?)",
@@ -410,7 +401,18 @@ pub async fn submit_vote(
                 .await?;
 
                 tx.commit().await?;
-                app_state.outbox_flush_notify.notify_one();
+
+                if let Some(slide_id) = maybe_slide_id {
+                    crate::services::broadcast::broadcast_vote_update(
+                        &pool,
+                        &*app_state.registry,
+                        &session_id,
+                        &slide_id,
+                        0, // sequence not needed for dedup on vote
+                    )
+                    .await;
+                }
+
                 app_state
                     .session_service
                     .invalidate_session_cache(&session_id)
@@ -1040,17 +1042,6 @@ pub async fn submit_question(
     .await?;
 
     let (sequence, questions) = next_qa_sequence_and_questions(&mut tx, &session_id).await?;
-    let qa_payload = serde_json::json!({
-        "payload": { "questions": questions },
-        "sequence": sequence
-    });
-    crate::services::outbox::enqueue_event(
-        &mut tx,
-        &session_id,
-        crate::services::outbox::OutboxEventType::QaUpdate,
-        &qa_payload,
-    )
-    .await?;
 
     sqlx::query(
         "INSERT IGNORE INTO wal_request_replays (session_id, op_type, client_request_id, response_payload)
@@ -1064,6 +1055,15 @@ pub async fn submit_question(
     .await?;
 
     tx.commit().await?;
+
+    let questions_json = serde_json::to_value(&questions).expect("questions should serialize");
+    crate::services::broadcast::broadcast_qa_update(
+        &*app_state.registry,
+        &session_id,
+        &questions_json,
+        sequence,
+    )
+    .await;
 
     Ok((StatusCode::ACCEPTED, Json(ApiResponse::success(question))).into_response())
 }
@@ -1130,17 +1130,6 @@ pub async fn upvote_question(
     }
 
     let (sequence, questions) = next_qa_sequence_and_questions(&mut tx, &session_id).await?;
-    let qa_payload = serde_json::json!({
-        "payload": { "questions": questions },
-        "sequence": sequence
-    });
-    crate::services::outbox::enqueue_event(
-        &mut tx,
-        &session_id,
-        crate::services::outbox::OutboxEventType::QaUpdate,
-        &qa_payload,
-    )
-    .await?;
 
     let updated_upvotes = question.upvotes.saturating_add(if already_upvoted { 0 } else { 1 });
     let response = serde_json::json!({
@@ -1161,6 +1150,15 @@ pub async fn upvote_question(
     .await?;
 
     tx.commit().await?;
+
+    let questions_json = serde_json::to_value(&questions).expect("questions should serialize");
+    crate::services::broadcast::broadcast_qa_update(
+        &*app_state.registry,
+        &session_id,
+        &questions_json,
+        sequence,
+    )
+    .await;
 
     Ok(crate::services::wal::queued_success_response(&response))
 }
@@ -1315,18 +1313,11 @@ mod student_helper_tests {
 
     // --- with_degraded_header tests ---
 
-    /// When the realtime circuit breaker is NOT open, the response has no
-    /// `X-Realtime-Degraded` header.
+    /// Response has no `X-Realtime-Degraded` header.
     #[test]
     fn with_degraded_header_omits_header_when_not_degraded() {
         let body = ApiResponse::success("ok");
         let response = with_degraded_header(body);
         assert!(response.headers().get("x-realtime-degraded").is_none());
     }
-
-    // Note: with_degraded_header when degraded=true requires setting the circuit
-    // breaker to open state, which uses a static global. Testing that path
-    // requires serializing access to the global circuit breaker state, which
-    // is better done in an integration test or via dependency injection.
-    // The degraded path is tested indirectly via the existing concurrency tests.
 }

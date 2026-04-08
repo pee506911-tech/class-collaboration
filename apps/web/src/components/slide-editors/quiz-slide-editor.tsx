@@ -19,8 +19,8 @@ interface QuizSlideEditorProps {
 
 export function QuizSlideEditor({ content, onChange, onBlur, disabled }: QuizSlideEditorProps) {
     const question = content.question || '';
-    const points = content.points || 1000;
-    const timerDuration = content.timerDuration || 30;
+    const points = content.points ?? 1000;
+    const timerDuration = content.timerDuration ?? 30;
     const questionRef = useRef<HTMLInputElement | null>(null);
     const timerDurationRef = useRef<HTMLInputElement | null>(null);
     const pointsRef = useRef<HTMLInputElement | null>(null);
@@ -46,12 +46,12 @@ export function QuizSlideEditor({ content, onChange, onBlur, disabled }: QuizSli
             questionRef.current.value = nextContent.question || '';
         }
 
-        const nextTimerDuration = String(nextContent.timerDuration || 30);
+        const nextTimerDuration = String(nextContent.timerDuration ?? 30);
         if (timerDurationRef.current && timerDurationRef.current.value !== nextTimerDuration) {
             timerDurationRef.current.value = nextTimerDuration;
         }
 
-        const nextPoints = String(nextContent.points || 1000);
+        const nextPoints = String(nextContent.points ?? 1000);
         if (pointsRef.current && pointsRef.current.value !== nextPoints) {
             pointsRef.current.value = nextPoints;
         }
