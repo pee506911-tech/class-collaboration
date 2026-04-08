@@ -626,9 +626,7 @@ pub async fn update_slide(
     // Enqueue outbox event for reliable delivery
     let outbox_id = uuid::Uuid::new_v4().to_string();
     let event_payload = serde_json::json!({
-        "slideId": slide_id,
-        "sessionId": session_id,
-        "slide": slide
+        "slides": [slide]
     });
     sqlx::query(
         "INSERT INTO outbox_events (id, session_id, event_type, payload, status)
