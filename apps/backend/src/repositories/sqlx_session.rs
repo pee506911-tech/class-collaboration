@@ -10,6 +10,26 @@ use crate::repositories::session::{
     NewSession, SessionRepository, SessionSequences, SessionStateHeader, SessionUpdates,
 };
 
+const SELECT_SESSION_STATE_HEADER_SQL: &str = r#"
+    SELECT
+        s.current_slide_id,
+        s.is_presentation_active,
+        s.is_results_visible,
+        s.state_version,
+        CAST(0 AS UNSIGNED) AS vote_sequence,
+        CAST(s.qa_sequence AS UNSIGNED) AS qa_sequence
+    FROM sessions s
+    WHERE s.id = ?
+"#;
+
+const SELECT_SESSION_SEQUENCES_SQL: &str = r#"
+    SELECT
+        CAST(0 AS UNSIGNED) AS vote_sequence,
+        CAST(s.qa_sequence AS UNSIGNED) AS qa_sequence
+    FROM sessions s
+    WHERE s.id = ?
+"#;
+
 #[derive(sqlx::FromRow)]
 struct SessionWithSlideCountRow {
     id: String,
@@ -265,34 +285,14 @@ impl SessionRepository for SqlxSessionRepository {
         let pool = self.get_pool().await?;
         let row = if crate::tidb_ru::should_sample() {
             let mut conn = pool.acquire().await?;
-            let row = query_as::<_, SessionStateHeaderRow>(
-                "SELECT
-                    s.current_slide_id,
-                    s.is_presentation_active,
-                    s.is_results_visible,
-                    s.state_version,
-                    0 AS vote_sequence,
-                    s.qa_sequence
-                 FROM sessions s
-                 WHERE s.id = ?",
-            )
-            .bind(session_id)
-            .fetch_optional(&mut *conn)
-            .await?;
+            let row = query_as::<_, SessionStateHeaderRow>(SELECT_SESSION_STATE_HEADER_SQL)
+                .bind(session_id)
+                .fetch_optional(&mut *conn)
+                .await?;
             crate::tidb_ru::log_last_query_info("sessions.state_header", &mut *conn).await;
             row
         } else {
-            query_as::<_, SessionStateHeaderRow>(
-                "SELECT
-                    s.current_slide_id,
-                    s.is_presentation_active,
-                    s.is_results_visible,
-                    s.state_version,
-                    0 AS vote_sequence,
-                    s.qa_sequence
-                 FROM sessions s
-                 WHERE s.id = ?",
-            )
+            query_as::<_, SessionStateHeaderRow>(SELECT_SESSION_STATE_HEADER_SQL)
             .bind(session_id)
             .fetch_optional(&pool)
             .await?
@@ -427,13 +427,7 @@ impl SessionRepository for SqlxSessionRepository {
 
     async fn get_sequences(&self, session_id: &str) -> Result<SessionSequences> {
         let pool = self.get_pool().await?;
-        let sequences: Option<(u64, u64)> = sqlx::query_as(
-            "SELECT
-                0 AS vote_sequence,
-                s.qa_sequence
-             FROM sessions s
-             WHERE s.id = ?",
-        )
+        let sequences: Option<(u64, u64)> = sqlx::query_as(SELECT_SESSION_SEQUENCES_SQL)
         .bind(session_id)
         .fetch_optional(&pool)
         .await?;
@@ -444,5 +438,28 @@ impl SessionRepository for SqlxSessionRepository {
                 qa_sequence: q,
             })
             .unwrap_or_default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SELECT_SESSION_SEQUENCES_SQL, SELECT_SESSION_STATE_HEADER_SQL};
+
+    #[test]
+    fn state_header_query_casts_sequence_fields_to_unsigned() {
+        assert!(SELECT_SESSION_STATE_HEADER_SQL.contains("CAST(0 AS UNSIGNED) AS vote_sequence"));
+        assert!(
+            SELECT_SESSION_STATE_HEADER_SQL
+                .contains("CAST(s.qa_sequence AS UNSIGNED) AS qa_sequence")
+        );
+    }
+
+    #[test]
+    fn sequences_query_casts_sequence_fields_to_unsigned() {
+        assert!(SELECT_SESSION_SEQUENCES_SQL.contains("CAST(0 AS UNSIGNED) AS vote_sequence"));
+        assert!(
+            SELECT_SESSION_SEQUENCES_SQL
+                .contains("CAST(s.qa_sequence AS UNSIGNED) AS qa_sequence")
+        );
     }
 }

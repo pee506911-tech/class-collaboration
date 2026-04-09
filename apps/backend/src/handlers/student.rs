@@ -21,6 +21,7 @@ const MAX_DEADLOCK_RETRIES: u32 = 3;
 const MY_VOTES_SLIDE_ID_CHUNK_SIZE: usize = 128;
 #[allow(dead_code)]
 const VOTE_COUNT_SHARD_COUNT: u32 = 16;
+const SELECT_QA_SEQUENCE_SQL: &str = "SELECT CAST(qa_sequence AS UNSIGNED) FROM sessions WHERE id = ?";
 
 fn resolve_client_request_id(headers: &HeaderMap) -> Result<String> {
     let client_request_id = headers
@@ -239,7 +240,7 @@ pub(crate) async fn next_qa_sequence_and_questions(
         .await?;
 
     // Read the new sequence value
-    let sequence: u64 = sqlx::query_scalar("SELECT qa_sequence FROM sessions WHERE id = ?")
+    let sequence: u64 = sqlx::query_scalar(SELECT_QA_SEQUENCE_SQL)
         .bind(session_id)
         .fetch_one(&mut **tx)
         .await?;
@@ -1362,7 +1363,7 @@ pub async fn get_my_votes(
 
 #[cfg(test)]
 mod student_helper_tests {
-    use super::{group_votes_by_slide, with_degraded_header, ApiResponse};
+    use super::{group_votes_by_slide, with_degraded_header, ApiResponse, SELECT_QA_SEQUENCE_SQL};
 
     // --- group_votes_by_slide tests ---
 
@@ -1404,5 +1405,13 @@ mod student_helper_tests {
         let body = ApiResponse::success("ok");
         let response = with_degraded_header(body);
         assert!(response.headers().get("x-realtime-degraded").is_none());
+    }
+
+    #[test]
+    fn qa_sequence_query_casts_to_unsigned() {
+        assert_eq!(
+            SELECT_QA_SEQUENCE_SQL,
+            "SELECT CAST(qa_sequence AS UNSIGNED) FROM sessions WHERE id = ?"
+        );
     }
 }
