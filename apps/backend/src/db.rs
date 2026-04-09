@@ -16,6 +16,7 @@ const REPAIRABLE_MIGRATION_VERSIONS: &[i64] = &[
     20260310100000,
     20260403140000,
     20260405103000,
+    20260410000000,
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -204,6 +205,27 @@ impl LazyDbPool {
             else {
                 continue;
             };
+
+            // Clean up partially-applied migrations (success = 0) so they can retry
+            let success_row: Option<bool> =
+                sqlx::query_scalar("SELECT success FROM _sqlx_migrations WHERE version = ?")
+                    .bind(version)
+                    .fetch_optional(pool)
+                    .await?;
+
+            if let Some(success) = success_row {
+                if !success {
+                    tracing::warn!(
+                        version = *version,
+                        "Removing partially-applied migration to allow retry"
+                    );
+                    sqlx::query("DELETE FROM _sqlx_migrations WHERE version = ?")
+                        .bind(version)
+                        .execute(pool)
+                        .await?;
+                    continue;
+                }
+            }
 
             let applied_checksum: Option<Vec<u8>> =
                 sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = ?")

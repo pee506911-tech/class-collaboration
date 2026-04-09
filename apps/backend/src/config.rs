@@ -116,7 +116,7 @@ impl Config {
         let db_acquire_timeout_seconds = env::var("DB_ACQUIRE_TIMEOUT_SECONDS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(30);
+            .unwrap_or(60);
         let db_idle_timeout_seconds = env::var("DB_IDLE_TIMEOUT_SECONDS")
             .ok()
             .and_then(|v| v.parse().ok())
