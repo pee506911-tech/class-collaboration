@@ -278,30 +278,48 @@ pub async fn create_slides_batch(
         })
         .collect();
 
+    let slide_ids: Vec<&str> = slide_specs.iter().map(|(id, _, _)| id.as_str()).collect();
+
     let mut tx = pool.begin().await?;
     lock_session(&mut tx, &session_id).await?;
 
     let mut next_order_index = get_append_order_index(&mut tx, &session_id).await?;
 
-    let mut created_slides = Vec::with_capacity(slide_specs.len());
-    for (slide_id, slide_type, content) in slide_specs {
-        sqlx::query(
-            "INSERT INTO slides (id, session_id, type, content, order_index, client_request_id)
-             VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&slide_id)
-        .bind(&session_id)
-        .bind(&slide_type)
-        .bind(sqlx::types::Json(&content))
-        .bind(next_order_index)
-        .bind(&client_request_id)
-        .execute(&mut *tx)
-        .await?;
-
-        let slide = load_slide(&mut tx, &slide_id, &session_id).await?;
-        created_slides.push(slide);
+    // Single multi-row INSERT for all slides
+    let mut qb = QueryBuilder::<MySql>::new(
+        "INSERT INTO slides (id, session_id, type, content, order_index, client_request_id) "
+    );
+    qb.push_values(&slide_specs, |mut b, (slide_id, slide_type, content)| {
+        b.push_bind(slide_id)
+            .push_bind(&session_id)
+            .push_bind(slide_type)
+            .push_bind(sqlx::types::Json(content))
+            .push_bind(next_order_index)
+            .push_bind(&client_request_id);
         next_order_index = next_order_index.saturating_add(ORDER_STEP);
+    });
+    qb.build().execute(&mut *tx).await?;
+
+    // Single SELECT to load all created slides
+    let placeholders = slide_ids
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+    let query = format!(
+        "SELECT id, session_id, type, content, order_index, is_hidden, version \
+         FROM slides \
+         WHERE id IN ({}) AND session_id = ? \
+         ORDER BY order_index",
+        placeholders
+    );
+
+    let mut db_query = sqlx::query_as::<_, Slide>(&query);
+    for slide_id in &slide_ids {
+        db_query = db_query.bind(slide_id);
     }
+    db_query = db_query.bind(&session_id);
+    let created_slides: Vec<Slide> = db_query.fetch_all(&mut *tx).await?;
 
     sqlx::query("UPDATE sessions SET state_version = state_version + 1 WHERE id = ?")
         .bind(&session_id)
@@ -330,11 +348,11 @@ pub async fn create_slides_batch(
         .invalidate_session_cache(&session_id)
         .await;
 
-    let state_version =
-        sqlx::query_scalar::<_, i64>("SELECT state_version FROM sessions WHERE id = ?")
-            .bind(&session_id)
-            .fetch_one(&pool)
-            .await?;
+    // Use the state_version from transaction (incremented before commit)
+    let state_version = query_scalar::<_, i64>("SELECT state_version FROM sessions WHERE id = ?")
+        .bind(&session_id)
+        .fetch_one(&pool)
+        .await?;
 
     Ok(crate::services::wal::queued_success_response(
         &CreateSlidesBatchResponse {
@@ -382,26 +400,33 @@ pub async fn update_slides_batch(
         return Ok(crate::services::wal::queued_success_response(&existing));
     }
 
-    // Pre-load all existing slides to check ownership and versions
-    let mut existing_slides_map: std::collections::HashMap<String, Slide> =
-        std::collections::HashMap::with_capacity(payload.updates.len());
+    // Pre-load all existing slides with a single bulk SELECT
+    let slide_ids_to_update: Vec<&str> = payload.updates.iter().map(|u| u.slide_id.as_str()).collect();
+    let placeholders = slide_ids_to_update
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+    let query = format!(
+        "SELECT id, session_id, type, content, order_index, is_hidden, version \
+         FROM slides \
+         WHERE id IN ({}) AND session_id = ?",
+        placeholders
+    );
 
-    for update in &payload.updates {
-        let slide = query_as::<_, Slide>(
-            "SELECT id, session_id, type, content, order_index, is_hidden, version \
-             FROM slides \
-             WHERE id = ? AND session_id = ?",
-        )
-        .bind(&update.slide_id)
-        .bind(&session_id)
-        .fetch_optional(&pool)
-        .await?;
+    let mut db_query = sqlx::query_as::<_, Slide>(&query);
+    for slide_id in &slide_ids_to_update {
+        db_query = db_query.bind(slide_id);
+    }
+    db_query = db_query.bind(&session_id);
+    let existing_slides: Vec<Slide> = db_query.fetch_all(&pool).await?;
 
-        match slide {
-            Some(s) => {
-                existing_slides_map.insert(s.id.clone(), s);
-            }
-            None => {
+    if existing_slides.len() != payload.updates.len() {
+        // Some slides not found - find which ones
+        let found_ids: std::collections::HashSet<_> =
+            existing_slides.iter().map(|s| &s.id).collect();
+        for update in &payload.updates {
+            if !found_ids.contains(&update.slide_id) {
                 return Err(AppError::NotFound(format!(
                     "Slide {} not found",
                     update.slide_id
@@ -409,6 +434,9 @@ pub async fn update_slides_batch(
             }
         }
     }
+
+    let existing_slides_map: std::collections::HashMap<String, Slide> =
+        existing_slides.into_iter().map(|s| (s.id.clone(), s)).collect();
 
     // Validate versions before starting transaction
     for update in &payload.updates {
@@ -426,8 +454,7 @@ pub async fn update_slides_batch(
     let mut tx = pool.begin().await?;
     lock_session(&mut tx, &session_id).await?;
 
-    let mut updated_slides = Vec::with_capacity(payload.updates.len());
-
+    // Bulk UPDATE all slides
     for update in &payload.updates {
         let expected_version = existing_slides_map
             .get(&update.slide_id)
@@ -452,10 +479,28 @@ pub async fn update_slides_batch(
                 expected_version,
             ));
         }
-
-        let slide = load_slide(&mut tx, &update.slide_id, &session_id).await?;
-        updated_slides.push(slide);
     }
+
+    // Single SELECT to load all updated slides
+    let placeholders = slide_ids_to_update
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+    let query = format!(
+        "SELECT id, session_id, type, content, order_index, is_hidden, version \
+         FROM slides \
+         WHERE id IN ({}) AND session_id = ? \
+         ORDER BY order_index",
+        placeholders
+    );
+
+    let mut db_query = sqlx::query_as::<_, Slide>(&query);
+    for slide_id in &slide_ids_to_update {
+        db_query = db_query.bind(slide_id);
+    }
+    db_query = db_query.bind(&session_id);
+    let updated_slides: Vec<Slide> = db_query.fetch_all(&mut *tx).await?;
 
     sqlx::query("UPDATE sessions SET state_version = state_version + 1 WHERE id = ?")
         .bind(&session_id)
@@ -487,11 +532,10 @@ pub async fn update_slides_batch(
         .invalidate_session_cache(&session_id)
         .await;
 
-    let state_version =
-        sqlx::query_scalar::<_, i64>("SELECT state_version FROM sessions WHERE id = ?")
-            .bind(&session_id)
-            .fetch_one(&pool)
-            .await?;
+    let state_version = query_scalar::<_, i64>("SELECT state_version FROM sessions WHERE id = ?")
+        .bind(&session_id)
+        .fetch_one(&pool)
+        .await?;
 
     Ok(crate::services::wal::queued_success_response(
         &UpdateSlidesBatchResponse {
@@ -620,21 +664,6 @@ pub async fn update_slide(
     .bind(crate::services::wal::WalOpType::UpdateSlide.to_string())
     .bind(&client_request_id)
     .bind(sqlx::types::Json(serde_json::to_value(&slide).expect("slide should serialize")))
-    .execute(&mut *tx)
-    .await?;
-
-    // Enqueue outbox event for reliable delivery
-    let outbox_id = uuid::Uuid::new_v4().to_string();
-    let event_payload = serde_json::json!({
-        "slides": [slide]
-    });
-    sqlx::query(
-        "INSERT INTO outbox_events (id, session_id, event_type, payload, status)
-         VALUES (?, ?, 'SLIDES_UPDATE', ?, 'pending')",
-    )
-    .bind(&outbox_id)
-    .bind(&session_id)
-    .bind(sqlx::types::Json(&event_payload))
     .execute(&mut *tx)
     .await?;
 

@@ -429,6 +429,7 @@ pub async fn submit_vote(
                 crate::services::broadcast::broadcast_vote_update(
                     &pool,
                     &*app_state.registry,
+                    &app_state.vote_cache,
                     &session_id,
                     &slide_id,
                     0, // sequence not needed for dedup on vote

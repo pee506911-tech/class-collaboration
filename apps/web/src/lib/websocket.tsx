@@ -118,6 +118,9 @@ export function WebSocketProvider({
     const voteSequenceRef = useRef<number>(0);
     const qaSequenceRef = useRef<number>(0);
 
+    // Embedded WS token from the initial state response (eliminates separate token fetch).
+    const wsTokenRef = useRef<string | null>(null);
+
     // Reconnect state persisted across effect re-runs
     const reconnectAttemptRef = useRef<number>(0);
     const reconnectTimeoutIdRef = useRef<NodeJS.Timeout | null>(null);
@@ -157,6 +160,11 @@ export function WebSocketProvider({
                     if (data.voteCounts) setVoteResults(data.voteCounts);
                     syncSequenceRefs(voteSequenceRef, qaSequenceRef, data);
                     setLastStateSyncAt(Date.now());
+
+                    // Capture embedded WS token if present (backend optimization)
+                    if (data.wsToken && typeof data.wsToken === 'string') {
+                        wsTokenRef.current = data.wsToken;
+                    }
                 } else {
                     setInitialStateError(`HTTP ${res.status}`);
                 }
@@ -269,6 +277,11 @@ export function WebSocketProvider({
                     if (data.voteCounts) setVoteResults(data.voteCounts);
                     syncSequenceRefs(voteSequenceRef, qaSequenceRef, data);
                     setLastStateSyncAt(Date.now());
+
+                    // Capture embedded WS token if present
+                    if (data.wsToken && typeof data.wsToken === 'string' && !wsTokenRef.current) {
+                        wsTokenRef.current = data.wsToken;
+                    }
                 } else if (!res.ok && isMountedRef.current) {
                     setInitialStateError(`HTTP ${res.status}`);
                 }
@@ -345,12 +358,20 @@ export function WebSocketProvider({
         setConnectionError(null);
 
         try {
-            // Fetch WS token
-            const token = await fetchWsToken({
-                sessionId,
-                role,
-                participantId: participantIdRef.current,
-            });
+            // Use embedded WS token from initial state response if available,
+            // otherwise fall back to fetching a separate token (backward compat).
+            let token: string;
+            if (wsTokenRef.current) {
+                token = wsTokenRef.current;
+                console.log('[WS] Using embedded WS token from state response');
+            } else {
+                console.log('[WS] Fetching WS token from /api/auth/ws-token');
+                token = await fetchWsToken({
+                    sessionId,
+                    role,
+                    participantId: participantIdRef.current,
+                });
+            }
 
             if (!isMountedRef.current) return;
 

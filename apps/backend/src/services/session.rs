@@ -356,6 +356,7 @@ impl SessionService {
             vote_counts,
             vote_sequence: header.vote_sequence,
             qa_sequence: header.qa_sequence,
+            ws_token: None,
         })
     }
 }
@@ -609,6 +610,7 @@ mod tests {
             )]),
             vote_sequence: 7,
             qa_sequence: 11,
+            ws_token: None,
         }
     }
 

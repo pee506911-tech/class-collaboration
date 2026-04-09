@@ -155,52 +155,73 @@ async fn handle_socket(
         }
     });
 
-    // Forward loop: receive broadcasts from the registry and send to client
+    // Forward loop: receive broadcasts from the registry and send to client.
+    // Sends a periodic ping to detect dead connections (clients that disconnected
+    // without a close frame, e.g., WiFi unplugged).
     let session_id_forward = claims.session_id.clone();
     let client_id_forward = client_id.clone();
+    let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
-        match receiver.recv().await {
-            Ok(message) => {
-                let forward_started_at = std::time::Instant::now();
-
-                // Extract event metadata for audit logging
-                let event_type = message
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("UNKNOWN");
-                let sequence_id = message.get("sequence").and_then(|v| v.as_u64());
-
-                if let Ok(json_str) = serde_json::to_string(&message) {
-                    if ws_sender.send(Message::Text(json_str)).await.is_err() {
-                        // Client disconnected
-                        break;
-                    }
-
-                    let delivery_duration_ms = forward_started_at.elapsed().as_millis();
-
-                    // Log delivery timing for audit profiling
+        tokio::select! {
+            // Periodic ping to detect dead connections
+            _ = ping_interval.tick() => {
+                if ws_sender.send(Message::Ping(Vec::new())).await.is_err() {
                     tracing::info!(
                         session_id = %session_id_forward,
                         client_id = %client_id_forward,
-                        event_type = %event_type,
-                        sequence_id = sequence_id,
-                        delivery_ms = delivery_duration_ms,
-                        "SPEED_AUDIT: WebSocket message sent to client"
+                        "Dead WebSocket connection detected (ping failed)"
                     );
+                    break;
                 }
             }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!(
-                    session_id = %session_id_forward,
-                    dropped = n,
-                    "Client lagged behind, messages dropped"
-                );
-                // Continue — client will catch up on next state refresh
-            }
-            Err(broadcast::error::RecvError::Closed) => {
-                // Sender (registry) closed the channel — shouldn't happen
-                tracing::error!(session_id = %session_id_forward, "Broadcast channel closed unexpectedly");
-                break;
+            // Registry broadcast to forward to client
+            message = receiver.recv() => {
+                match message {
+                    Ok(message) => {
+                        let forward_started_at = std::time::Instant::now();
+
+                        // Extract event metadata for audit logging
+                        let event_type = message
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("UNKNOWN");
+                        let sequence_id = message.get("sequence").and_then(|v| v.as_u64());
+
+                        if let Ok(json_str) = serde_json::to_string(&message) {
+                            if ws_sender.send(Message::Text(json_str)).await.is_err() {
+                                // Client disconnected
+                                break;
+                            }
+
+                            let delivery_duration_ms = forward_started_at.elapsed().as_millis();
+
+                            // Log delivery timing for audit profiling
+                            tracing::info!(
+                                session_id = %session_id_forward,
+                                client_id = %client_id_forward,
+                                event_type = %event_type,
+                                sequence_id = sequence_id,
+                                delivery_ms = delivery_duration_ms,
+                                "SPEED_AUDIT: WebSocket message sent to client"
+                            );
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(
+                            session_id = %session_id_forward,
+                            dropped = n,
+                            "Client lagged behind, messages dropped"
+                        );
+                        // Continue — client will catch up on next state refresh
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        // Sender (registry) closed the channel — shouldn't happen
+                        tracing::error!(session_id = %session_id_forward, "Broadcast channel closed unexpectedly");
+                        break;
+                    }
+                }
             }
         }
     }

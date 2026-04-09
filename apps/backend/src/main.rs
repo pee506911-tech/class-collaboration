@@ -38,6 +38,7 @@ use db::{DbPoolSettings, LazyDbPool};
 use repositories::session::SessionRepository;
 use repositories::sqlx_session::SqlxSessionRepository;
 use services::session::{SessionService, SessionStateCache};
+use services::vote_cache::VoteResultCache;
 
 /// Listen for SIGTERM or SIGINT and return when one arrives.
 /// Render sends SIGTERM on redeploy/scale. Ctrl+C sends SIGINT locally.
@@ -61,6 +62,7 @@ pub struct AppState {
     pub db_pool: LazyDbPool,
     pub session_service: Arc<SessionService>,
     pub registry: Arc<ws::registry::InMemoryRegistry>,
+    pub vote_cache: Arc<VoteResultCache>,
 }
 
 #[tokio::main]
@@ -136,6 +138,9 @@ async fn main() -> anyhow::Result<()> {
     // event delivery to connected WebSocket clients.
     let registry = Arc::new(ws::registry::InMemoryRegistry::new());
 
+    // Vote result cache — coalesces redundant DB reads during vote storms.
+    let vote_cache = Arc::new(VoteResultCache::new());
+
     tracing::info!("App state created in {:?}", startup_time.elapsed());
 
     // Wait for database to be ready before starting the server.
@@ -159,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
         db_pool: lazy_pool.clone(),
         session_service: session_service.clone(),
         registry: registry.clone(),
+        vote_cache: vote_cache.clone(),
     };
 
     // Rate limiting configuration

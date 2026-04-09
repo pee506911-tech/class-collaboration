@@ -258,6 +258,7 @@ mod session_serde_roundtrip_tests {
             vote_counts,
             vote_sequence: 100,
             qa_sequence: 50,
+            ws_token: None,
         };
 
         let json = serde_json::to_value(&state).expect("should serialize");
@@ -282,6 +283,7 @@ mod session_serde_roundtrip_tests {
             vote_counts: HashMap::new(),
             vote_sequence: 0,
             qa_sequence: 0,
+            ws_token: None,
         };
 
         let json = serde_json::to_value(&state).expect("should serialize");

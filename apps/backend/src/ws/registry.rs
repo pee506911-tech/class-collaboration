@@ -3,9 +3,10 @@ use serde_json::Value;
 use std::collections::HashMap;
 use tokio::sync::{broadcast, RwLock};
 
-/// Capacity of the per-session broadcast channel. 256 messages is far more
-/// than any classroom session would generate between consumer reads.
-const BROADCAST_CHANNEL_CAPACITY: usize = 256;
+/// Capacity of the per-session broadcast channel. 512 messages provides a
+/// comfortable buffer for highly active sessions (rapid votes, Q&A, slide
+/// changes) while keeping memory usage negligible (~100KB per active session).
+const BROADCAST_CHANNEL_CAPACITY: usize = 512;
 
 /// Error type for broadcast operations.
 #[derive(Debug, thiserror::Error)]

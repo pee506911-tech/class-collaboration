@@ -2,12 +2,16 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, HeaderValue},
     response::IntoResponse,
-    Json,
+    Extension, Json,
 };
+use jsonwebtoken::{encode, EncodingKey, Header};
 use serde::Deserialize;
 use sqlx::{query_as, MySql};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
+use crate::config::Config;
 use crate::error::Result;
 use crate::models::response::ApiResponse;
 use crate::models::session::Session;
@@ -40,17 +44,61 @@ pub async fn get_session_by_share_token(
 }
 
 /// Get session state (for students/projector real-time sync)
-/// Returns flattened state that matches frontend StateUpdatePayload
+/// Returns flattened state that matches frontend StateUpdatePayload.
+/// Also embeds a short-lived WS token to eliminate the separate /api/auth/ws-token
+/// round-trip during WebSocket connection establishment.
 pub async fn get_session_state(
     State(app_state): State<crate::AppState>,
+    Extension(config): Extension<Arc<Config>>,
     Path(session_id): Path<String>,
 ) -> Result<impl IntoResponse> {
-    let state = app_state
+    let mut state = app_state
         .session_service
         .get_session_state(&session_id)
         .await?;
 
+    // Generate a short-lived WS token (5-minute expiry) for anonymous access.
+    // This allows the frontend to connect to WebSocket without a separate token fetch.
+    state.ws_token = generate_anonymous_ws_token(&session_id, &config.jwt_secret);
+
     Ok(([("Cache-Control", cache_control_state())], Json(state)))
+}
+
+/// WS JWT claims for anonymous (student/projector) access.
+#[derive(Debug, serde::Serialize)]
+struct AnonymousWsClaims {
+    #[serde(rename = "sessionId")]
+    session_id: String,
+    role: String,
+    #[serde(rename = "participantId")]
+    participant_id: Option<String>,
+    #[serde(rename = "userId")]
+    user_id: String,
+    exp: usize,
+}
+
+/// Generate a short-lived WS token for anonymous session state access.
+/// Returns None if JWT signing fails (non-critical — frontend falls back to separate token fetch).
+fn generate_anonymous_ws_token(session_id: &str, jwt_secret: &str) -> Option<String> {
+    let expiry = SystemTime::now()
+        .checked_add(Duration::from_secs(300)) // 5 minutes
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as usize)?;
+
+    let claims = AnonymousWsClaims {
+        session_id: session_id.to_string(),
+        role: "student".to_string(),
+        participant_id: None,
+        user_id: format!("anon-{}", session_id),
+        exp: expiry,
+    };
+
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(jwt_secret.as_bytes()),
+    )
+    .ok()
 }
 
 // ============ Public Clicker Endpoints ============

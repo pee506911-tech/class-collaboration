@@ -1,6 +1,7 @@
 use serde_json::Value;
 use sqlx::{MySql, Pool};
 
+use crate::services::vote_cache::VoteResultCache;
 use crate::ws::registry::Broadcaster;
 
 /// Broadcast a STATE_UPDATE to all WS clients for the given session.
@@ -63,15 +64,36 @@ pub async fn broadcast_slides_update(
 }
 
 /// Broadcast a VOTE_UPDATE to all WS clients for the given session.
-/// Reads vote results from the vote_count_shards table.
+/// Reads vote results from the vote_count_shards table, using the vote cache
+/// to avoid redundant DB queries during vote storms.
 pub async fn broadcast_vote_update(
     pool: &Pool<MySql>,
     broadcaster: &dyn Broadcaster,
+    vote_cache: &VoteResultCache,
     session_id: &str,
     slide_id: &str,
     sequence: u64,
 ) {
-    let results = fetch_vote_results(pool, slide_id).await.unwrap_or_default();
+    let results = match vote_cache.get(slide_id) {
+        Some(cached) => {
+            tracing::debug!(
+                session_id = %session_id,
+                slide_id = %slide_id,
+                "VOTE_UPDATE using cached vote results"
+            );
+            cached
+        }
+        None => {
+            match fetch_vote_results(pool, slide_id).await {
+                Ok(r) => {
+                    let value = serde_json::Value::Object(r);
+                    vote_cache.insert(slide_id, value.clone());
+                    value
+                }
+                Err(_) => Value::Object(serde_json::Map::new()),
+            }
+        }
+    };
 
     let message = serde_json::json!({
         "type": "VOTE_UPDATE",
@@ -134,7 +156,7 @@ pub async fn broadcast_qa_update(
 }
 
 /// Read aggregated vote results from the vote_count_shards table.
-async fn fetch_vote_results(
+pub(crate) async fn fetch_vote_results(
     pool: &Pool<MySql>,
     slide_id: &str,
 ) -> Result<serde_json::Map<String, Value>, sqlx::Error> {

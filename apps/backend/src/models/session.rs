@@ -94,4 +94,8 @@ pub struct SessionState {
     /// Sequence number for Q&A updates - used for deduplication
     #[serde(default)]
     pub qa_sequence: u64,
+    /// Short-lived WebSocket token for real-time connection (embedded to
+    /// eliminate a separate /api/auth/ws-token round-trip).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ws_token: Option<String>,
 }
