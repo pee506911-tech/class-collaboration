@@ -14,7 +14,8 @@ use crate::middleware::auth::AuthUser;
 use crate::models::response::ApiResponse;
 use crate::models::slide::{
     CreateSlideRequest, CreateSlidesBatchRequest, CreateSlidesBatchResponse, ReorderSlidesRequest,
-    Slide, UpdateSlideRequest, UpdateSlidesBatchRequest, UpdateSlidesBatchResponse,
+    Slide, SyncSlidesRequest, SyncSlidesResponse, UpdateSlideRequest, UpdateSlidesBatchRequest,
+    UpdateSlidesBatchResponse,
 };
 
 const ORDER_STEP: i32 = 1024;
@@ -93,86 +94,26 @@ async fn compute_insert_order_index(
     }
 }
 
-async fn verify_session_exists(pool: &sqlx::MySqlPool, session_id: &str) -> Result<()> {
-    let exists = query_scalar::<_, String>("SELECT id FROM sessions WHERE id = ?")
+async fn lock_session(tx: &mut Transaction<'_, MySql>, session_id: &str) -> Result<()> {
+    let lock_start = std::time::Instant::now();
+    let exists = query_scalar::<_, String>("SELECT id FROM sessions WHERE id = ? FOR UPDATE")
         .bind(session_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut **tx)
         .await?;
+
+    let lock_duration_ms = lock_start.elapsed().as_millis();
+    if lock_duration_ms > 100 {
+        tracing::warn!(
+            session_id = %session_id,
+            lock_duration_ms = %lock_duration_ms,
+            "SPEED_AUDIT: lock_session wait exceeded 100ms"
+        );
+    }
 
     match exists {
         Some(_) => Ok(()),
         None => Err(AppError::NotFound("Session not found".to_string())),
     }
-}
-
-async fn lock_session(tx: &mut Transaction<'_, MySql>, session_id: &str) -> Result<()> {
-    use std::time::Duration;
-
-    let lock_start = std::time::Instant::now();
-    let max_retries = 3;
-    let initial_wait_ms = 10;
-
-    for attempt in 0..max_retries {
-        // Use GET_LOCK with a timeout (5 seconds) instead of indefinite FOR UPDATE
-        let lock_name = format!("session_lock_{}", session_id);
-        let lock_acquired = query_scalar::<_, Option<i64>>("SELECT GET_LOCK(?, 5)")
-            .bind(&lock_name)
-            .fetch_one(&mut **tx)
-            .await?;
-
-        if lock_acquired == Some(1) {
-            // Lock acquired, now verify session exists with FOR UPDATE (should be instant now)
-            let exists = query_scalar::<_, String>("SELECT id FROM sessions WHERE id = ? FOR UPDATE")
-                .bind(session_id)
-                .fetch_optional(&mut **tx)
-                .await?;
-
-            let lock_duration_ms = lock_start.elapsed().as_millis();
-            if lock_duration_ms > 100 {
-                tracing::warn!(
-                    session_id = %session_id,
-                    lock_duration_ms = %lock_duration_ms,
-                    attempt = %attempt,
-                    "SPEED_AUDIT: lock_session wait exceeded 100ms"
-                );
-            }
-
-            match exists {
-                Some(_) => return Ok(()),
-                None => {
-                    // Release the lock before returning error
-                    let _ = query_scalar::<_, Option<i64>>("SELECT RELEASE_LOCK(?)")
-                        .bind(&lock_name)
-                        .fetch_one(&mut **tx)
-                        .await;
-                    return Err(AppError::NotFound("Session not found".to_string()));
-                }
-            }
-        }
-
-        // Lock not acquired — another connection holds it
-        if attempt < max_retries - 1 {
-            let wait_ms = initial_wait_ms * (1 << attempt); // 10ms, 20ms, 40ms
-            tokio::time::sleep(Duration::from_millis(wait_ms as u64)).await;
-        }
-    }
-
-    // All retries exhausted
-    let lock_duration_ms = lock_start.elapsed().as_millis();
-    tracing::error!(
-        session_id = %session_id,
-        lock_duration_ms = %lock_duration_ms,
-        "SPEED_AUDIT: lock_session failed to acquire after {} retries",
-        max_retries
-    );
-
-    Err(AppError::Conflict {
-        message: "Unable to acquire session lock after retries (session is busy)".to_string(),
-        data: Some(serde_json::json!({
-            "reason": "lock_timeout",
-            "sessionId": session_id
-        })),
-    })
 }
 
 async fn load_slide(
@@ -870,6 +811,225 @@ pub async fn reorder_slides(
         .await;
 
     Ok(crate::services::wal::queued_success_response(&response))
+}
+
+/// Synchronize the entire slide collection in a single request.
+///
+/// The client sends the complete desired slide list. The server:
+/// - Creates new slides (entries with `id = None`)
+/// - Updates existing slides (content, type, isHidden)
+/// - Deletes slides not present in the desired list
+/// - Sets order_index based on array position
+/// - Returns the final complete slide list
+///
+/// All operations happen in a single transaction with one WS broadcast.
+pub async fn sync_slides(
+    State(app_state): State<crate::AppState>,
+    AuthUser { user_id, .. }: AuthUser,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Json(payload): Json<SyncSlidesRequest>,
+) -> Result<impl IntoResponse> {
+    let pool = app_state.db_pool.pool_fast_fail().await?;
+    verify_session_ownership(&pool, &session_id, &user_id).await?;
+
+    let client_request_id =
+        resolved_client_request_id(payload.client_request_id.clone(), Some(&headers))?;
+    if let Some(existing) =
+        crate::services::wal::fetch_replay_response::<SyncSlidesResponse>(
+            &pool,
+            &session_id,
+            crate::services::wal::WalOpType::SyncSlides,
+            &client_request_id,
+        )
+        .await?
+    {
+        return Ok(crate::services::wal::queued_success_response(&existing));
+    }
+
+    if payload.slides.is_empty() {
+        // Deleting all slides is valid — proceed with empty list
+    }
+    if payload.slides.len() > MAX_BATCH_SLIDE_COUNT {
+        return Err(AppError::Input(format!(
+            "Too many slides in sync (max {})",
+            MAX_BATCH_SLIDE_COUNT
+        )));
+    }
+
+    let mut tx = pool.begin().await?;
+    lock_session(&mut tx, &session_id).await?;
+
+    // Load all existing slides
+    let existing_slides: Vec<Slide> = query_as::<_, Slide>(
+        "SELECT id, session_id, type, content, order_index, is_hidden, version \
+         FROM slides WHERE session_id = ? ORDER BY order_index ASC, id ASC",
+    )
+    .bind(&session_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let existing_slide_map: std::collections::HashMap<String, Slide> =
+        existing_slides.into_iter().map(|s| (s.id.clone(), s)).collect();
+
+    // Check base versions if provided
+    if let Some(ref base_versions) = payload.base_versions {
+        for (slide_id, expected_version) in base_versions {
+            if let Some(slide) = existing_slide_map.get(slide_id) {
+                if slide.version != *expected_version {
+                    return Err(build_slide_version_conflict(slide_id, slide.version));
+                }
+            }
+            // If slide doesn't exist on server but client sent a base_version,
+            // that means client thinks it exists — this is a stale state, reject.
+        }
+    }
+
+    // Collect desired slide IDs (only the ones with existing server IDs)
+    let desired_ids: std::collections::HashSet<String> = payload
+        .slides
+        .iter()
+        .filter_map(|e| e.id.clone())
+        .filter(|id| !id.starts_with("temp-"))
+        .collect();
+
+    // Determine which slides to delete (exist on server but not in desired list)
+    let slides_to_delete: Vec<&String> = existing_slide_map
+        .keys()
+        .filter(|id| !desired_ids.contains(*id))
+        .collect();
+
+    // DELETE slides not in desired set
+    if !slides_to_delete.is_empty() {
+        let placeholders = slides_to_delete
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let query = format!("DELETE FROM slides WHERE session_id = ? AND id IN ({})", placeholders);
+        let mut db_query = sqlx::query(&query).bind(&session_id);
+        for id in &slides_to_delete {
+            db_query = db_query.bind(*id);
+        }
+        db_query.execute(&mut *tx).await?;
+    }
+
+    // Process each desired slide entry
+    let mut created_ids: Vec<String> = Vec::new();
+    let mut order_index = 0i32;
+
+    for entry in &payload.slides {
+        match &entry.id {
+            None => {
+                // New slide — INSERT
+                let slide_id = Uuid::new_v4().to_string();
+                sqlx::query(
+                    "INSERT INTO slides (id, session_id, type, content, order_index) VALUES (?, ?, ?, ?, ?)",
+                )
+                .bind(&slide_id)
+                .bind(&session_id)
+                .bind(&entry.slide_type)
+                .bind(sqlx::types::Json(&entry.content))
+                .bind(order_index)
+                .execute(&mut *tx)
+                .await?;
+                created_ids.push(slide_id);
+            }
+            Some(id) => {
+                if existing_slide_map.contains_key(id.as_str()) {
+                    // Existing slide — UPDATE content, type, is_hidden, order_index
+                    let result = sqlx::query(
+                        "UPDATE slides SET type = ?, content = ?, is_hidden = ?, order_index = ? \
+                         WHERE id = ? AND session_id = ?",
+                    )
+                    .bind(&entry.slide_type)
+                    .bind(sqlx::types::Json(&entry.content))
+                    .bind(entry.is_hidden)
+                    .bind(order_index)
+                    .bind(id)
+                    .bind(&session_id)
+                    .execute(&mut *tx)
+                    .await?;
+
+                    if result.rows_affected() == 0 {
+                        return Err(AppError::NotFound(format!(
+                            "Slide {} not found in session",
+                            id
+                        )));
+                    }
+                } else {
+                    // Slide doesn't exist on server but client thinks it does — treat as new
+                    let slide_id = Uuid::new_v4().to_string();
+                    sqlx::query(
+                        "INSERT INTO slides (id, session_id, type, content, order_index) VALUES (?, ?, ?, ?, ?)",
+                    )
+                    .bind(&slide_id)
+                    .bind(&session_id)
+                    .bind(&entry.slide_type)
+                    .bind(sqlx::types::Json(&entry.content))
+                    .bind(order_index)
+                    .execute(&mut *tx)
+                    .await?;
+                    created_ids.push(slide_id);
+                }
+            }
+        }
+        order_index += ORDER_STEP;
+    }
+
+    // Bump state_version once
+    sqlx::query("UPDATE sessions SET state_version = state_version + 1 WHERE id = ?")
+        .bind(&session_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // Load all final slides
+    let final_slides: Vec<Slide> = query_as::<_, Slide>(
+        "SELECT id, session_id, type, content, order_index, is_hidden, version \
+         FROM slides WHERE session_id = ? ORDER BY order_index ASC, id ASC",
+    )
+    .bind(&session_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let state_version = query_scalar::<_, i64>("SELECT state_version FROM sessions WHERE id = ?")
+        .bind(&session_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+    // WAL replay for idempotency
+    sqlx::query(
+        "INSERT IGNORE INTO wal_request_replays (session_id, op_type, client_request_id, response_payload)
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(&session_id)
+    .bind(crate::services::wal::WalOpType::SyncSlides.to_string())
+    .bind(&client_request_id)
+    .bind(sqlx::types::Json(
+        serde_json::to_value(&SyncSlidesResponse {
+            slides: final_slides.clone(),
+            state_version,
+        })
+        .expect("sync response should serialize"),
+    ))
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    // One WS broadcast with the full slide list
+    broadcast_slides_update(&app_state, &session_id, &final_slides).await;
+    app_state
+        .session_service
+        .invalidate_session_cache(&session_id)
+        .await;
+
+    Ok(crate::services::wal::queued_success_response(
+        &SyncSlidesResponse {
+            slides: final_slides,
+            state_version,
+        },
+    ))
 }
 
 pub(crate) async fn get_append_order_index(

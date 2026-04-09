@@ -343,6 +343,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/sessions/:id/slides/reorder",
             axum::routing::put(handlers::slide::reorder_slides),
         )
+        .route(
+            "/api/sessions/:id/slides/sync",
+            axum::routing::patch(handlers::slide::sync_slides),
+        )
         // Student interaction endpoints
         .route(
             "/api/sessions/:id/vote",

@@ -5,7 +5,7 @@ export const runtime = 'edge';
 import { SetStateAction, startTransition, useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Slide, Session } from 'shared';
-import { createSlide, deleteSlide, getSlides, getSession, reorderSlides, updateSession, updateSlide, updateSlidesBatch, updateSlideVisibility, goLiveSession, stopSession, ApiRequestError } from '@/lib/api';
+import { syncSlides, getSlides, getSession, updateSession, goLiveSession, stopSession, ApiRequestError } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Plus, Layout, BarChart2, Play, X, Smartphone, Share2, Settings, Users, Eye, Square, Copy, ExternalLink, Loader2 } from 'lucide-react';
 import Link from 'next/link';
@@ -79,182 +79,38 @@ function getDefaultSlideContent(type: Slide['type']) {
     return { title: 'Leaderboard' };
 }
 
-function areContentsEqual(left: Slide['content'], right: Slide['content']) {
-    return JSON.stringify(left) === JSON.stringify(right);
-}
-
 async function saveEditorDocument(
     sessionId: string,
     baseSlides: Slide[],
     localSlides: EditorSlide[],
 ) {
-    const baseSlidesById = new Map(baseSlides.map((slide) => [slide.id, slide]));
-    const resolvedServerIdByClientId = new Map(
-        localSlides
-            .filter((slide) => slide.serverId)
-            .map((slide) => [slide.id, slide.serverId!]),
-    );
-    const latestSavedSlidesById = new Map(baseSlides.map((slide) => [slide.id, slide]));
-
-    for (const slide of localSlides) {
-        if (slide.serverId) {
-            continue;
-        }
-
-        const slideIndex = localSlides.findIndex((entry) => entry.id === slide.id);
-        const insertAfterSlide = [...localSlides.slice(0, slideIndex)]
-            .reverse()
-            .find((entry) => {
-                const resolvedServerId = resolvedServerIdByClientId.get(entry.id) ?? entry.serverId;
-                return Boolean(resolvedServerId);
-            });
-        const insertAfterSlideId = insertAfterSlide
-            ? (resolvedServerIdByClientId.get(insertAfterSlide.id) ?? insertAfterSlide.serverId ?? undefined)
-            : undefined;
-
-        // Guard: verify insertAfterSlideId still exists on the server
-        const validatedInsertAfterSlideId = insertAfterSlideId && baseSlidesById.has(insertAfterSlideId)
-            ? insertAfterSlideId
-            : undefined;
-
-        const createdSlide = await createSlide(
-            sessionId,
-            slide.type,
-            slide.content,
-            validatedInsertAfterSlideId ? { insertAfterSlideId: validatedInsertAfterSlideId } : undefined,
-        );
-
-        resolvedServerIdByClientId.set(slide.id, createdSlide.id);
-        latestSavedSlidesById.set(createdSlide.id, {
-            ...createdSlide,
-            content: slide.content,
-            orderIndex: slide.orderIndex,
-            isHidden: slide.isHidden,
-        });
+    // Build base version map for optimistic concurrency
+    const baseVersions: Record<string, number> = {};
+    for (const slide of baseSlides) {
+        baseVersions[slide.id] = slide.version;
     }
 
-    const desiredServerIds = localSlides
-        .map((slide) => slide.serverId ?? resolvedServerIdByClientId.get(slide.id))
-        .filter((slideId): slideId is string => Boolean(slideId));
-    const desiredServerIdSet = new Set(desiredServerIds);
+    // Build the desired slide list: existing slides keep their server id,
+    // new slides send null id (server will assign one).
+    const desiredSlides = localSlides.map(slide => ({
+        id: slide.serverId ?? null,
+        type: slide.type,
+        content: slide.content,
+        isHidden: slide.isHidden ?? false,
+    }));
 
-    for (const baseSlide of baseSlides) {
-        if (desiredServerIdSet.has(baseSlide.id)) {
-            continue;
-        }
-
-        await deleteSlide(sessionId, baseSlide.id);
-        latestSavedSlidesById.delete(baseSlide.id);
-    }
-
-    // Reorder only if the slide sets match in size but differ in order
-    // Skip reorder if there are pending creations/deletions to avoid count mismatch
-    const remainingBaseSlides = baseSlides.filter((slide) => latestSavedSlidesById.has(slide.id));
-    const currentBaseOrder = remainingBaseSlides.map((slide) => slide.id);
-    if (currentBaseOrder.length === desiredServerIds.length && currentBaseOrder.some((slideId, index) => slideId !== desiredServerIds[index])) {
-        await reorderSlides(sessionId, desiredServerIds);
-    }
-
-    for (const slide of localSlides) {
-        const serverId = slide.serverId ?? resolvedServerIdByClientId.get(slide.id);
-        if (!serverId) {
-            continue;
-        }
-
-        const savedSlide = latestSavedSlidesById.get(serverId) ?? baseSlidesById.get(serverId);
-        if (savedSlide?.isHidden !== slide.isHidden) {
-            await updateSlideVisibility(sessionId, serverId, slide.isHidden ?? false);
-        }
-    }
-
-    // Batch content updates: collect all slides that need content updates
-    const contentUpdates: Array<{ slideId: string; content: Slide['content']; baseVersion?: number }> = [];
-    const contentUpdateIndexes: Map<string, number> = new Map();
-
-    for (let i = 0; i < localSlides.length; i++) {
-        const slide = localSlides[i];
-        const serverId = slide.serverId ?? resolvedServerIdByClientId.get(slide.id);
-        if (!serverId) {
-            continue;
-        }
-
-        const savedSlide = latestSavedSlidesById.get(serverId) ?? baseSlidesById.get(serverId);
-        const isNewSlide = !slide.serverId;
-        if (!isNewSlide && savedSlide && !areContentsEqual(savedSlide.content, slide.content)) {
-            contentUpdateIndexes.set(serverId, i);
-            contentUpdates.push({
-                slideId: serverId,
-                content: slide.content,
-                baseVersion: savedSlide.version,
-            });
-        }
-    }
-
-    // Use batch endpoint if there are multiple content updates
-    if (contentUpdates.length > 1) {
-        const updatedSlides = await updateSlidesBatch(sessionId, contentUpdates);
-        for (const updatedSlide of updatedSlides) {
-            const localIndex = contentUpdateIndexes.get(updatedSlide.id);
-            if (localIndex !== undefined) {
-                const localSlide = localSlides[localIndex];
-                latestSavedSlidesById.set(updatedSlide.id, {
-                    ...updatedSlide,
-                    orderIndex: localSlide.orderIndex,
-                    isHidden: localSlide.isHidden,
-                });
-            }
-        }
-    } else if (contentUpdates.length === 1) {
-        // Single update — use the individual endpoint to avoid batch overhead
-        const update = contentUpdates[0];
-        const localIndex = contentUpdateIndexes.get(update.slideId)!;
-        const localSlide = localSlides[localIndex];
-        const updatedSlide = await updateSlide(sessionId, update.slideId, update.content);
-        latestSavedSlidesById.set(update.slideId, {
-            ...updatedSlide,
-            orderIndex: localSlide.orderIndex,
-            isHidden: localSlide.isHidden,
-        });
-    }
-
-    // Ensure latestSavedSlidesById has entries for ALL slides (including unchanged ones)
-    for (const slide of localSlides) {
-        const serverId = slide.serverId ?? resolvedServerIdByClientId.get(slide.id);
-        if (!serverId) {
-            continue;
-        }
-
-        if (!latestSavedSlidesById.has(serverId)) {
-            const baseSlide = baseSlidesById.get(serverId);
-            latestSavedSlidesById.set(serverId, {
-                ...(baseSlide ?? slide),
-                id: serverId,
-                sessionId,
-                type: slide.type,
-                content: slide.content,
-                orderIndex: slide.orderIndex,
-                isHidden: slide.isHidden,
-                version: baseSlide?.version ?? slide.version,
-            });
-        }
-    }
+    const savedSlides = await syncSlides(sessionId, desiredSlides, { baseVersions });
 
     return localSlides.map((slide, index) => {
-        const serverId = slide.serverId ?? resolvedServerIdByClientId.get(slide.id);
-        if (!serverId) {
-            throw new Error(`Missing server id for slide ${slide.id}`);
+        // Find the matching saved slide by position in the desired list
+        const savedSlide = savedSlides[index];
+        if (!savedSlide) {
+            throw new Error(`Missing server response for slide ${slide.id}`);
         }
 
-        const savedSlide = latestSavedSlidesById.get(serverId);
         return {
-            ...(savedSlide ?? slide),
-            id: serverId,
-            sessionId,
-            type: slide.type,
-            content: slide.content,
+            ...savedSlide,
             orderIndex: index,
-            isHidden: slide.isHidden,
-            version: savedSlide?.version ?? slide.version,
         } satisfies Slide;
     });
 }

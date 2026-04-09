@@ -83,3 +83,43 @@ pub struct UpdateSlidesBatchResponse {
     pub slides: Vec<Slide>,
     pub state_version: i64,
 }
+
+/// Full slide sync — send the entire desired slide state in one request.
+/// Slides with `id = None` are created; existing slides are updated;
+/// existing slides not in the list are deleted.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncSlidesRequest {
+    /// Complete desired slide list in desired order.
+    /// `id = None` means "create new slide".
+    /// `id = Some(...)` means "update or keep this slide".
+    /// Slides existing on the server but absent from this list will be deleted.
+    pub slides: Vec<SyncSlideEntry>,
+    /// Optional base version map for optimistic concurrency control.
+    /// Key = slide_id, Value = expected version. If provided and a slide's
+    /// server version differs, the entire sync is rejected with 409.
+    #[serde(default)]
+    pub base_versions: Option<std::collections::HashMap<String, i64>>,
+    pub client_request_id: Option<String>,
+}
+
+/// A single slide entry within a sync request.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncSlideEntry {
+    /// `None` = new slide (server will assign an id).
+    /// `Some(id)` = existing slide to update or keep.
+    pub id: Option<String>,
+    #[serde(rename = "type")]
+    pub slide_type: String,
+    pub content: serde_json::Value,
+    #[serde(default)]
+    pub is_hidden: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncSlidesResponse {
+    pub slides: Vec<Slide>,
+    pub state_version: i64,
+}

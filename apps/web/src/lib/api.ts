@@ -421,6 +421,48 @@ export async function updateSlideVisibility(sessionId: string, slideId: string, 
     if (!json.success) throw new ApiRequestError(json.error || 'Failed to update slide visibility', { status: res.status });
 }
 
+/**
+ * Synchronize the entire slide collection in a single request.
+ * Round trips: 1 (replaces createSlide ×N + deleteSlide ×M + reorder + updateSlidesBatch)
+ */
+export async function syncSlides(
+    sessionId: string,
+    slides: Array<{
+        id: string | null;
+        type: string;
+        content: unknown;
+        isHidden?: boolean;
+    }>,
+    options?: {
+        baseVersions?: Record<string, number>;
+    },
+): Promise<Slide[]> {
+    let res: Response;
+
+    try {
+        res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides/sync`, {
+            method: 'PATCH',
+            headers: getHeaders(),
+            body: JSON.stringify({
+                slides: slides.map(s => ({
+                    id: s.id,
+                    type: s.type,
+                    content: s.content,
+                    isHidden: s.isHidden ?? false,
+                })),
+                ...(options?.baseVersions ? { baseVersions: options.baseVersions } : {}),
+            }),
+        });
+    } catch (error) {
+        throw toApiRequestError(error, 'Failed to sync slides');
+    }
+    if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
+    if (!res.ok) throw await buildApiError(res, 'Failed to sync slides');
+    const json: ApiResponse<{ slides: Slide[]; stateVersion: number }> = await res.json();
+    if (!json.success) throw new ApiRequestError(json.error || 'Failed to sync slides', { status: res.status });
+    return json.data.slides;
+}
+
 export async function goLiveSession(sessionId: string): Promise<void> {
     const res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/go-live`, {
         method: 'POST',
