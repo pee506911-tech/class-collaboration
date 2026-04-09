@@ -112,11 +112,16 @@ async function saveEditorDocument(
             ? (resolvedServerIdByClientId.get(insertAfterSlide.id) ?? insertAfterSlide.serverId ?? undefined)
             : undefined;
 
+        // Guard: verify insertAfterSlideId still exists on the server
+        const validatedInsertAfterSlideId = insertAfterSlideId && baseSlidesById.has(insertAfterSlideId)
+            ? insertAfterSlideId
+            : undefined;
+
         const createdSlide = await createSlide(
             sessionId,
             slide.type,
             slide.content,
-            insertAfterSlideId ? { insertAfterSlideId } : undefined,
+            validatedInsertAfterSlideId ? { insertAfterSlideId: validatedInsertAfterSlideId } : undefined,
         );
 
         resolvedServerIdByClientId.set(slide.id, createdSlide.id);

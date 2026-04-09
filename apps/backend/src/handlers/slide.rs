@@ -106,25 +106,73 @@ async fn verify_session_exists(pool: &sqlx::MySqlPool, session_id: &str) -> Resu
 }
 
 async fn lock_session(tx: &mut Transaction<'_, MySql>, session_id: &str) -> Result<()> {
+    use std::time::Duration;
+
     let lock_start = std::time::Instant::now();
-    let exists = query_scalar::<_, String>("SELECT id FROM sessions WHERE id = ? FOR UPDATE")
-        .bind(session_id)
-        .fetch_optional(&mut **tx)
-        .await?;
+    let max_retries = 3;
+    let initial_wait_ms = 10;
 
+    for attempt in 0..max_retries {
+        // Use GET_LOCK with a timeout (5 seconds) instead of indefinite FOR UPDATE
+        let lock_name = format!("session_lock_{}", session_id);
+        let lock_acquired = query_scalar::<_, Option<i64>>("SELECT GET_LOCK(?, 5)")
+            .bind(&lock_name)
+            .fetch_one(&mut **tx)
+            .await?;
+
+        if lock_acquired == Some(1) {
+            // Lock acquired, now verify session exists with FOR UPDATE (should be instant now)
+            let exists = query_scalar::<_, String>("SELECT id FROM sessions WHERE id = ? FOR UPDATE")
+                .bind(session_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+
+            let lock_duration_ms = lock_start.elapsed().as_millis();
+            if lock_duration_ms > 100 {
+                tracing::warn!(
+                    session_id = %session_id,
+                    lock_duration_ms = %lock_duration_ms,
+                    attempt = %attempt,
+                    "SPEED_AUDIT: lock_session wait exceeded 100ms"
+                );
+            }
+
+            match exists {
+                Some(_) => return Ok(()),
+                None => {
+                    // Release the lock before returning error
+                    let _ = query_scalar::<_, Option<i64>>("SELECT RELEASE_LOCK(?)")
+                        .bind(&lock_name)
+                        .fetch_one(&mut **tx)
+                        .await;
+                    return Err(AppError::NotFound("Session not found".to_string()));
+                }
+            }
+        }
+
+        // Lock not acquired — another connection holds it
+        if attempt < max_retries - 1 {
+            let wait_ms = initial_wait_ms * (1 << attempt); // 10ms, 20ms, 40ms
+            tokio::time::sleep(Duration::from_millis(wait_ms as u64)).await;
+        }
+    }
+
+    // All retries exhausted
     let lock_duration_ms = lock_start.elapsed().as_millis();
-    if lock_duration_ms > 100 {
-        tracing::warn!(
-            session_id = %session_id,
-            lock_duration_ms = %lock_duration_ms,
-            "SPEED_AUDIT: lock_session wait exceeded 100ms"
-        );
-    }
+    tracing::error!(
+        session_id = %session_id,
+        lock_duration_ms = %lock_duration_ms,
+        "SPEED_AUDIT: lock_session failed to acquire after {} retries",
+        max_retries
+    );
 
-    match exists {
-        Some(_) => Ok(()),
-        None => Err(AppError::NotFound("Session not found".to_string())),
-    }
+    Err(AppError::Conflict {
+        message: "Unable to acquire session lock after retries (session is busy)".to_string(),
+        data: Some(serde_json::json!({
+            "reason": "lock_timeout",
+            "sessionId": session_id
+        })),
+    })
 }
 
 async fn load_slide(
@@ -176,21 +224,11 @@ pub async fn create_slide(
     let content = payload.content.clone();
     let insert_after = payload.insert_after_slide_id.clone();
 
-    // Compute order index BEFORE acquiring the session lock to minimize lock hold time.
-    // The order allocation queries only touch the slides table, not the session row.
-    let order_index = {
-        let mut order_tx = pool.begin().await?;
-        let idx =
-            compute_insert_order_index(&mut order_tx, &session_id, insert_after.as_deref()).await?;
-        order_tx.commit().await?;
-        idx
-    };
-
     let mut tx = pool.begin().await?;
-    // Use a lightweight session existence check instead of FOR UPDATE.
-    // The order_index was already computed atomically above, and the INSERT
-    // is protected by the unique primary key on slides.id.
-    verify_session_exists(&pool, &session_id).await?;
+    lock_session(&mut tx, &session_id).await?;
+
+    let order_index =
+        compute_insert_order_index(&mut tx, &session_id, insert_after.as_deref()).await?;
 
     sqlx::query(
         "INSERT INTO slides (id, session_id, type, content, order_index, client_request_id)
