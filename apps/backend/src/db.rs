@@ -15,6 +15,7 @@ const REPAIRABLE_MIGRATION_VERSIONS: &[i64] = &[
     20260120120000,
     20260310100000,
     20260403140000,
+    20260405103000,
 ];
 
 #[derive(Debug, Clone, Copy)]
