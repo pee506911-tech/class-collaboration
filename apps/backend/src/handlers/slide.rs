@@ -1108,18 +1108,24 @@ pub(crate) async fn get_append_order_index(
     tx: &mut Transaction<'_, MySql>,
     session_id: &str,
 ) -> Result<i32> {
-    // FOR UPDATE prevents concurrent transactions from computing the same order_index.
-    // Without this, two concurrent create_slide requests could both read MAX(order_index)=27648,
-    // both compute 27648+1024=28672, and the second INSERT would hit the unique constraint.
-    let max_order_index =
-        query_scalar::<_, Option<i32>>(
-            "SELECT MAX(order_index) FROM slides WHERE session_id = ? FOR UPDATE",
-        )
-            .bind(session_id)
-            .fetch_one(&mut **tx)
-            .await?;
+    // Lock the concrete tail row instead of relying on MAX(... ) FOR UPDATE.
+    // MySQL can satisfy the aggregate without taking a useful row lock for append
+    // allocation, especially when this session has no slide rows yet. Locking the
+    // current tail row makes the serialization boundary explicit for non-empty
+    // sessions, and the session row lock still serializes the empty-session case.
+    let last_order_index = query_scalar::<_, i32>(
+        "SELECT order_index
+         FROM slides
+         WHERE session_id = ?
+         ORDER BY order_index DESC, id DESC
+         LIMIT 1
+         FOR UPDATE",
+    )
+    .bind(session_id)
+    .fetch_optional(&mut **tx)
+    .await?;
 
-    Ok(compute_append_order_index(max_order_index))
+    Ok(compute_append_order_index(last_order_index))
 }
 
 pub(crate) async fn allocate_order_after(
