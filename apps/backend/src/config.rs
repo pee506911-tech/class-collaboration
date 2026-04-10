@@ -120,9 +120,13 @@ impl Config {
         let db_idle_timeout_seconds = env::var("DB_IDLE_TIMEOUT_SECONDS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(600);
+            .unwrap_or(300);
 
-        let default_db_max_lifetime_seconds = if environment == "production" { 300 } else { 0 };
+        // Max connection lifetime: 30 min in production (balances connection freshness
+        // with avoiding excessive churn). Cloud DB proxies often kill idle connections
+        // at 300-600s, so idle_timeout=300s handles that; max_lifetime prevents connections
+        // from living indefinitely even under constant use.
+        let default_db_max_lifetime_seconds = if environment == "production" { 1800 } else { 0 };
         let db_max_lifetime_seconds = env::var("DB_MAX_LIFETIME_SECONDS")
             .ok()
             .and_then(|v| v.parse().ok())

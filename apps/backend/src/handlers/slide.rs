@@ -857,10 +857,47 @@ pub async fn sync_slides(
         )));
     }
 
+    // Pre-load existing slides OUTSIDE the transaction to reduce lock duration.
+    // We re-check inside the transaction for correctness, but this early load
+    // lets us validate base versions and detect obvious conflicts before
+    // acquiring the session lock.
+    let existing_slides_preload: Vec<Slide> = query_as::<_, Slide>(
+        "SELECT id, session_id, type, content, order_index, is_hidden, version \
+         FROM slides WHERE session_id = ? ORDER BY order_index ASC, id ASC",
+    )
+    .bind(&session_id)
+    .fetch_all(&pool)
+    .await?;
+
+    let existing_slide_map_preload: std::collections::HashMap<String, Slide> =
+        existing_slides_preload.into_iter().map(|s| (s.id.clone(), s)).collect();
+
+    // Check base versions against pre-loaded data (fast path — reject stale requests early)
+    if let Some(ref base_versions) = payload.base_versions {
+        for (slide_id, expected_version) in base_versions {
+            if let Some(slide) = existing_slide_map_preload.get(slide_id) {
+                if slide.version != *expected_version {
+                    return Err(build_slide_version_conflict(slide_id, slide.version));
+                }
+            }
+        }
+    }
+
+    // Collect desired slide IDs for early analysis
+    let desired_ids: std::collections::HashSet<String> = payload
+        .slides
+        .iter()
+        .filter_map(|e| e.id.clone())
+        .filter(|id| !id.starts_with("temp-"))
+        .collect();
+
+    // Now enter the transaction — the heavy pre-computation is done above.
+    // The transaction re-reads slides for correctness (handling races between
+    // pre-load and lock), but the validation work is already complete.
     let mut tx = pool.begin().await?;
     lock_session(&mut tx, &session_id).await?;
 
-    // Load all existing slides
+    // Re-load slides inside the transaction (authoritative read under lock).
     let existing_slides: Vec<Slide> = query_as::<_, Slide>(
         "SELECT id, session_id, type, content, order_index, is_hidden, version \
          FROM slides WHERE session_id = ? ORDER BY order_index ASC, id ASC",
@@ -872,28 +909,7 @@ pub async fn sync_slides(
     let existing_slide_map: std::collections::HashMap<String, Slide> =
         existing_slides.into_iter().map(|s| (s.id.clone(), s)).collect();
 
-    // Check base versions if provided
-    if let Some(ref base_versions) = payload.base_versions {
-        for (slide_id, expected_version) in base_versions {
-            if let Some(slide) = existing_slide_map.get(slide_id) {
-                if slide.version != *expected_version {
-                    return Err(build_slide_version_conflict(slide_id, slide.version));
-                }
-            }
-            // If slide doesn't exist on server but client sent a base_version,
-            // that means client thinks it exists — this is a stale state, reject.
-        }
-    }
-
-    // Collect desired slide IDs (only the ones with existing server IDs)
-    let desired_ids: std::collections::HashSet<String> = payload
-        .slides
-        .iter()
-        .filter_map(|e| e.id.clone())
-        .filter(|id| !id.starts_with("temp-"))
-        .collect();
-
-    // Determine which slides to delete (exist on server but not in desired list)
+    // Re-check slides_to_delete — they may have changed between preload and lock.
     let slides_to_delete: Vec<&String> = existing_slide_map
         .keys()
         .filter(|id| !desired_ids.contains(*id))
@@ -1059,8 +1075,13 @@ pub(crate) async fn get_append_order_index(
     tx: &mut Transaction<'_, MySql>,
     session_id: &str,
 ) -> Result<i32> {
+    // FOR UPDATE prevents concurrent transactions from computing the same order_index.
+    // Without this, two concurrent create_slide requests could both read MAX(order_index)=27648,
+    // both compute 27648+1024=28672, and the second INSERT would hit the unique constraint.
     let max_order_index =
-        query_scalar::<_, Option<i32>>("SELECT MAX(order_index) FROM slides WHERE session_id = ?")
+        query_scalar::<_, Option<i32>>(
+            "SELECT MAX(order_index) FROM slides WHERE session_id = ? FOR UPDATE",
+        )
             .bind(session_id)
             .fetch_one(&mut **tx)
             .await?;
@@ -1073,8 +1094,11 @@ pub(crate) async fn allocate_order_after(
     session_id: &str,
     insert_after_slide_id: &str,
 ) -> Result<i32> {
+    // FOR UPDATE on both reads to prevent concurrent order collisions.
     let mut insert_after_order_index =
-        query_scalar::<_, i32>("SELECT order_index FROM slides WHERE id = ? AND session_id = ?")
+        query_scalar::<_, i32>(
+            "SELECT order_index FROM slides WHERE id = ? AND session_id = ? FOR UPDATE",
+        )
             .bind(insert_after_slide_id)
             .bind(session_id)
             .fetch_optional(&mut **tx)
@@ -1093,7 +1117,9 @@ pub(crate) async fn allocate_order_after(
     rebalance_slide_orders(tx, session_id).await?;
 
     insert_after_order_index =
-        query_scalar::<_, i32>("SELECT order_index FROM slides WHERE id = ? AND session_id = ?")
+        query_scalar::<_, i32>(
+            "SELECT order_index FROM slides WHERE id = ? AND session_id = ? FOR UPDATE",
+        )
             .bind(insert_after_slide_id)
             .bind(session_id)
             .fetch_one(&mut **tx)
@@ -1110,13 +1136,15 @@ async fn get_next_order_index(
     session_id: &str,
     insert_after_order_index: i32,
 ) -> Result<Option<i32>> {
-    let next_order_index = query_scalar::<_, i32>(
-        "SELECT order_index FROM slides WHERE session_id = ? AND order_index > ? ORDER BY order_index ASC LIMIT 1"
+    // FOR UPDATE to serialize concurrent order allocation within the same gap.
+    let next_order_index: Option<i32> = query_scalar::<_, Option<i32>>(
+        "SELECT order_index FROM slides WHERE session_id = ? AND order_index > ? ORDER BY order_index ASC LIMIT 1 FOR UPDATE",
     )
     .bind(session_id)
     .bind(insert_after_order_index)
     .fetch_optional(&mut **tx)
-    .await?;
+    .await?
+    .flatten();
 
     Ok(next_order_index)
 }

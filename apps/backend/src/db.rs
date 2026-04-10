@@ -141,7 +141,8 @@ impl LazyDbPool {
             .max_connections(settings.max_connections)
             .min_connections(settings.min_connections) // Start with 0 for faster init
             .acquire_timeout(Duration::from_secs(settings.acquire_timeout_seconds))
-            .idle_timeout(Duration::from_secs(settings.idle_timeout_seconds));
+            .idle_timeout(Duration::from_secs(settings.idle_timeout_seconds))
+            .test_before_acquire(true);
 
         if settings.max_lifetime_seconds > 0 {
             options = options.max_lifetime(Duration::from_secs(settings.max_lifetime_seconds));
