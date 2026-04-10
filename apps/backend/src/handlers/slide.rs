@@ -914,9 +914,32 @@ pub async fn sync_slides(
         db_query.execute(&mut *tx).await?;
     }
 
-    // Process each desired slide entry
-    let mut created_ids: Vec<String> = Vec::new();
+    // Process each desired slide entry — first assign temporary negative
+    // order indices to avoid unique constraint collisions, then set final values.
+    // This mirrors the two-phase approach used in reorder_slides.
+
+    // Phase 1: assign temporary negative order indices to all existing slides
+    // that will be updated, so their final positions are free.
+    let mut temp_order = -ORDER_STEP;
+    for entry in &payload.slides {
+        if let Some(id) = &entry.id {
+            if existing_slide_map.contains_key(id.as_str()) {
+                sqlx::query(
+                    "UPDATE slides SET order_index = ? WHERE id = ? AND session_id = ?",
+                )
+                .bind(temp_order)
+                .bind(id)
+                .bind(&session_id)
+                .execute(&mut *tx)
+                .await?;
+                temp_order -= ORDER_STEP;
+            }
+        }
+    }
+
+    // Phase 2: set final order indices and create/update slides
     let mut order_index = 0i32;
+    let mut created_ids: Vec<String> = Vec::new();
 
     for entry in &payload.slides {
         match &entry.id {
@@ -936,8 +959,8 @@ pub async fn sync_slides(
                 created_ids.push(slide_id);
             }
             Some(id) => {
+                // Existing or new slide — UPDATE or INSERT with final order_index
                 if existing_slide_map.contains_key(id.as_str()) {
-                    // Existing slide — UPDATE content, type, is_hidden, order_index
                     let result = sqlx::query(
                         "UPDATE slides SET type = ?, content = ?, is_hidden = ?, order_index = ? \
                          WHERE id = ? AND session_id = ?",
