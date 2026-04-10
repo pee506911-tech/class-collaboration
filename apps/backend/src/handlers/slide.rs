@@ -934,53 +934,57 @@ pub async fn sync_slides(
     // order indices to avoid unique constraint collisions, then set final values.
     // This mirrors the two-phase approach used in reorder_slides.
 
-    // Phase 1: assign temporary negative order indices to all existing slides
-    // that will be updated, so their final positions are free.
-    let mut temp_order = -ORDER_STEP;
-    for entry in &payload.slides {
-        if let Some(id) = &entry.id {
-            if existing_slide_map.contains_key(id.as_str()) {
-                sqlx::query(
-                    "UPDATE slides SET order_index = ? WHERE id = ? AND session_id = ?",
-                )
-                .bind(temp_order)
-                .bind(id)
-                .bind(&session_id)
-                .execute(&mut *tx)
-                .await?;
-                temp_order -= ORDER_STEP;
-            }
-        }
-    }
+    // Two-phase renumber: first move ALL remaining slides to negative
+    // order_index space, then assign final dense positive indices.
+    //
+    // Phase 1 must cover every slide still in the session after deletion,
+    // not just those that match the payload. Otherwise a slide that exists
+    // on the server but isn't referenced by the payload would remain at a
+    // positive order_index and collide with Phase 2 assignments.
 
-    // Phase 2: set final order indices and create/update slides.
-    // Compute the maximum order_index any Phase 2 entry will use, then verify
-    // no remaining slides occupy the range [0, max_phase2_order].
-    // This is a defensive guard against unexpected data states that could cause
-    // a unique-constraint violation.
-    let num_entries = payload.slides.len() as i32;
-    let max_phase2_order = (num_entries.saturating_sub(1)) * ORDER_STEP;
-    let occupied: Option<i32> = query_scalar::<_, Option<i32>>(
-        "SELECT order_index FROM slides WHERE session_id = ? AND order_index >= 0 AND order_index <= ? LIMIT 1",
+    // Phase 1: read every remaining slide and assign it a unique negative
+    // order_index.  After this loop the [0, ∞) range is guaranteed free.
+    let remaining_slides: Vec<(String, i32)> = query_as::<_, (String, i32)>(
+        "SELECT id, order_index FROM slides WHERE session_id = ? ORDER BY order_index ASC, id ASC",
     )
     .bind(&session_id)
-    .bind(max_phase2_order)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let mut temp_order = -ORDER_STEP;
+    for (slide_id, _previous_order) in &remaining_slides {
+        sqlx::query(
+            "UPDATE slides SET order_index = ? WHERE id = ? AND session_id = ?",
+        )
+        .bind(temp_order)
+        .bind(slide_id)
+        .bind(&session_id)
+        .execute(&mut *tx)
+        .await?;
+        temp_order -= ORDER_STEP;
+    }
+
+    // Defensive sanity check — the [0, ∞) range should be completely empty.
+    // If something still occupies a non-negative order_index, fail cleanly
+    // rather than hitting a MySQL constraint violation.
+    let still_positive: Option<i32> = query_scalar::<_, Option<i32>>(
+        "SELECT order_index FROM slides WHERE session_id = ? AND order_index >= 0 LIMIT 1",
+    )
+    .bind(&session_id)
     .fetch_one(&mut *tx)
     .await?;
 
-    if let Some(conflicting_order) = occupied {
-        // There are slides remaining in the [0, max] range that Phase 1 didn't move.
-        // This shouldn't happen under normal operation — it indicates either
-        // a data integrity issue or a logic bug. Log it and fail cleanly.
+    if let Some(conflicting_order) = still_positive {
         tracing::error!(
             session_id = %session_id,
             conflicting_order_index = conflicting_order,
-            max_phase2_order = max_phase2_order,
-            "SYNC_ORDER_COLLISION: unexpected slide occupies a Phase 2 order_index slot"
+            remaining_slide_count = remaining_slides.len(),
+            "SYNC_ORDER_COLLISION: slides still occupy positive order_index range after Phase 1"
         );
         return Err(AppError::Internal("Slide order collision detected — please retry".to_string()));
     }
 
+    // Phase 2: assign final dense order_index values based on the payload order.
     let mut order_index = 0i32;
     let mut created_ids: Vec<String> = Vec::new();
 
