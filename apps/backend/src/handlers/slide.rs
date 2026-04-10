@@ -953,7 +953,34 @@ pub async fn sync_slides(
         }
     }
 
-    // Phase 2: set final order indices and create/update slides
+    // Phase 2: set final order indices and create/update slides.
+    // Compute the maximum order_index any Phase 2 entry will use, then verify
+    // no remaining slides occupy the range [0, max_phase2_order].
+    // This is a defensive guard against unexpected data states that could cause
+    // a unique-constraint violation.
+    let num_entries = payload.slides.len() as i32;
+    let max_phase2_order = (num_entries.saturating_sub(1)) * ORDER_STEP;
+    let occupied: Option<i32> = query_scalar::<_, Option<i32>>(
+        "SELECT order_index FROM slides WHERE session_id = ? AND order_index >= 0 AND order_index <= ? LIMIT 1",
+    )
+    .bind(&session_id)
+    .bind(max_phase2_order)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    if let Some(conflicting_order) = occupied {
+        // There are slides remaining in the [0, max] range that Phase 1 didn't move.
+        // This shouldn't happen under normal operation — it indicates either
+        // a data integrity issue or a logic bug. Log it and fail cleanly.
+        tracing::error!(
+            session_id = %session_id,
+            conflicting_order_index = conflicting_order,
+            max_phase2_order = max_phase2_order,
+            "SYNC_ORDER_COLLISION: unexpected slide occupies a Phase 2 order_index slot"
+        );
+        return Err(AppError::Internal("Slide order collision detected — please retry".to_string()));
+    }
+
     let mut order_index = 0i32;
     let mut created_ids: Vec<String> = Vec::new();
 
@@ -963,13 +990,14 @@ pub async fn sync_slides(
                 // New slide — INSERT
                 let slide_id = Uuid::new_v4().to_string();
                 sqlx::query(
-                    "INSERT INTO slides (id, session_id, type, content, order_index) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO slides (id, session_id, type, content, order_index, client_request_id) VALUES (?, ?, ?, ?, ?, ?)",
                 )
                 .bind(&slide_id)
                 .bind(&session_id)
                 .bind(&entry.slide_type)
                 .bind(sqlx::types::Json(&entry.content))
                 .bind(order_index)
+                .bind(&client_request_id)
                 .execute(&mut *tx)
                 .await?;
                 created_ids.push(slide_id);
@@ -1000,13 +1028,14 @@ pub async fn sync_slides(
                     // Slide doesn't exist on server but client thinks it does — treat as new
                     let slide_id = Uuid::new_v4().to_string();
                     sqlx::query(
-                        "INSERT INTO slides (id, session_id, type, content, order_index) VALUES (?, ?, ?, ?, ?)",
+                        "INSERT INTO slides (id, session_id, type, content, order_index, client_request_id) VALUES (?, ?, ?, ?, ?, ?)",
                     )
                     .bind(&slide_id)
                     .bind(&session_id)
                     .bind(&entry.slide_type)
                     .bind(sqlx::types::Json(&entry.content))
                     .bind(order_index)
+                    .bind(&client_request_id)
                     .execute(&mut *tx)
                     .await?;
                     created_ids.push(slide_id);
