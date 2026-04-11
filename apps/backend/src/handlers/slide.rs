@@ -777,10 +777,15 @@ pub async fn reorder_slides(
     validate_reorder_payload(&session_slide_ids, &payload.slide_ids)?;
 
     if session_slide_ids != payload.slide_ids {
-        let changed_slide_ids = collect_changed_slide_ids(&session_slide_ids, &payload.slide_ids);
-        let temporary_assignments = build_temporary_order_assignments(&changed_slide_ids);
-        let final_assignments =
-            build_final_order_assignments(&session_slide_ids, &payload.slide_ids);
+        // Two-phase renumber for *all* slides.
+        //
+        // We can't safely update only the moved rows because existing order_index values are not
+        // guaranteed to be dense multiples of ORDER_STEP once we support "insert-after" (midpoint)
+        // allocation. In that state, an "unchanged" slide can still occupy an order_index like
+        // 1024 or 3072 even if its current array position is different, and assigning dense
+        // values to only the changed slides can collide with those unchanged rows.
+        let temporary_assignments = build_temporary_order_assignments(&session_slide_ids);
+        let final_assignments = build_dense_order_assignments(&payload.slide_ids);
 
         apply_order_assignments(&mut tx, &session_id, &temporary_assignments).await?;
         apply_order_assignments(&mut tx, &session_id, &final_assignments).await?;

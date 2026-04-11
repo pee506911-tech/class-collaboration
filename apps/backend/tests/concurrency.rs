@@ -1455,6 +1455,90 @@ async fn t10_slide_autosave_and_reorder_are_serialized() {
     );
 }
 
+/// T-12: Verify that reorder does not hit unique (session_id, order_index) collisions
+/// when the session has non-dense order_index values (e.g., from insert-after midpoint allocation).
+///
+/// This used to fail when reorder updated only "changed" rows, because dense index assignment
+/// could collide with unchanged slides that still occupied an order_index like 1024 or 3072.
+#[tokio::test]
+#[ignore = "requires MySQL + a running backend server (set DATABASE_URL and TEST_SERVER_URL)"]
+async fn t12_reorder_does_not_collide_with_sparse_order_indices() {
+    let fixture = SlideMutationFixture::new().await;
+
+    // Existing fixture slides:
+    // A: order_index=0 (fixture.slide_id)
+    // B: order_index=1024 (fixture.other_slide_id)
+    //
+    // Add three more slides to create a non-dense ordering where B and D occupy dense
+    // order_index values even though their array positions are later.
+    let slide_e_id = uuid::Uuid::new_v4().to_string(); // order_index=512
+    let slide_c_id = uuid::Uuid::new_v4().to_string(); // order_index=2048
+    let slide_d_id = uuid::Uuid::new_v4().to_string(); // order_index=3072
+
+    let slide_e_content = json!({ "title": "E", "body": "order 512" });
+    let slide_c_content = json!({ "title": "C", "body": "order 2048" });
+    let slide_d_content = json!({ "title": "D", "body": "order 3072" });
+
+    sqlx::query(
+        "INSERT INTO slides (id, session_id, type, content, order_index)
+         VALUES (?, ?, 'static', ?, 512)",
+    )
+    .bind(&slide_e_id)
+    .bind(&fixture.session_id)
+    .bind(&slide_e_content)
+    .execute(&*fixture.pool)
+    .await
+    .expect("Failed to create slide E");
+
+    sqlx::query(
+        "INSERT INTO slides (id, session_id, type, content, order_index)
+         VALUES (?, ?, 'static', ?, 2048)",
+    )
+    .bind(&slide_c_id)
+    .bind(&fixture.session_id)
+    .bind(&slide_c_content)
+    .execute(&*fixture.pool)
+    .await
+    .expect("Failed to create slide C");
+
+    sqlx::query(
+        "INSERT INTO slides (id, session_id, type, content, order_index)
+         VALUES (?, ?, 'static', ?, 3072)",
+    )
+    .bind(&slide_d_id)
+    .bind(&fixture.session_id)
+    .bind(&slide_d_content)
+    .execute(&*fixture.pool)
+    .await
+    .expect("Failed to create slide D");
+
+    // Desired order changes index 1 and 3 only; some slides keep their relative position.
+    // Old reorder logic could collide on dense indices here.
+    let desired_order = vec![
+        fixture.slide_id.clone(),        // A
+        slide_c_id.clone(),              // C (moves earlier)
+        fixture.other_slide_id.clone(),  // B (unchanged position, but order_index=1024)
+        slide_e_id.clone(),              // E (moves later)
+        slide_d_id.clone(),              // D (unchanged position, but order_index=3072)
+    ];
+
+    let reorder_response = fixture
+        .reorder_slides(desired_order.clone())
+        .await
+        .expect("reorder request failed");
+    assert!(
+        reorder_response.status().is_success(),
+        "reorder request failed: {}",
+        reorder_response.text().await.unwrap_or_default()
+    );
+
+    let slide_order = fixture.get_slide_order().await;
+    assert_eq!(
+        slide_order, desired_order,
+        "slide order should match the requested reorder"
+    );
+}
+
 /// T-11: Verify that the vote_counts read model stays in sync with durable votes.
 #[tokio::test]
 #[ignore = "requires MySQL + a running backend server (set DATABASE_URL and TEST_SERVER_URL)"]
