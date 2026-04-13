@@ -83,16 +83,14 @@ pub async fn broadcast_vote_update(
             );
             cached
         }
-        None => {
-            match fetch_vote_results(pool, slide_id).await {
-                Ok(r) => {
-                    let value = serde_json::Value::Object(r);
-                    vote_cache.insert(slide_id, value.clone());
-                    value
-                }
-                Err(_) => Value::Object(serde_json::Map::new()),
+        None => match fetch_vote_results(pool, slide_id).await {
+            Ok(r) => {
+                let value = serde_json::Value::Object(r);
+                vote_cache.insert(slide_id, value.clone());
+                value
             }
-        }
+            Err(_) => Value::Object(serde_json::Map::new()),
+        },
     };
 
     let message = serde_json::json!({

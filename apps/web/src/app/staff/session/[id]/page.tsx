@@ -33,6 +33,21 @@ type EditorSlide = Slide & {
 
 type EditorSaveState = 'saved' | 'dirty' | 'saving';
 
+function getRequestErrorUi(error: unknown, fallbackMessage: string) {
+    const apiError = error instanceof ApiRequestError ? error : null;
+    const ui = mapHttpErrorToUiMessage({
+        kind: apiError?.kind ?? (apiError?.status !== undefined ? 'http' : undefined),
+        status: apiError?.status,
+        message: apiError?.message ?? fallbackMessage,
+    });
+    const requestId = formatRequestId(apiError?.requestId);
+
+    return {
+        ...ui,
+        description: requestId ? `${ui.description} (Request ID: ${requestId})` : ui.description,
+    };
+}
+
 function toEditorSlide(slide: Slide): EditorSlide {
     return {
         ...slide,
@@ -120,11 +135,13 @@ function EditorContent({
     loadSlides,
     session,
     loadSession,
+    onSessionNotFound,
 }: {
     serverSlides: Slide[];
     loadSlides: () => Promise<void>;
     session: Session | null;
     loadSession: () => void;
+    onSessionNotFound: () => void;
 }) {
     const { sendMessage, state, activeParticipants, updateState, initialStateLoaded, lastSlideUpdate } = useWebSocket();
     const params = useParams();
@@ -169,8 +186,12 @@ function EditorContent({
         const normalizedServerSlides = normalizeSlides(serverSlides);
         const incomingIds = new Set(normalizedServerSlides.map((slide) => slide.id));
         const isStaleSnapshot = saveState === 'saved' && baseSlides.some((slide) => !incomingIds.has(slide.id));
+        const isOlderSnapshot = saveState === 'saved'
+            && baseSlides.length === normalizedServerSlides.length
+            && baseSlides.every((slide, index) => slide.id === normalizedServerSlides[index]?.id)
+            && baseSlides.some((slide, index) => slide.version > (normalizedServerSlides[index]?.version ?? -1));
 
-        if (isStaleSnapshot) {
+        if (isStaleSnapshot || isOlderSnapshot) {
             return;
         }
 
@@ -237,7 +258,7 @@ function EditorContent({
                 return liveSlide.id;
             }
 
-            return hasManualPreviewSelectionRef.current ? currentPreviewSlideId : (slides[0]?.id ?? null);
+            return slides[0]?.id ?? null;
         });
     }, [slides, state?.currentSlideId]);
 
@@ -434,11 +455,35 @@ function EditorContent({
             setSaveState('dirty');
         } catch (error) {
             console.error('Failed to save slides', error);
-            toast.error('Failed to save changes');
+            const ui = getRequestErrorUi(error, 'Failed to save changes');
+
+            if (error instanceof ApiRequestError && error.status === 404) {
+                setSaveState('dirty');
+                toast.error(ui.description);
+                onSessionNotFound();
+                return;
+            }
+
+            if (error instanceof ApiRequestError && error.status === 409) {
+                toast.error(ui.description);
+
+                try {
+                    const latestSlides = normalizeSlides(await getSlides(id));
+                    setBaseSlides(latestSlides);
+                    setSlidesSynced(latestSlides.map(toEditorSlide));
+                    setSaveState('saved');
+                    return;
+                } catch (reloadError) {
+                    const reloadUi = getRequestErrorUi(reloadError, 'Failed to reload latest slides');
+                    toast.error(reloadUi.description);
+                }
+            } else {
+                toast.error(ui.description);
+            }
+
             setSaveState('dirty');
-            void loadSlides();
         }
-    }, [baseSlides, id, loadSlides, saveState, setSlidesSynced]);
+    }, [baseSlides, id, loadSlides, onSessionNotFound, saveState, setSlidesSynced]);
 
     async function handleToggleLive() {
         if (!session) return;
@@ -959,6 +1004,11 @@ export default function SlideEditor() {
     const [authChecked, setAuthChecked] = useState(false);
     const [notFound, setNotFound] = useState(false);
 
+    const handleSessionNotFound = useCallback(() => {
+        setNotFound(true);
+        router.push('/sessions');
+    }, [router]);
+
     const loadSession = useCallback(async () => {
         try {
             const data = await getSession(id);
@@ -966,14 +1016,13 @@ export default function SlideEditor() {
         } catch (e) {
             console.error(e);
             if (e instanceof ApiRequestError && e.status === 404) {
-                setNotFound(true);
                 toast.error('Session not found');
-                router.push('/sessions');
+                handleSessionNotFound();
                 return;
             }
-            toast.error('Failed to load session details');
+            toast.error(getRequestErrorUi(e, 'Failed to load session details').description);
         }
-    }, [id, router]);
+    }, [handleSessionNotFound, id]);
 
     const loadSlides = useCallback(async () => {
         try {
@@ -982,14 +1031,14 @@ export default function SlideEditor() {
         } catch (e) {
             console.error(e);
             if (e instanceof ApiRequestError && e.status === 404) {
-                setNotFound(true);
+                handleSessionNotFound();
                 return;
             }
-            toast.error('Failed to load slides');
+            toast.error(getRequestErrorUi(e, 'Failed to load slides').description);
         } finally {
             setLoading(false);
         }
-    }, [id]);
+    }, [handleSessionNotFound, id]);
 
     useEffect(() => {
         // Check auth first
@@ -1031,7 +1080,13 @@ export default function SlideEditor() {
 
     return (
         <WebSocketProvider sessionId={id} role="staff">
-            <EditorContent serverSlides={slides} loadSlides={loadSlides} session={session} loadSession={loadSession} />
+            <EditorContent
+                serverSlides={slides}
+                loadSlides={loadSlides}
+                session={session}
+                loadSession={loadSession}
+                onSessionNotFound={handleSessionNotFound}
+            />
         </WebSocketProvider>
     );
 }

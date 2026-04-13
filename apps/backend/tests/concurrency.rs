@@ -510,6 +510,18 @@ impl SlideMutationFixture {
             .await
     }
 
+    async fn sync_slides(&self, body: Value) -> reqwest::Result<reqwest::Response> {
+        self.client
+            .patch(format!(
+                "{}/api/sessions/{}/slides/sync",
+                self.server_url, self.session_id
+            ))
+            .header("Authorization", bearer(&self.auth_token))
+            .json(&body)
+            .send()
+            .await
+    }
+
     async fn get_slide_order(&self) -> Vec<String> {
         sqlx::query_scalar::<_, String>(
             "SELECT id FROM slides WHERE session_id = ? ORDER BY order_index ASC, id ASC",
@@ -1515,11 +1527,11 @@ async fn t12_reorder_does_not_collide_with_sparse_order_indices() {
     // Desired order changes index 1 and 3 only; some slides keep their relative position.
     // Old reorder logic could collide on dense indices here.
     let desired_order = vec![
-        fixture.slide_id.clone(),        // A
-        slide_c_id.clone(),              // C (moves earlier)
-        fixture.other_slide_id.clone(),  // B (unchanged position, but order_index=1024)
-        slide_e_id.clone(),              // E (moves later)
-        slide_d_id.clone(),              // D (unchanged position, but order_index=3072)
+        fixture.slide_id.clone(),       // A
+        slide_c_id.clone(),             // C (moves earlier)
+        fixture.other_slide_id.clone(), // B (unchanged position, but order_index=1024)
+        slide_e_id.clone(),             // E (moves later)
+        slide_d_id.clone(),             // D (unchanged position, but order_index=3072)
     ];
 
     let reorder_response = fixture
@@ -1536,6 +1548,128 @@ async fn t12_reorder_does_not_collide_with_sparse_order_indices() {
     assert_eq!(
         slide_order, desired_order,
         "slide order should match the requested reorder"
+    );
+}
+
+/// T-13: Verify that full-document slide sync stays collision-free when the payload
+/// mixes sparse existing order_index values, deletion, reordering, and a brand new slide.
+#[tokio::test]
+#[ignore = "requires MySQL + a running backend server (set DATABASE_URL and TEST_SERVER_URL)"]
+async fn t13_sync_slides_handles_sparse_order_indices_with_new_and_deleted_slides() {
+    let fixture = SlideMutationFixture::new().await;
+
+    let slide_e_id = uuid::Uuid::new_v4().to_string(); // order_index=512
+    let slide_c_id = uuid::Uuid::new_v4().to_string(); // order_index=2048
+    let slide_d_id = uuid::Uuid::new_v4().to_string(); // order_index=3072
+
+    sqlx::query(
+        "INSERT INTO slides (id, session_id, type, content, order_index)
+         VALUES (?, ?, 'static', ?, 512)",
+    )
+    .bind(&slide_e_id)
+    .bind(&fixture.session_id)
+    .bind(&json!({ "title": "E", "body": "order 512" }))
+    .execute(&*fixture.pool)
+    .await
+    .expect("Failed to create slide E");
+
+    sqlx::query(
+        "INSERT INTO slides (id, session_id, type, content, order_index)
+         VALUES (?, ?, 'static', ?, 2048)",
+    )
+    .bind(&slide_c_id)
+    .bind(&fixture.session_id)
+    .bind(&json!({ "title": "C", "body": "order 2048" }))
+    .execute(&*fixture.pool)
+    .await
+    .expect("Failed to create slide C");
+
+    sqlx::query(
+        "INSERT INTO slides (id, session_id, type, content, order_index)
+         VALUES (?, ?, 'static', ?, 3072)",
+    )
+    .bind(&slide_d_id)
+    .bind(&fixture.session_id)
+    .bind(&json!({ "title": "D", "body": "order 3072" }))
+    .execute(&*fixture.pool)
+    .await
+    .expect("Failed to create slide D");
+
+    let sync_response = fixture
+        .sync_slides(json!({
+            "slides": [
+                {
+                    "id": fixture.slide_id,
+                    "type": "static",
+                    "content": { "title": "A", "body": "kept first" },
+                    "isHidden": false
+                },
+                {
+                    "id": slide_c_id,
+                    "type": "static",
+                    "content": { "title": "C", "body": "moved earlier" },
+                    "isHidden": false
+                },
+                {
+                    "id": fixture.other_slide_id,
+                    "type": "static",
+                    "content": { "title": "B", "body": "kept third" },
+                    "isHidden": false
+                },
+                {
+                    "id": null,
+                    "type": "static",
+                    "content": { "title": "New slide", "body": "inserted via sync" },
+                    "isHidden": false
+                },
+                {
+                    "id": slide_d_id,
+                    "type": "static",
+                    "content": { "title": "D", "body": "kept last" },
+                    "isHidden": false
+                }
+            ]
+        }))
+        .await
+        .expect("sync request failed");
+
+    assert!(
+        sync_response.status().is_success(),
+        "sync request failed: {}",
+        sync_response.text().await.unwrap_or_default()
+    );
+
+    let body: Value = sync_response
+        .json()
+        .await
+        .expect("sync response body should be JSON");
+
+    let returned_ids: Vec<String> = body["data"]["slides"]
+        .as_array()
+        .expect("slides array missing")
+        .iter()
+        .map(|slide| slide["id"].as_str().expect("slide id missing").to_string())
+        .collect();
+
+    assert_eq!(
+        returned_ids.len(),
+        5,
+        "expected one deleted slide and one new slide"
+    );
+    assert_eq!(returned_ids[0], fixture.slide_id);
+    assert_eq!(returned_ids[1], slide_c_id);
+    assert_eq!(returned_ids[2], fixture.other_slide_id);
+    assert_eq!(returned_ids[4], slide_d_id);
+    assert_ne!(returned_ids[3], fixture.slide_id);
+    assert_ne!(returned_ids[3], fixture.other_slide_id);
+    assert_ne!(returned_ids[3], slide_c_id);
+    assert_ne!(returned_ids[3], slide_d_id);
+    assert_ne!(returned_ids[3], slide_e_id);
+
+    let slide_order = fixture.get_slide_order().await;
+    assert_eq!(
+        slide_order, returned_ids,
+        "slide order should match the sync response order"
     );
 }
 

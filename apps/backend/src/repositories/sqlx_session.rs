@@ -293,9 +293,9 @@ impl SessionRepository for SqlxSessionRepository {
             row
         } else {
             query_as::<_, SessionStateHeaderRow>(SELECT_SESSION_STATE_HEADER_SQL)
-            .bind(session_id)
-            .fetch_optional(&pool)
-            .await?
+                .bind(session_id)
+                .fetch_optional(&pool)
+                .await?
         };
 
         Ok(row.map(|r| SessionStateHeader {
@@ -428,9 +428,9 @@ impl SessionRepository for SqlxSessionRepository {
     async fn get_sequences(&self, session_id: &str) -> Result<SessionSequences> {
         let pool = self.get_pool().await?;
         let sequences: Option<(u64, u64)> = sqlx::query_as(SELECT_SESSION_SEQUENCES_SQL)
-        .bind(session_id)
-        .fetch_optional(&pool)
-        .await?;
+            .bind(session_id)
+            .fetch_optional(&pool)
+            .await?;
 
         Ok(sequences
             .map(|(v, q)| SessionSequences {
@@ -448,18 +448,15 @@ mod tests {
     #[test]
     fn state_header_query_casts_sequence_fields_to_unsigned() {
         assert!(SELECT_SESSION_STATE_HEADER_SQL.contains("CAST(0 AS UNSIGNED) AS vote_sequence"));
-        assert!(
-            SELECT_SESSION_STATE_HEADER_SQL
-                .contains("CAST(s.qa_sequence AS UNSIGNED) AS qa_sequence")
-        );
+        assert!(SELECT_SESSION_STATE_HEADER_SQL
+            .contains("CAST(s.qa_sequence AS UNSIGNED) AS qa_sequence"));
     }
 
     #[test]
     fn sequences_query_casts_sequence_fields_to_unsigned() {
         assert!(SELECT_SESSION_SEQUENCES_SQL.contains("CAST(0 AS UNSIGNED) AS vote_sequence"));
         assert!(
-            SELECT_SESSION_SEQUENCES_SQL
-                .contains("CAST(s.qa_sequence AS UNSIGNED) AS qa_sequence")
+            SELECT_SESSION_SEQUENCES_SQL.contains("CAST(s.qa_sequence AS UNSIGNED) AS qa_sequence")
         );
     }
 }

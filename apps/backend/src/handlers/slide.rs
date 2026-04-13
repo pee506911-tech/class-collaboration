@@ -14,8 +14,8 @@ use crate::middleware::auth::AuthUser;
 use crate::models::response::ApiResponse;
 use crate::models::slide::{
     CreateSlideRequest, CreateSlidesBatchRequest, CreateSlidesBatchResponse, ReorderSlidesRequest,
-    Slide, SyncSlidesRequest, SyncSlidesResponse, UpdateSlideRequest, UpdateSlidesBatchRequest,
-    UpdateSlidesBatchResponse,
+    Slide, SyncSlideEntry, SyncSlidesRequest, SyncSlidesResponse, UpdateSlideRequest,
+    UpdateSlidesBatchRequest, UpdateSlidesBatchResponse,
 };
 
 const ORDER_STEP: i32 = 1024;
@@ -266,7 +266,7 @@ pub async fn create_slides_batch(
 
     // Single multi-row INSERT for all slides
     let mut qb = QueryBuilder::<MySql>::new(
-        "INSERT INTO slides (id, session_id, type, content, order_index, client_request_id) "
+        "INSERT INTO slides (id, session_id, type, content, order_index, client_request_id) ",
     );
     qb.push_values(&slide_specs, |mut b, (slide_id, slide_type, content)| {
         b.push_bind(slide_id)
@@ -280,11 +280,7 @@ pub async fn create_slides_batch(
     qb.build().execute(&mut *tx).await?;
 
     // Single SELECT to load all created slides
-    let placeholders = slide_ids
-        .iter()
-        .map(|_| "?")
-        .collect::<Vec<_>>()
-        .join(",");
+    let placeholders = slide_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let query = format!(
         "SELECT id, session_id, type, content, order_index, is_hidden, version \
          FROM slides \
@@ -380,7 +376,11 @@ pub async fn update_slides_batch(
     }
 
     // Pre-load all existing slides with a single bulk SELECT
-    let slide_ids_to_update: Vec<&str> = payload.updates.iter().map(|u| u.slide_id.as_str()).collect();
+    let slide_ids_to_update: Vec<&str> = payload
+        .updates
+        .iter()
+        .map(|u| u.slide_id.as_str())
+        .collect();
     let placeholders = slide_ids_to_update
         .iter()
         .map(|_| "?")
@@ -414,8 +414,10 @@ pub async fn update_slides_batch(
         }
     }
 
-    let existing_slides_map: std::collections::HashMap<String, Slide> =
-        existing_slides.into_iter().map(|s| (s.id.clone(), s)).collect();
+    let existing_slides_map: std::collections::HashMap<String, Slide> = existing_slides
+        .into_iter()
+        .map(|s| (s.id.clone(), s))
+        .collect();
 
     // Validate versions before starting transaction
     for update in &payload.updates {
@@ -840,14 +842,13 @@ pub async fn sync_slides(
 
     let client_request_id =
         resolved_client_request_id(payload.client_request_id.clone(), Some(&headers))?;
-    if let Some(existing) =
-        crate::services::wal::fetch_replay_response::<SyncSlidesResponse>(
-            &pool,
-            &session_id,
-            crate::services::wal::WalOpType::SyncSlides,
-            &client_request_id,
-        )
-        .await?
+    if let Some(existing) = crate::services::wal::fetch_replay_response::<SyncSlidesResponse>(
+        &pool,
+        &session_id,
+        crate::services::wal::WalOpType::SyncSlides,
+        &client_request_id,
+    )
+    .await?
     {
         return Ok(crate::services::wal::queued_success_response(&existing));
     }
@@ -862,6 +863,8 @@ pub async fn sync_slides(
         )));
     }
 
+    let requested_slide_ids = collect_sync_requested_slide_ids(&payload.slides)?;
+
     // Pre-load existing slides OUTSIDE the transaction to reduce lock duration.
     // We re-check inside the transaction for correctness, but this early load
     // lets us validate base versions and detect obvious conflicts before
@@ -875,25 +878,21 @@ pub async fn sync_slides(
     .await?;
 
     let existing_slide_map_preload: std::collections::HashMap<String, Slide> =
-        existing_slides_preload.into_iter().map(|s| (s.id.clone(), s)).collect();
+        existing_slides_preload
+            .into_iter()
+            .map(|s| (s.id.clone(), s))
+            .collect();
 
     // Check base versions against pre-loaded data (fast path — reject stale requests early)
     if let Some(ref base_versions) = payload.base_versions {
-        for (slide_id, expected_version) in base_versions {
-            if let Some(slide) = existing_slide_map_preload.get(slide_id) {
-                if slide.version != *expected_version {
-                    return Err(build_slide_version_conflict(slide_id, slide.version));
-                }
-            }
-        }
+        validate_sync_base_versions(&existing_slide_map_preload, base_versions)?;
     }
 
     // Collect desired slide IDs for early analysis
     let desired_ids: std::collections::HashSet<String> = payload
         .slides
         .iter()
-        .filter_map(|e| e.id.clone())
-        .filter(|id| !id.starts_with("temp-"))
+        .filter_map(|entry| entry.id.clone())
         .collect();
 
     // Now enter the transaction — the heavy pre-computation is done above.
@@ -911,8 +910,16 @@ pub async fn sync_slides(
     .fetch_all(&mut *tx)
     .await?;
 
-    let existing_slide_map: std::collections::HashMap<String, Slide> =
-        existing_slides.into_iter().map(|s| (s.id.clone(), s)).collect();
+    let existing_slide_map: std::collections::HashMap<String, Slide> = existing_slides
+        .into_iter()
+        .map(|s| (s.id.clone(), s))
+        .collect();
+
+    validate_sync_slide_ids_exist(&requested_slide_ids, &existing_slide_map)?;
+
+    if let Some(ref base_versions) = payload.base_versions {
+        validate_sync_base_versions(&existing_slide_map, base_versions)?;
+    }
 
     // Re-check slides_to_delete — they may have changed between preload and lock.
     let slides_to_delete: Vec<&String> = existing_slide_map
@@ -927,7 +934,10 @@ pub async fn sync_slides(
             .map(|_| "?")
             .collect::<Vec<_>>()
             .join(",");
-        let query = format!("DELETE FROM slides WHERE session_id = ? AND id IN ({})", placeholders);
+        let query = format!(
+            "DELETE FROM slides WHERE session_id = ? AND id IN ({})",
+            placeholders
+        );
         let mut db_query = sqlx::query(&query).bind(&session_id);
         for id in &slides_to_delete {
             db_query = db_query.bind(*id);
@@ -935,39 +945,16 @@ pub async fn sync_slides(
         db_query.execute(&mut *tx).await?;
     }
 
-    // Process each desired slide entry — first assign temporary negative
-    // order indices to avoid unique constraint collisions, then set final values.
-    // This mirrors the two-phase approach used in reorder_slides.
-
-    // Two-phase renumber: first move ALL remaining slides to negative
-    // order_index space, then assign final dense positive indices.
-    //
-    // Phase 1 must cover every slide still in the session after deletion,
-    // not just those that match the payload. Otherwise a slide that exists
-    // on the server but isn't referenced by the payload would remain at a
-    // positive order_index and collide with Phase 2 assignments.
-
-    // Phase 1: read every remaining slide and assign it a unique negative
-    // order_index.  After this loop the [0, ∞) range is guaranteed free.
-    let remaining_slides: Vec<(String, i32)> = query_as::<_, (String, i32)>(
-        "SELECT id, order_index FROM slides WHERE session_id = ? ORDER BY order_index ASC, id ASC",
+    // Phase 1: move every remaining existing slide into unique negative space.
+    let remaining_slide_ids: Vec<String> = query_scalar::<_, String>(
+        "SELECT id FROM slides WHERE session_id = ? ORDER BY order_index ASC, id ASC",
     )
     .bind(&session_id)
     .fetch_all(&mut *tx)
     .await?;
 
-    let mut temp_order = -ORDER_STEP;
-    for (slide_id, _previous_order) in &remaining_slides {
-        sqlx::query(
-            "UPDATE slides SET order_index = ? WHERE id = ? AND session_id = ?",
-        )
-        .bind(temp_order)
-        .bind(slide_id)
-        .bind(&session_id)
-        .execute(&mut *tx)
-        .await?;
-        temp_order -= ORDER_STEP;
-    }
+    let temporary_assignments = build_temporary_order_assignments(&remaining_slide_ids);
+    apply_order_assignments(&mut tx, &session_id, &temporary_assignments).await?;
 
     // Defensive sanity check — the [0, ∞) range should be completely empty.
     // If something still occupies a non-negative order_index, fail cleanly
@@ -983,76 +970,66 @@ pub async fn sync_slides(
         tracing::error!(
             session_id = %session_id,
             conflicting_order_index = conflicting_order,
-            remaining_slide_count = remaining_slides.len(),
+            remaining_slide_count = remaining_slide_ids.len(),
             "SYNC_ORDER_COLLISION: slides still occupy positive order_index range after Phase 1"
         );
-        return Err(AppError::Internal("Slide order collision detected — please retry".to_string()));
+        return Err(AppError::Internal(
+            "Slide order collision detected — please retry".to_string(),
+        ));
     }
 
-    // Phase 2: assign final dense order_index values based on the payload order.
-    let mut order_index = 0i32;
-    let mut created_ids: Vec<String> = Vec::new();
+    // Phase 2: apply content/type/visibility changes while keeping all rows in negative space.
+    let mut next_temp_order = -(((temporary_assignments.len() as i32) + 1) * ORDER_STEP);
+    let mut final_slide_ids = Vec::with_capacity(payload.slides.len());
 
     for entry in &payload.slides {
         match &entry.id {
             None => {
-                // New slide — INSERT
                 let slide_id = Uuid::new_v4().to_string();
                 sqlx::query(
-                    "INSERT INTO slides (id, session_id, type, content, order_index, client_request_id) VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO slides (id, session_id, type, content, order_index, is_hidden, client_request_id)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)",
                 )
                 .bind(&slide_id)
                 .bind(&session_id)
                 .bind(&entry.slide_type)
                 .bind(sqlx::types::Json(&entry.content))
-                .bind(order_index)
+                .bind(next_temp_order)
+                .bind(entry.is_hidden)
                 .bind(&client_request_id)
                 .execute(&mut *tx)
                 .await?;
-                created_ids.push(slide_id);
+                final_slide_ids.push(slide_id);
+                next_temp_order -= ORDER_STEP;
             }
             Some(id) => {
-                // Existing or new slide — UPDATE or INSERT with final order_index
-                if existing_slide_map.contains_key(id.as_str()) {
-                    let result = sqlx::query(
-                        "UPDATE slides SET type = ?, content = ?, is_hidden = ?, order_index = ? \
-                         WHERE id = ? AND session_id = ?",
-                    )
-                    .bind(&entry.slide_type)
-                    .bind(sqlx::types::Json(&entry.content))
-                    .bind(entry.is_hidden)
-                    .bind(order_index)
-                    .bind(id)
-                    .bind(&session_id)
-                    .execute(&mut *tx)
-                    .await?;
+                let result = sqlx::query(
+                    "UPDATE slides SET type = ?, content = ?, is_hidden = ? \
+                     WHERE id = ? AND session_id = ?",
+                )
+                .bind(&entry.slide_type)
+                .bind(sqlx::types::Json(&entry.content))
+                .bind(entry.is_hidden)
+                .bind(id)
+                .bind(&session_id)
+                .execute(&mut *tx)
+                .await?;
 
-                    if result.rows_affected() == 0 {
-                        return Err(AppError::NotFound(format!(
-                            "Slide {} not found in session",
-                            id
-                        )));
-                    }
-                } else {
-                    // Slide doesn't exist on server but client thinks it does — treat as new
-                    let slide_id = Uuid::new_v4().to_string();
-                    sqlx::query(
-                        "INSERT INTO slides (id, session_id, type, content, order_index, client_request_id) VALUES (?, ?, ?, ?, ?, ?)",
-                    )
-                    .bind(&slide_id)
-                    .bind(&session_id)
-                    .bind(&entry.slide_type)
-                    .bind(sqlx::types::Json(&entry.content))
-                    .bind(order_index)
-                    .bind(&client_request_id)
-                    .execute(&mut *tx)
-                    .await?;
-                    created_ids.push(slide_id);
+                if result.rows_affected() == 0 {
+                    return Err(AppError::NotFound(format!(
+                        "Slide {} not found in session",
+                        id
+                    )));
                 }
+
+                final_slide_ids.push(id.clone());
             }
         }
-        order_index += ORDER_STEP;
     }
+
+    // Phase 3: assign the final dense positive order.
+    let final_assignments = build_dense_order_assignments(&final_slide_ids);
+    apply_order_assignments(&mut tx, &session_id, &final_assignments).await?;
 
     // Bump state_version once
     sqlx::query("UPDATE sessions SET state_version = state_version + 1 WHERE id = ?")
@@ -1139,15 +1116,14 @@ pub(crate) async fn allocate_order_after(
     insert_after_slide_id: &str,
 ) -> Result<i32> {
     // FOR UPDATE on both reads to prevent concurrent order collisions.
-    let mut insert_after_order_index =
-        query_scalar::<_, i32>(
-            "SELECT order_index FROM slides WHERE id = ? AND session_id = ? FOR UPDATE",
-        )
-            .bind(insert_after_slide_id)
-            .bind(session_id)
-            .fetch_optional(&mut **tx)
-            .await?
-            .ok_or_else(|| AppError::Input("Insert-after slide not found".to_string()))?;
+    let mut insert_after_order_index = query_scalar::<_, i32>(
+        "SELECT order_index FROM slides WHERE id = ? AND session_id = ? FOR UPDATE",
+    )
+    .bind(insert_after_slide_id)
+    .bind(session_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::Input("Insert-after slide not found".to_string()))?;
 
     let mut next_order_index =
         get_next_order_index(tx, session_id, insert_after_order_index).await?;
@@ -1160,14 +1136,13 @@ pub(crate) async fn allocate_order_after(
 
     rebalance_slide_orders(tx, session_id).await?;
 
-    insert_after_order_index =
-        query_scalar::<_, i32>(
-            "SELECT order_index FROM slides WHERE id = ? AND session_id = ? FOR UPDATE",
-        )
-            .bind(insert_after_slide_id)
-            .bind(session_id)
-            .fetch_one(&mut **tx)
-            .await?;
+    insert_after_order_index = query_scalar::<_, i32>(
+        "SELECT order_index FROM slides WHERE id = ? AND session_id = ? FOR UPDATE",
+    )
+    .bind(insert_after_slide_id)
+    .bind(session_id)
+    .fetch_one(&mut **tx)
+    .await?;
 
     next_order_index = get_next_order_index(tx, session_id, insert_after_order_index).await?;
 
@@ -1340,6 +1315,55 @@ pub(crate) fn validate_reorder_payload(
     Ok(())
 }
 
+pub(crate) fn collect_sync_requested_slide_ids(entries: &[SyncSlideEntry]) -> Result<Vec<String>> {
+    let mut requested_ids = Vec::new();
+    let mut seen_ids = HashSet::new();
+
+    for entry in entries {
+        let Some(slide_id) = entry.id.as_ref() else {
+            continue;
+        };
+
+        if !seen_ids.insert(slide_id.clone()) {
+            return Err(AppError::Input(
+                "Sync request contains duplicate slide IDs".to_string(),
+            ));
+        }
+
+        requested_ids.push(slide_id.clone());
+    }
+
+    Ok(requested_ids)
+}
+
+pub(crate) fn validate_sync_slide_ids_exist(
+    requested_slide_ids: &[String],
+    existing_slides: &std::collections::HashMap<String, Slide>,
+) -> Result<()> {
+    for slide_id in requested_slide_ids {
+        if !existing_slides.contains_key(slide_id) {
+            return Err(AppError::NotFound(format!("Slide {} not found", slide_id)));
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn validate_sync_base_versions(
+    existing_slides: &std::collections::HashMap<String, Slide>,
+    base_versions: &std::collections::HashMap<String, i64>,
+) -> Result<()> {
+    for (slide_id, expected_version) in base_versions {
+        if let Some(slide) = existing_slides.get(slide_id) {
+            if slide.version != *expected_version {
+                return Err(build_slide_version_conflict(slide_id, slide.version));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Helper function to verify session ownership
 async fn verify_session_ownership(
     pool: &crate::db::DbPool,
@@ -1362,6 +1386,27 @@ async fn verify_session_ownership(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_sync_slide_entry(id: Option<&str>) -> SyncSlideEntry {
+        SyncSlideEntry {
+            id: id.map(str::to_string),
+            slide_type: "static".to_string(),
+            content: serde_json::json!({ "title": "Slide" }),
+            is_hidden: false,
+        }
+    }
+
+    fn make_slide(id: &str, version: i64) -> Slide {
+        Slide {
+            id: id.to_string(),
+            session_id: "session-1".to_string(),
+            slide_type: "static".to_string(),
+            content: sqlx::types::Json(serde_json::json!({ "title": id })),
+            order_index: 0,
+            is_hidden: false,
+            version,
+        }
+    }
 
     #[test]
     fn validate_reorder_payload_rejects_duplicate_ids() {
@@ -1427,6 +1472,45 @@ mod tests {
     #[test]
     fn compute_append_order_index_returns_zero_for_empty_session() {
         assert_eq!(compute_append_order_index(None), 0);
+    }
+
+    #[test]
+    fn collect_sync_requested_slide_ids_rejects_duplicate_non_null_ids() {
+        let entries = vec![
+            make_sync_slide_entry(Some("slide-a")),
+            make_sync_slide_entry(None),
+            make_sync_slide_entry(Some("slide-a")),
+        ];
+
+        let result = collect_sync_requested_slide_ids(&entries);
+
+        assert!(matches!(result, Err(AppError::Input(message)) if message.contains("duplicate")));
+    }
+
+    #[test]
+    fn validate_sync_slide_ids_exist_rejects_missing_ids() {
+        let requested_ids = vec!["slide-a".to_string(), "slide-missing".to_string()];
+        let existing_slides =
+            std::collections::HashMap::from([("slide-a".to_string(), make_slide("slide-a", 1))]);
+
+        let result = validate_sync_slide_ids_exist(&requested_ids, &existing_slides);
+
+        assert!(
+            matches!(result, Err(AppError::NotFound(message)) if message.contains("slide-missing"))
+        );
+    }
+
+    #[test]
+    fn validate_sync_base_versions_returns_conflict_for_stale_versions() {
+        let existing_slides =
+            std::collections::HashMap::from([("slide-a".to_string(), make_slide("slide-a", 4))]);
+        let base_versions = std::collections::HashMap::from([("slide-a".to_string(), 3)]);
+
+        let result = validate_sync_base_versions(&existing_slides, &base_versions);
+
+        assert!(
+            matches!(result, Err(AppError::Conflict { message, .. }) if message == "Slide has changed on the server")
+        );
     }
 
     #[test]

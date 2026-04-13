@@ -9,13 +9,9 @@ const dndState = vi.hoisted(() => ({
 }));
 
 const apiMockState = vi.hoisted(() => ({
-    createSlide: vi.fn(),
-    deleteSlide: vi.fn(),
+    syncSlides: vi.fn(),
     getSession: vi.fn(),
     getSlides: vi.fn(),
-    reorderSlides: vi.fn(),
-    updateSlide: vi.fn(),
-    updateSlideVisibility: vi.fn(),
     updateSession: vi.fn(),
     goLiveSession: vi.fn(),
     stopSession: vi.fn(),
@@ -48,18 +44,6 @@ const editorMockState = vi.hoisted(() => ({
     latestSlide: null as EditorLikeSlide | null,
     onUpdate: null as null | ((content: Slide['content']) => Promise<{ status: 'saved' | 'queued' }>),
 }));
-
-function deferred<T>() {
-    let resolve!: (value: T | PromiseLike<T>) => void;
-    let reject!: (reason?: unknown) => void;
-
-    const promise = new Promise<T>((res, rej) => {
-        resolve = res;
-        reject = rej;
-    });
-
-    return { promise, resolve, reject };
-}
 
 vi.mock('next/navigation', () => ({
     useParams: () => ({ id: 'test-session-id' }),
@@ -108,13 +92,9 @@ vi.mock('@/lib/api', async () => {
     const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api');
     return {
         ...actual,
-        createSlide: apiMockState.createSlide,
-        deleteSlide: apiMockState.deleteSlide,
+        syncSlides: apiMockState.syncSlides,
         getSession: apiMockState.getSession,
         getSlides: apiMockState.getSlides,
-        reorderSlides: apiMockState.reorderSlides,
-        updateSlide: apiMockState.updateSlide,
-        updateSlideVisibility: apiMockState.updateSlideVisibility,
         updateSession: apiMockState.updateSession,
         goLiveSession: apiMockState.goLiveSession,
         stopSession: apiMockState.stopSession,
@@ -211,16 +191,36 @@ function makeSlide(overrides: Partial<Slide> = {}): Slide {
     };
 }
 
-describe('staff editor duplicate flow', () => {
+async function renderPage() {
+    const { default: SlideEditorPage } = await import('./page');
+    render(<SlideEditorPage />);
+}
+
+async function duplicateAndEditDraft(title: string) {
+    await waitFor(() => {
+        expect(editorMockState.latestSlide?.id).toBe('slide-1');
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /duplicate/i }));
+
+    await waitFor(() => {
+        expect(editorMockState.latestSlide?.id).toMatch(/^temp-/);
+    });
+
+    await act(async () => {
+        await editorMockState.onUpdate?.({
+            ...editorMockState.latestSlide?.content,
+            title,
+        } as Slide['content']);
+    });
+}
+
+describe('staff editor sync save flow', () => {
     beforeEach(() => {
         dndState.dragEndHandlers = [];
-        apiMockState.createSlide.mockReset();
-        apiMockState.deleteSlide.mockReset();
+        apiMockState.syncSlides.mockReset();
         apiMockState.getSession.mockReset();
         apiMockState.getSlides.mockReset();
-        apiMockState.reorderSlides.mockReset();
-        apiMockState.updateSlide.mockReset();
-        apiMockState.updateSlideVisibility.mockReset();
         apiMockState.updateSession.mockReset();
         apiMockState.goLiveSession.mockReset();
         apiMockState.stopSession.mockReset();
@@ -233,197 +233,89 @@ describe('staff editor duplicate flow', () => {
 
         apiMockState.getSession.mockResolvedValue(makeSession());
         apiMockState.getSlides.mockResolvedValue([makeSlide()]);
-        apiMockState.deleteSlide.mockResolvedValue(undefined);
-        apiMockState.reorderSlides.mockResolvedValue(undefined);
-        apiMockState.updateSlide.mockImplementation(async (
-            sessionId: string,
-            slideId: string,
-            content: Slide['content'],
-        ) => ({
-            id: slideId,
-            sessionId,
-            type: 'static',
-            content,
-            orderIndex: 1,
-            isHidden: false,
-            version: 2,
-        }));
-        apiMockState.updateSlideVisibility.mockResolvedValue(undefined);
+        apiMockState.syncSlides.mockResolvedValue([makeSlide()]);
         apiMockState.updateSession.mockResolvedValue(undefined);
         apiMockState.goLiveSession.mockResolvedValue(undefined);
         apiMockState.stopSession.mockResolvedValue(undefined);
     });
 
     it('keeps the latest edited duplicate content visible as local draft state before save', async () => {
-        const { default: SlideEditorPage } = await import('./page');
-        render(<SlideEditorPage />);
-        await waitFor(() => {
-            expect(editorMockState.latestSlide?.id).toBe('slide-1');
-        });
-
-        fireEvent.click(screen.getByRole('button', { name: /duplicate/i }));
-        await waitFor(() => {
-            expect(editorMockState.latestSlide?.id).toMatch(/^temp-/);
-        });
-
-        await act(async () => {
-            await editorMockState.onUpdate?.({
-                ...editorMockState.latestSlide?.content,
-                title: 'Edited duplicate title',
-            } as Slide['content']);
-        });
+        await renderPage();
+        await duplicateAndEditDraft('Edited duplicate title');
 
         expect(editorMockState.latestSlide?.id).toMatch(/^temp-/);
         expect(editorMockState.latestSlide?.serverId).toBeNull();
         expect(editorMockState.latestSlide?.content.title).toBe('Edited duplicate title');
         expect(screen.getByText('Not saved')).toBeInTheDocument();
-        expect(apiMockState.createSlide).not.toHaveBeenCalled();
-        expect(apiMockState.updateSlide).not.toHaveBeenCalled();
+        expect(apiMockState.syncSlides).not.toHaveBeenCalled();
     });
 
-    it('does not call slide APIs before explicit save, then saves the local duplicate state once', async () => {
-        apiMockState.createSlide.mockResolvedValueOnce(makeSlide({
-            id: 'slide-2',
-            content: {
-                title: 'Edited duplicate title',
-                body: 'Original body',
-            },
-            orderIndex: 1,
-            version: 1,
-        }));
+    it('preserves the local duplicate draft on retryable save failures', async () => {
+        const { ApiRequestError } = await import('@/lib/api');
+        apiMockState.syncSlides.mockRejectedValueOnce(new ApiRequestError('Database error', { status: 500, retryable: true }));
 
-        const { default: SlideEditorPage } = await import('./page');
-        render(<SlideEditorPage />);
+        await renderPage();
+        await duplicateAndEditDraft('Edited duplicate title');
+
+        fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
 
         await waitFor(() => {
-            expect(editorMockState.latestSlide?.id).toBe('slide-1');
+            expect(toastMock.error).toHaveBeenCalled();
         });
 
-        fireEvent.click(screen.getByRole('button', { name: /duplicate/i }));
-
-        await waitFor(() => {
-            expect(editorMockState.latestSlide?.id).toMatch(/^temp-/);
-        });
-
-        await act(async () => {
-            await editorMockState.onUpdate?.({
-                ...editorMockState.latestSlide?.content,
-                title: 'Edited duplicate title',
-            } as Slide['content']);
-        });
-
-        expect(apiMockState.createSlide).not.toHaveBeenCalled();
-        expect(apiMockState.updateSlide).not.toHaveBeenCalled();
+        expect(apiMockState.syncSlides).toHaveBeenCalledTimes(1);
+        expect(apiMockState.getSlides).toHaveBeenCalledTimes(1);
+        expect(editorMockState.latestSlide?.id).toMatch(/^temp-/);
+        expect(editorMockState.latestSlide?.content.title).toBe('Edited duplicate title');
         expect(screen.getByText('Not saved')).toBeInTheDocument();
+    });
+
+    it('rebases to the latest server snapshot after a 409 save conflict', async () => {
+        const { ApiRequestError } = await import('@/lib/api');
+        apiMockState.syncSlides.mockRejectedValueOnce(
+            new ApiRequestError('Slide has changed on the server', { status: 409, retryable: false }),
+        );
+        apiMockState.getSlides
+            .mockResolvedValueOnce([makeSlide()])
+            .mockResolvedValueOnce([
+                makeSlide({
+                    content: { title: 'Server title', body: 'Server body' },
+                    version: 2,
+                }),
+            ]);
+
+        await renderPage();
+        await duplicateAndEditDraft('Edited duplicate title');
 
         fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
 
         await waitFor(() => {
-            expect(apiMockState.createSlide).toHaveBeenCalledWith(
-                'test-session-id',
-                'static',
-                { title: 'Edited duplicate title', body: 'Original body' },
-                { insertAfterSlideId: 'slide-1' },
-            );
+            expect(apiMockState.getSlides).toHaveBeenCalledTimes(2);
         });
-
-        expect(apiMockState.updateSlide).not.toHaveBeenCalled();
-        await waitFor(() => {
-            expect(screen.getByText('Saved')).toBeInTheDocument();
-        });
-    });
-
-    it('saves multiple local duplicates in visual order on explicit save', async () => {
-        apiMockState.createSlide
-            .mockResolvedValueOnce(makeSlide({
-                id: 'slide-2',
-                orderIndex: 1,
-                version: 1,
-            }))
-            .mockResolvedValueOnce(makeSlide({
-                id: 'slide-3',
-                orderIndex: 2,
-                version: 1,
-            }));
-
-        const { default: SlideEditorPage } = await import('./page');
-        render(<SlideEditorPage />);
 
         await waitFor(() => {
             expect(editorMockState.latestSlide?.id).toBe('slide-1');
         });
 
-        fireEvent.click(screen.getByRole('button', { name: /duplicate/i }));
+        expect(editorMockState.latestSlide?.content.title).toBe('Server title');
+        expect(screen.getByText('Saved')).toBeInTheDocument();
+    });
 
-        await waitFor(() => {
-            expect(editorMockState.latestSlide?.id).toMatch(/^temp-/);
-        });
-
-        fireEvent.click(screen.getByRole('button', { name: /duplicate/i }));
-
-        expect(apiMockState.createSlide).not.toHaveBeenCalled();
-
-        fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
-
-        await waitFor(() => {
-            expect(apiMockState.createSlide).toHaveBeenCalledTimes(2);
-        });
-
-        expect(apiMockState.createSlide).toHaveBeenNthCalledWith(
-            1,
-            'test-session-id',
-            'static',
-            { title: 'Original title', body: 'Original body' },
-            { insertAfterSlideId: 'slide-1' },
+    it('redirects to sessions on initial 404 load failures', async () => {
+        const { ApiRequestError } = await import('@/lib/api');
+        apiMockState.getSession.mockRejectedValueOnce(
+            new ApiRequestError('Session not found', { status: 404, retryable: false }),
+        );
+        apiMockState.getSlides.mockRejectedValueOnce(
+            new ApiRequestError('Session not found', { status: 404, retryable: false }),
         );
 
-        expect(apiMockState.createSlide).toHaveBeenNthCalledWith(
-            2,
-            'test-session-id',
-            'static',
-            { title: 'Original title', body: 'Original body' },
-            { insertAfterSlideId: 'slide-2' },
-        );
+        await renderPage();
 
         await waitFor(() => {
-            expect(screen.getByText('Saved')).toBeInTheDocument();
+            expect(screen.getByText('Redirecting to sessions...')).toBeInTheDocument();
         });
-        expect(toastMock.error).not.toHaveBeenCalledWith('Failed to save changes');
+
+        expect(navigationMockState.router.push).toHaveBeenCalledWith('/sessions');
     });
-
-    it('treats duplicate then delete before save as a local-only no-op', async () => {
-        vi.stubGlobal('confirm', vi.fn(() => true));
-
-        const { default: SlideEditorPage } = await import('./page');
-        render(<SlideEditorPage />);
-
-        await waitFor(() => {
-            expect(editorMockState.latestSlide?.id).toBe('slide-1');
-        });
-
-        fireEvent.click(screen.getByRole('button', { name: /duplicate/i }));
-
-        await waitFor(() => {
-            expect(editorMockState.latestSlide?.id).toMatch(/^temp-/);
-        });
-
-        fireEvent.click(screen.getByRole('button', { name: /delete/i }));
-
-        await waitFor(() => {
-            expect(editorMockState.latestSlide?.id).toBe('slide-1');
-        });
-
-        expect(apiMockState.createSlide).not.toHaveBeenCalled();
-        expect(apiMockState.deleteSlide).not.toHaveBeenCalled();
-
-        fireEvent.click(screen.getByRole('button', { name: /^save$/i }));
-
-        await waitFor(() => {
-            expect(screen.getByText('Saved')).toBeInTheDocument();
-        });
-
-        expect(apiMockState.createSlide).not.toHaveBeenCalled();
-        expect(apiMockState.deleteSlide).not.toHaveBeenCalled();
-    });
-
 });

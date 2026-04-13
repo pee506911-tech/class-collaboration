@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { publicSetCurrentSlide, updateSlide } from '@/lib/api';
+import { ApiRequestError, getSession, getSlides, publicSetCurrentSlide, updateSlide } from '@/lib/api';
 
 const originalFetch = global.fetch;
 
@@ -138,6 +138,62 @@ describe('updateSlide', () => {
         });
 
         expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+});
+
+describe('getSession', () => {
+    afterEach(() => {
+        global.fetch = originalFetch;
+        vi.restoreAllMocks();
+    });
+
+    it('surfaces 404 responses as ApiRequestError', async () => {
+        const fetchMock = vi.fn().mockResolvedValue(
+            mockJsonResponse(
+                {
+                    success: false,
+                    error: 'Session not found',
+                },
+                { status: 404 },
+            ),
+        );
+        global.fetch = fetchMock as typeof fetch;
+
+        await expect(getSession('session-missing')).rejects.toEqual(
+            expect.objectContaining<ApiRequestError>({
+                message: 'Session not found',
+                status: 404,
+                retryable: false,
+            }),
+        );
+    });
+});
+
+describe('getSlides', () => {
+    afterEach(() => {
+        global.fetch = originalFetch;
+        vi.restoreAllMocks();
+    });
+
+    it('surfaces 404 responses as ApiRequestError', async () => {
+        const fetchMock = vi.fn().mockResolvedValue(
+            mockJsonResponse(
+                {
+                    success: false,
+                    error: 'Session not found',
+                },
+                { status: 404 },
+            ),
+        );
+        global.fetch = fetchMock as typeof fetch;
+
+        await expect(getSlides('session-missing')).rejects.toEqual(
+            expect.objectContaining<ApiRequestError>({
+                message: 'Session not found',
+                status: 404,
+                retryable: false,
+            }),
+        );
     });
 });
 

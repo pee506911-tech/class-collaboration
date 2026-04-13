@@ -1,5 +1,6 @@
 import { ApiResponse, Session, Slide, StateUpdatePayload } from 'shared';
-import { httpFetch, createClientRequestId } from '@/lib/http';
+import { httpFetch, createClientRequestId, HttpRequestError } from '@/lib/http';
+import type { HttpErrorKind } from '@/lib/http';
 import { safeLocalStorageGet, safeLocalStorageRemove, safeLocalStorageSet } from '@/lib/storage';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api';
@@ -14,12 +15,16 @@ const RETRY_CONFIG = {
 export class ApiRequestError extends Error {
     status?: number;
     retryable: boolean;
+    kind?: HttpErrorKind;
+    requestId?: string;
 
-    constructor(message: string, options?: { status?: number; retryable?: boolean; cause?: unknown }) {
+    constructor(message: string, options?: { status?: number; retryable?: boolean; kind?: HttpErrorKind; requestId?: string; cause?: unknown }) {
         super(message);
         this.name = 'ApiRequestError';
         this.status = options?.status;
         this.retryable = options?.retryable ?? isRetryableStatus(options?.status);
+        this.kind = options?.kind;
+        this.requestId = options?.requestId;
         if (options?.cause !== undefined) {
             this.cause = options.cause;
         }
@@ -83,12 +88,24 @@ async function buildApiError(response: Response, fallbackMessage: string): Promi
     return new ApiRequestError(message, {
         status: response.status,
         retryable: isRetryableStatus(response.status),
+        kind: 'http',
+        requestId: response.headers.get('x-client-request-id') ?? undefined,
     });
 }
 
 function toApiRequestError(error: unknown, fallbackMessage: string): ApiRequestError {
     if (error instanceof ApiRequestError) {
         return error;
+    }
+
+    if (error instanceof HttpRequestError) {
+        return new ApiRequestError(error.message || fallbackMessage, {
+            status: error.status,
+            retryable: error.retriable,
+            kind: error.kind,
+            requestId: error.requestId,
+            cause: error,
+        });
     }
 
     if (error instanceof Error) {
@@ -190,10 +207,17 @@ export async function getSessions(status?: string): Promise<Session[]> {
 }
 
 export async function getSession(sessionId: string): Promise<Session> {
-    const res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}`, { headers: getHeaders() });
-    if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
+    let res: Response;
+
+    try {
+        res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}`, { headers: getHeaders() });
+    } catch (error) {
+        throw toApiRequestError(error, 'Failed to fetch session');
+    }
+    if (res.status === 401) { logout(); throw new ApiRequestError('Unauthorized', { status: 401, retryable: false, kind: 'http' }); }
+    if (!res.ok) throw await buildApiError(res, 'Failed to fetch session');
     const json: ApiResponse<Session> = await res.json();
-    if (!json.success) throw new Error(json.error || 'Failed to fetch session');
+    if (!json.success) throw new ApiRequestError(json.error || 'Failed to fetch session', { status: res.status, kind: 'http' });
     return json.data;
 }
 
@@ -262,10 +286,17 @@ export async function deleteSession(sessionId: string): Promise<void> {
 }
 
 export async function getSlides(sessionId: string): Promise<Slide[]> {
-    const res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides`, { headers: getHeaders() });
-    if (res.status === 401) { logout(); return []; }
+    let res: Response;
+
+    try {
+        res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides`, { headers: getHeaders() });
+    } catch (error) {
+        throw toApiRequestError(error, 'Failed to fetch slides');
+    }
+    if (res.status === 401) { logout(); throw new ApiRequestError('Unauthorized', { status: 401, retryable: false, kind: 'http' }); }
+    if (!res.ok) throw await buildApiError(res, 'Failed to fetch slides');
     const json: ApiResponse<Slide[]> = await res.json();
-    if (!json.success) throw new Error(json.error || 'Failed to fetch slides');
+    if (!json.success) throw new ApiRequestError(json.error || 'Failed to fetch slides', { status: res.status, kind: 'http' });
     return json.data;
 }
 
