@@ -1673,6 +1673,73 @@ async fn t13_sync_slides_handles_sparse_order_indices_with_new_and_deleted_slide
     );
 }
 
+/// T-14: Verify that full-document slide sync can create multiple new slides in one request
+/// without colliding on slides.uq_slides_session_client_request_id.
+#[tokio::test]
+#[ignore = "requires MySQL + a running backend server (set DATABASE_URL and TEST_SERVER_URL)"]
+async fn t14_sync_slides_can_create_multiple_new_slides_in_one_request() {
+    let fixture = SlideMutationFixture::new().await;
+
+    let sync_response = fixture
+        .sync_slides(json!({
+            "slides": [
+                {
+                    "id": fixture.slide_id,
+                    "type": "static",
+                    "content": { "title": "A", "body": "kept first" },
+                    "isHidden": false
+                },
+                {
+                    "id": null,
+                    "type": "static",
+                    "content": { "title": "New slide 1", "body": "inserted via sync" },
+                    "isHidden": false
+                },
+                {
+                    "id": null,
+                    "type": "static",
+                    "content": { "title": "New slide 2", "body": "inserted via sync" },
+                    "isHidden": false
+                },
+                {
+                    "id": fixture.other_slide_id,
+                    "type": "static",
+                    "content": { "title": "B", "body": "kept last" },
+                    "isHidden": false
+                }
+            ]
+        }))
+        .await
+        .expect("sync request failed");
+
+    assert!(
+        sync_response.status().is_success(),
+        "sync request failed: {}",
+        sync_response.text().await.unwrap_or_default()
+    );
+
+    let body: Value = sync_response
+        .json()
+        .await
+        .expect("sync response body should be JSON");
+
+    let returned_ids: Vec<String> = body["data"]["slides"]
+        .as_array()
+        .expect("slides array missing")
+        .iter()
+        .map(|slide| slide["id"].as_str().expect("slide id missing").to_string())
+        .collect();
+
+    assert_eq!(returned_ids.len(), 4);
+    assert_eq!(returned_ids[0], fixture.slide_id);
+    assert_eq!(returned_ids[3], fixture.other_slide_id);
+    assert_ne!(returned_ids[1], returned_ids[2]);
+    assert_ne!(returned_ids[1], fixture.slide_id);
+    assert_ne!(returned_ids[1], fixture.other_slide_id);
+    assert_ne!(returned_ids[2], fixture.slide_id);
+    assert_ne!(returned_ids[2], fixture.other_slide_id);
+}
+
 /// T-11: Verify that the vote_counts read model stays in sync with durable votes.
 #[tokio::test]
 #[ignore = "requires MySQL + a running backend server (set DATABASE_URL and TEST_SERVER_URL)"]

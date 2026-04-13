@@ -6,6 +6,8 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use sha2::{Digest, Sha256};
 use sqlx::{query_as, query_scalar, MySql, QueryBuilder, Transaction};
 use uuid::Uuid;
 
@@ -46,6 +48,15 @@ fn resolved_client_request_id(
     }
 
     Ok(Uuid::new_v4().to_string())
+}
+
+fn derive_slide_row_client_request_id(
+    root_client_request_id: &str,
+    scope: &str,
+    ordinal: usize,
+) -> String {
+    let digest = Sha256::digest(format!("{scope}:{root_client_request_id}:{ordinal}").as_bytes());
+    URL_SAFE_NO_PAD.encode(digest)
 }
 
 /// Broadcast a SlidesUpdate WebSocket message to all connected clients.
@@ -248,19 +259,41 @@ pub async fn create_slides_batch(
     let slide_specs: Vec<_> = payload
         .slides
         .iter()
-        .map(|s| {
+        .enumerate()
+        .map(|(index, s)| {
             (
                 Uuid::new_v4().to_string(),
                 s.slide_type.clone(),
                 s.content.clone(),
+                derive_slide_row_client_request_id(
+                    &client_request_id,
+                    "create_slides_batch",
+                    index,
+                ),
             )
         })
         .collect();
 
-    let slide_ids: Vec<&str> = slide_specs.iter().map(|(id, _, _)| id.as_str()).collect();
+    let slide_ids: Vec<&str> = slide_specs
+        .iter()
+        .map(|(id, _, _, _)| id.as_str())
+        .collect();
 
     let mut tx = pool.begin().await?;
     lock_session(&mut tx, &session_id).await?;
+
+    if let Some(existing) =
+        crate::services::wal::fetch_replay_response::<CreateSlidesBatchResponse>(
+            &pool,
+            &session_id,
+            crate::services::wal::WalOpType::CreateSlidesBatch,
+            &client_request_id,
+        )
+        .await?
+    {
+        tx.rollback().await?;
+        return Ok(crate::services::wal::queued_success_response(&existing));
+    }
 
     let mut next_order_index = get_append_order_index(&mut tx, &session_id).await?;
 
@@ -268,15 +301,18 @@ pub async fn create_slides_batch(
     let mut qb = QueryBuilder::<MySql>::new(
         "INSERT INTO slides (id, session_id, type, content, order_index, client_request_id) ",
     );
-    qb.push_values(&slide_specs, |mut b, (slide_id, slide_type, content)| {
-        b.push_bind(slide_id)
-            .push_bind(&session_id)
-            .push_bind(slide_type)
-            .push_bind(sqlx::types::Json(content))
-            .push_bind(next_order_index)
-            .push_bind(&client_request_id);
-        next_order_index = next_order_index.saturating_add(ORDER_STEP);
-    });
+    qb.push_values(
+        &slide_specs,
+        |mut b, (slide_id, slide_type, content, row_client_request_id)| {
+            b.push_bind(slide_id)
+                .push_bind(&session_id)
+                .push_bind(slide_type)
+                .push_bind(sqlx::types::Json(content))
+                .push_bind(next_order_index)
+                .push_bind(row_client_request_id);
+            next_order_index = next_order_index.saturating_add(ORDER_STEP);
+        },
+    );
     qb.build().execute(&mut *tx).await?;
 
     // Single SELECT to load all created slides
@@ -866,6 +902,25 @@ pub async fn sync_slides(
     }
 
     let requested_slide_ids = collect_sync_requested_slide_ids(&payload.slides)?;
+    let requested_existing_count = requested_slide_ids.len();
+    let requested_new_count = payload
+        .slides
+        .len()
+        .saturating_sub(requested_existing_count);
+    let base_version_count = payload
+        .base_versions
+        .as_ref()
+        .map_or(0, |versions| versions.len());
+
+    tracing::info!(
+        session_id = %session_id,
+        client_request_id = %client_request_id,
+        requested_slide_count = payload.slides.len(),
+        requested_existing_count,
+        requested_new_count,
+        base_version_count,
+        "SYNC_AUDIT_START"
+    );
 
     // Pre-load existing slides OUTSIDE the transaction to reduce lock duration.
     // We re-check inside the transaction for correctness, but this early load
@@ -903,6 +958,23 @@ pub async fn sync_slides(
     let mut tx = pool.begin().await?;
     lock_session(&mut tx, &session_id).await?;
 
+    if let Some(existing) = crate::services::wal::fetch_replay_response::<SyncSlidesResponse>(
+        &pool,
+        &session_id,
+        crate::services::wal::WalOpType::SyncSlides,
+        &client_request_id,
+    )
+    .await?
+    {
+        tracing::info!(
+            session_id = %session_id,
+            client_request_id = %client_request_id,
+            "SYNC_AUDIT_REPLAY_AFTER_LOCK"
+        );
+        tx.rollback().await?;
+        return Ok(crate::services::wal::queued_success_response(&existing));
+    }
+
     // Re-load slides inside the transaction (authoritative read under lock).
     let existing_slides: Vec<Slide> = query_as::<_, Slide>(
         "SELECT id, session_id, type, content, order_index, is_hidden, version \
@@ -917,6 +989,13 @@ pub async fn sync_slides(
         .map(|s| (s.id.clone(), s))
         .collect();
 
+    tracing::info!(
+        session_id = %session_id,
+        client_request_id = %client_request_id,
+        existing_slide_count = existing_slide_map.len(),
+        "SYNC_AUDIT_LOCKED"
+    );
+
     validate_sync_slide_ids_exist(&requested_slide_ids, &existing_slide_map)?;
 
     if let Some(ref base_versions) = payload.base_versions {
@@ -928,6 +1007,14 @@ pub async fn sync_slides(
         .keys()
         .filter(|id| !desired_ids.contains(*id))
         .collect();
+
+    tracing::info!(
+        session_id = %session_id,
+        client_request_id = %client_request_id,
+        delete_count = slides_to_delete.len(),
+        deleted_slide_ids = ?slides_to_delete,
+        "SYNC_AUDIT_DELETE_PLAN"
+    );
 
     // DELETE slides not in desired set
     if !slides_to_delete.is_empty() {
@@ -960,6 +1047,15 @@ pub async fn sync_slides(
         build_temporary_order_assignments(&remaining_slide_ids, min_order_index);
     apply_order_assignments(&mut tx, &session_id, &temporary_assignments).await?;
 
+    tracing::info!(
+        session_id = %session_id,
+        client_request_id = %client_request_id,
+        remaining_slide_count = remaining_slide_ids.len(),
+        min_order_index = ?min_order_index,
+        temporary_assignment_count = temporary_assignments.len(),
+        "SYNC_AUDIT_TEMP_ORDER_ASSIGNED"
+    );
+
     // Defensive sanity check — the [0, ∞) range should be completely empty.
     // If something still occupies a non-negative order_index, fail cleanly
     // rather than hitting a MySQL constraint violation.
@@ -988,11 +1084,27 @@ pub async fn sync_slides(
         .unwrap_or(0)
         .saturating_sub(ORDER_STEP);
     let mut final_slide_ids = Vec::with_capacity(payload.slides.len());
+    let mut updated_slide_count = 0usize;
+    let mut created_slide_count = 0usize;
 
-    for entry in &payload.slides {
+    for (entry_index, entry) in payload.slides.iter().enumerate() {
         match &entry.id {
             None => {
                 let slide_id = Uuid::new_v4().to_string();
+                let row_client_request_id = derive_slide_row_client_request_id(
+                    &client_request_id,
+                    "sync_slides",
+                    entry_index,
+                );
+                tracing::info!(
+                    session_id = %session_id,
+                    client_request_id = %client_request_id,
+                    slide_slot = entry_index,
+                    slide_id = %slide_id,
+                    slide_client_request_id = %row_client_request_id,
+                    temp_order_index = next_temp_order,
+                    "SYNC_AUDIT_INSERT_NEW_SLIDE"
+                );
                 sqlx::query(
                     "INSERT INTO slides (id, session_id, type, content, order_index, is_hidden, client_request_id)
                      VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1003,13 +1115,21 @@ pub async fn sync_slides(
                 .bind(sqlx::types::Json(&entry.content))
                 .bind(next_temp_order)
                 .bind(entry.is_hidden)
-                .bind(&client_request_id)
+                .bind(&row_client_request_id)
                 .execute(&mut *tx)
                 .await?;
                 final_slide_ids.push(slide_id);
                 next_temp_order -= ORDER_STEP;
+                created_slide_count += 1;
             }
             Some(id) => {
+                tracing::info!(
+                    session_id = %session_id,
+                    client_request_id = %client_request_id,
+                    slide_slot = entry_index,
+                    slide_id = %id,
+                    "SYNC_AUDIT_UPDATE_EXISTING_SLIDE"
+                );
                 let result = sqlx::query(
                     "UPDATE slides SET type = ?, content = ?, is_hidden = ? \
                      WHERE id = ? AND session_id = ?",
@@ -1030,6 +1150,7 @@ pub async fn sync_slides(
                 }
 
                 final_slide_ids.push(id.clone());
+                updated_slide_count += 1;
             }
         }
     }
@@ -1037,6 +1158,15 @@ pub async fn sync_slides(
     // Phase 3: assign the final dense positive order.
     let final_assignments = build_dense_order_assignments(&final_slide_ids);
     apply_order_assignments(&mut tx, &session_id, &final_assignments).await?;
+
+    tracing::info!(
+        session_id = %session_id,
+        client_request_id = %client_request_id,
+        created_slide_count,
+        updated_slide_count,
+        final_slide_count = final_slide_ids.len(),
+        "SYNC_AUDIT_FINAL_ORDER_ASSIGNED"
+    );
 
     // Bump state_version once
     sqlx::query("UPDATE sessions SET state_version = state_version + 1 WHERE id = ?")
@@ -1057,6 +1187,14 @@ pub async fn sync_slides(
         .bind(&session_id)
         .fetch_one(&mut *tx)
         .await?;
+
+    tracing::info!(
+        session_id = %session_id,
+        client_request_id = %client_request_id,
+        final_slide_count = final_slides.len(),
+        state_version,
+        "SYNC_AUDIT_SUCCESS"
+    );
 
     // WAL replay for idempotency
     sqlx::query(
@@ -1499,6 +1637,20 @@ mod tests {
     #[test]
     fn compute_append_order_index_returns_zero_for_empty_session() {
         assert_eq!(compute_append_order_index(None), 0);
+    }
+
+    #[test]
+    fn derive_slide_row_client_request_id_is_deterministic_and_unique_per_scope_and_slot() {
+        let sync_zero = derive_slide_row_client_request_id("request-123", "sync_slides", 0);
+        let sync_zero_again = derive_slide_row_client_request_id("request-123", "sync_slides", 0);
+        let sync_one = derive_slide_row_client_request_id("request-123", "sync_slides", 1);
+        let batch_zero =
+            derive_slide_row_client_request_id("request-123", "create_slides_batch", 0);
+
+        assert_eq!(sync_zero, sync_zero_again);
+        assert_ne!(sync_zero, sync_one);
+        assert_ne!(sync_zero, batch_zero);
+        assert!(sync_zero.len() <= MAX_CLIENT_REQUEST_ID_LEN);
     }
 
     #[test]
