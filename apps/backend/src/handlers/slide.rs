@@ -786,7 +786,9 @@ pub async fn reorder_slides(
         // allocation. In that state, an "unchanged" slide can still occupy an order_index like
         // 1024 or 3072 even if its current array position is different, and assigning dense
         // values to only the changed slides can collide with those unchanged rows.
-        let temporary_assignments = build_temporary_order_assignments(&session_slide_ids);
+        let min_order_index = get_min_order_index(&mut tx, &session_id).await?;
+        let temporary_assignments =
+            build_temporary_order_assignments(&session_slide_ids, min_order_index);
         let final_assignments = build_dense_order_assignments(&payload.slide_ids);
 
         apply_order_assignments(&mut tx, &session_id, &temporary_assignments).await?;
@@ -953,17 +955,19 @@ pub async fn sync_slides(
     .fetch_all(&mut *tx)
     .await?;
 
-    let temporary_assignments = build_temporary_order_assignments(&remaining_slide_ids);
+    let min_order_index = get_min_order_index(&mut tx, &session_id).await?;
+    let temporary_assignments =
+        build_temporary_order_assignments(&remaining_slide_ids, min_order_index);
     apply_order_assignments(&mut tx, &session_id, &temporary_assignments).await?;
 
     // Defensive sanity check — the [0, ∞) range should be completely empty.
     // If something still occupies a non-negative order_index, fail cleanly
     // rather than hitting a MySQL constraint violation.
-    let still_positive: Option<i32> = query_scalar::<_, Option<i32>>(
+    let still_positive: Option<i32> = query_scalar::<_, i32>(
         "SELECT order_index FROM slides WHERE session_id = ? AND order_index >= 0 LIMIT 1",
     )
     .bind(&session_id)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
 
     if let Some(conflicting_order) = still_positive {
@@ -979,7 +983,10 @@ pub async fn sync_slides(
     }
 
     // Phase 2: apply content/type/visibility changes while keeping all rows in negative space.
-    let mut next_temp_order = -(((temporary_assignments.len() as i32) + 1) * ORDER_STEP);
+    let mut next_temp_order = get_min_order_index(&mut tx, &session_id)
+        .await?
+        .unwrap_or(0)
+        .saturating_sub(ORDER_STEP);
     let mut final_slide_ids = Vec::with_capacity(payload.slides.len());
 
     for entry in &payload.slides {
@@ -1203,7 +1210,8 @@ async fn rebalance_slide_orders(tx: &mut Transaction<'_, MySql>, session_id: &st
         return Ok(());
     }
 
-    let temporary_assignments = build_temporary_order_assignments(&slide_ids);
+    let min_order_index = get_min_order_index(tx, session_id).await?;
+    let temporary_assignments = build_temporary_order_assignments(&slide_ids, min_order_index);
     let final_assignments = build_dense_order_assignments(&slide_ids);
 
     apply_order_assignments(tx, session_id, &temporary_assignments).await?;
@@ -1224,11 +1232,39 @@ pub(crate) fn collect_changed_slide_ids(
         .collect()
 }
 
-pub(crate) fn build_temporary_order_assignments(slide_ids: &[String]) -> Vec<(String, i32)> {
+async fn get_min_order_index(
+    tx: &mut Transaction<'_, MySql>,
+    session_id: &str,
+) -> Result<Option<i32>> {
+    query_scalar::<_, Option<i32>>("SELECT MIN(order_index) FROM slides WHERE session_id = ?")
+        .bind(session_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(Into::into)
+}
+
+fn compute_temporary_order_start(min_order_index: Option<i32>, slide_count: usize) -> i32 {
+    min_order_index
+        .unwrap_or(0)
+        .min(0)
+        .saturating_sub((slide_count as i32) * ORDER_STEP)
+}
+
+pub(crate) fn build_temporary_order_assignments(
+    slide_ids: &[String],
+    min_order_index: Option<i32>,
+) -> Vec<(String, i32)> {
+    let start = compute_temporary_order_start(min_order_index, slide_ids.len());
+
     slide_ids
         .iter()
         .enumerate()
-        .map(|(index, slide_id)| (slide_id.clone(), -(((index as i32) + 1) * ORDER_STEP)))
+        .map(|(index, slide_id)| {
+            (
+                slide_id.clone(),
+                start.saturating_add((index as i32) * ORDER_STEP),
+            )
+        })
         .collect()
 }
 
@@ -1463,6 +1499,35 @@ mod tests {
     #[test]
     fn compute_append_order_index_returns_zero_for_empty_session() {
         assert_eq!(compute_append_order_index(None), 0);
+    }
+
+    #[test]
+    fn build_temporary_order_assignments_uses_negative_range_below_zero() {
+        assert_eq!(
+            build_temporary_order_assignments(
+                &["a".to_string(), "b".to_string(), "c".to_string()],
+                Some(0),
+            ),
+            vec![
+                ("a".to_string(), -(ORDER_STEP * 3)),
+                ("b".to_string(), -(ORDER_STEP * 2)),
+                ("c".to_string(), -ORDER_STEP),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_temporary_order_assignments_stays_below_existing_negative_values() {
+        assert_eq!(
+            build_temporary_order_assignments(
+                &["a".to_string(), "b".to_string()],
+                Some(-ORDER_STEP),
+            ),
+            vec![
+                ("a".to_string(), -(ORDER_STEP * 3)),
+                ("b".to_string(), -(ORDER_STEP * 2)),
+            ]
+        );
     }
 
     #[test]
