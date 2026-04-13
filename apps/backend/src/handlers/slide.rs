@@ -1261,24 +1261,15 @@ pub(crate) async fn apply_order_assignments(
         return Ok(());
     }
 
-    let mut qb = QueryBuilder::<MySql>::new("UPDATE slides SET order_index = CASE id ");
     for (slide_id, order_index) in assignments {
-        qb.push("WHEN ");
-        qb.push_bind(slide_id);
-        qb.push(" THEN ");
-        qb.push_bind(order_index);
-        qb.push(" ");
+        sqlx::query("UPDATE slides SET order_index = ? WHERE session_id = ? AND id = ?")
+            .bind(order_index)
+            .bind(session_id)
+            .bind(slide_id)
+            .execute(&mut **tx)
+            .await?;
     }
-    qb.push("ELSE order_index END WHERE session_id = ");
-    qb.push_bind(session_id);
-    qb.push(" AND id IN (");
-    let mut separated = qb.separated(", ");
-    for (slide_id, _) in assignments {
-        separated.push_bind(slide_id);
-    }
-    qb.push(")");
 
-    qb.build().execute(&mut **tx).await?;
     Ok(())
 }
 
