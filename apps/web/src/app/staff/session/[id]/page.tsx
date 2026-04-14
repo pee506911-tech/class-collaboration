@@ -5,7 +5,7 @@ export const runtime = 'edge';
 import { SetStateAction, startTransition, useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { Slide, Session } from 'shared';
-import { syncSlides, getSlides, getSession, updateSession, goLiveSession, stopSession, ApiRequestError } from '@/lib/api';
+import { getSlides, getSession, updateSession, goLiveSession, stopSession, ApiRequestError } from '@/lib/api';
 import { Button } from '@/components/ui/button';
 import { Plus, Layout, BarChart2, Play, X, Smartphone, Share2, Settings, Users, Eye, Square, Copy, ExternalLink, Loader2 } from 'lucide-react';
 import Link from 'next/link';
@@ -25,6 +25,7 @@ import { SlideListItem } from '@/components/slide-list-item';
 import { getNextPreviewSlideId } from '@/lib/slide-preview-selection';
 import {
     normalizeSlides,
+    saveEditorDocumentDelta,
 } from '@/lib/editor-slide-sync';
 
 type EditorSlide = Slide & {
@@ -92,42 +93,6 @@ function getDefaultSlideContent(type: Slide['type']) {
     }
 
     return { title: 'Leaderboard' };
-}
-
-async function saveEditorDocument(
-    sessionId: string,
-    baseSlides: Slide[],
-    localSlides: EditorSlide[],
-) {
-    // Build base version map for optimistic concurrency
-    const baseVersions: Record<string, number> = {};
-    for (const slide of baseSlides) {
-        baseVersions[slide.id] = slide.version;
-    }
-
-    // Build the desired slide list: existing slides keep their server id,
-    // new slides send null id (server will assign one).
-    const desiredSlides = localSlides.map(slide => ({
-        id: slide.serverId ?? null,
-        type: slide.type,
-        content: slide.content,
-        isHidden: slide.isHidden ?? false,
-    }));
-
-    const savedSlides = await syncSlides(sessionId, desiredSlides, { baseVersions });
-
-    return localSlides.map((slide, index) => {
-        // Find the matching saved slide by position in the desired list
-        const savedSlide = savedSlides[index];
-        if (!savedSlide) {
-            throw new Error(`Missing server response for slide ${slide.id}`);
-        }
-
-        return {
-            ...savedSlide,
-            orderIndex: index,
-        } satisfies Slide;
-    });
 }
 
 function EditorContent({
@@ -422,7 +387,7 @@ function EditorContent({
         setSaveState('saving');
 
         try {
-            const savedSlides = await saveEditorDocument(id, baseSlides, localSnapshot);
+            const savedSlides = await saveEditorDocumentDelta(id, baseSlides, localSnapshot);
             setBaseSlides(savedSlides);
             void loadSlides();
 

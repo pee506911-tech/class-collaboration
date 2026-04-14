@@ -45,6 +45,50 @@ pub struct ReorderSlidesRequest {
     pub slide_ids: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+#[serde(tag = "op", rename_all = "camelCase")]
+pub enum SlideOperation {
+    Create {
+        #[serde(rename = "tempId")]
+        temp_id: String,
+        #[serde(rename = "type")]
+        slide_type: String,
+        content: serde_json::Value,
+        #[serde(rename = "isHidden", default)]
+        is_hidden: bool,
+        #[serde(rename = "insertAfterSlideId")]
+        insert_after_slide_id: Option<String>,
+    },
+    Update {
+        #[serde(rename = "slideId")]
+        slide_id: String,
+        #[serde(rename = "type")]
+        slide_type: Option<String>,
+        content: Option<serde_json::Value>,
+        #[serde(rename = "isHidden")]
+        is_hidden: Option<bool>,
+        #[serde(rename = "baseVersion")]
+        base_version: Option<i64>,
+    },
+    Move {
+        #[serde(rename = "slideId")]
+        slide_id: String,
+        #[serde(rename = "insertAfterSlideId")]
+        insert_after_slide_id: Option<String>,
+    },
+    Delete {
+        #[serde(rename = "slideId")]
+        slide_id: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplySlideOperationsRequest {
+    pub operations: Vec<SlideOperation>,
+    pub client_request_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSlidesBatchRequest {
@@ -67,6 +111,7 @@ pub struct BatchSlideUpdate {
     #[serde(rename = "type")]
     #[allow(dead_code)]
     pub slide_type: Option<String>,
+    pub is_hidden: Option<bool>,
     pub base_version: Option<i64>,
 }
 

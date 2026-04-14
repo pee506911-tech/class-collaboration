@@ -1,6 +1,7 @@
 import { Slide } from 'shared';
 
 import {
+    applySlideOperations,
     createSlide,
     deleteSlide,
     updateSlide,
@@ -26,6 +27,142 @@ export function normalizeSlides(slides: Slide[]): Slide[] {
 
 function areSlideContentsEqual(left: Slide['content'], right: Slide['content']) {
     return JSON.stringify(left) === JSON.stringify(right);
+}
+
+type DeltaEditorSlide = Slide & {
+    serverId?: string | null;
+};
+
+function insertSlideIdAfter(
+    slideIds: string[],
+    slideId: string,
+    insertAfterSlideId?: string | null,
+) {
+    const next = slideIds.filter((currentSlideId) => currentSlideId !== slideId);
+
+    if (!insertAfterSlideId) {
+        next.push(slideId);
+        return next;
+    }
+
+    const insertAfterIndex = next.indexOf(insertAfterSlideId);
+    if (insertAfterIndex === -1) {
+        next.push(slideId);
+        return next;
+    }
+
+    next.splice(insertAfterIndex + 1, 0, slideId);
+    return next;
+}
+
+export async function saveEditorDocumentDelta(
+    sessionId: string,
+    baseSlides: Slide[],
+    localSlides: DeltaEditorSlide[],
+): Promise<Slide[]> {
+    const baseSlidesById = new Map(baseSlides.map((slide) => [slide.id, slide]));
+    const desiredServerIds = new Set(
+        localSlides.flatMap((slide) => (slide.serverId ? [slide.serverId] : [])),
+    );
+
+    const updateOperations = localSlides.flatMap((slide) => {
+        if (!slide.serverId) {
+            return [];
+        }
+
+        const baseSlide = baseSlidesById.get(slide.serverId);
+        if (!baseSlide) {
+            throw new Error(`Missing base slide ${slide.serverId}`);
+        }
+
+        const changedType = slide.type !== baseSlide.type;
+        const changedContent = !areSlideContentsEqual(slide.content, baseSlide.content);
+        const changedVisibility = (slide.isHidden ?? false) !== (baseSlide.isHidden ?? false);
+
+        if (!changedType && !changedContent && !changedVisibility) {
+            return [];
+        }
+
+        return [{
+            op: 'update' as const,
+            slideId: slide.serverId,
+            content: slide.content,
+            ...(changedType ? { type: slide.type } : {}),
+            ...(changedVisibility ? { isHidden: slide.isHidden ?? false } : {}),
+            baseVersion: baseSlide.version,
+        }];
+    });
+
+    const createOperations: Array<{
+        op: 'create';
+        tempId: string;
+        type: string;
+        content: unknown;
+        isHidden?: boolean;
+        insertAfterSlideId?: string | null;
+    }> = [];
+    let currentSlideIds = baseSlides.map((slide) => slide.id);
+
+    for (let index = 0; index < localSlides.length; index += 1) {
+        const slide = localSlides[index];
+        if (slide.serverId) {
+            continue;
+        }
+
+        const insertAfterSlideId = index > 0 ? localSlides[index - 1]?.id ?? null : null;
+        createOperations.push({
+            op: 'create',
+            tempId: slide.id,
+            type: slide.type,
+            content: slide.content,
+            isHidden: slide.isHidden ?? false,
+            ...(insertAfterSlideId ? { insertAfterSlideId } : {}),
+        });
+        currentSlideIds = insertSlideIdAfter(currentSlideIds, slide.id, insertAfterSlideId);
+    }
+
+    const desiredSlideIds = localSlides.map((slide) => slide.id);
+    const moveOperations: Array<{
+        op: 'move';
+        slideId: string;
+        insertAfterSlideId?: string | null;
+    }> = [];
+
+    for (let index = 0; index < desiredSlideIds.length; index += 1) {
+        const desiredSlideId = desiredSlideIds[index];
+        if (currentSlideIds[index] === desiredSlideId) {
+            continue;
+        }
+
+        const insertAfterSlideId = index > 0 ? desiredSlideIds[index - 1] : null;
+        moveOperations.push({
+            op: 'move',
+            slideId: desiredSlideId,
+            ...(insertAfterSlideId ? { insertAfterSlideId } : {}),
+        });
+        currentSlideIds = currentSlideIds.filter((slideId) => slideId !== desiredSlideId);
+        currentSlideIds.splice(index, 0, desiredSlideId);
+    }
+
+    const deleteOperations = baseSlides
+        .filter((slide) => !desiredServerIds.has(slide.id))
+        .map((slide) => ({
+            op: 'delete' as const,
+            slideId: slide.id,
+        }));
+
+    const operations = [
+        ...updateOperations,
+        ...createOperations,
+        ...moveOperations,
+        ...deleteOperations,
+    ];
+
+    if (operations.length === 0) {
+        return normalizeSlides(baseSlides);
+    }
+
+    return normalizeSlides(await applySlideOperations(sessionId, operations));
 }
 
 export function reconcileCreatedSlide({

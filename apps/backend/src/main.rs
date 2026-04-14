@@ -336,6 +336,10 @@ async fn main() -> anyhow::Result<()> {
             axum::routing::put(handlers::slide::update_slides_batch),
         )
         .route(
+            "/api/sessions/:id/slides/apply",
+            axum::routing::patch(handlers::slide::apply_slide_operations),
+        )
+        .route(
             "/api/sessions/:session_id/slides/:slide_id/visibility",
             axum::routing::patch(handlers::live::update_slide_visibility),
         )

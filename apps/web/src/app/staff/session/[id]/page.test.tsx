@@ -9,7 +9,7 @@ const dndState = vi.hoisted(() => ({
 }));
 
 const apiMockState = vi.hoisted(() => ({
-    syncSlides: vi.fn(),
+    applySlideOperations: vi.fn(),
     getSession: vi.fn(),
     getSlides: vi.fn(),
     updateSession: vi.fn(),
@@ -92,7 +92,7 @@ vi.mock('@/lib/api', async () => {
     const actual = await vi.importActual<typeof import('@/lib/api')>('@/lib/api');
     return {
         ...actual,
-        syncSlides: apiMockState.syncSlides,
+        applySlideOperations: apiMockState.applySlideOperations,
         getSession: apiMockState.getSession,
         getSlides: apiMockState.getSlides,
         updateSession: apiMockState.updateSession,
@@ -215,10 +215,10 @@ async function duplicateAndEditDraft(title: string) {
     });
 }
 
-describe('staff editor sync save flow', () => {
+describe('staff editor delta save flow', () => {
     beforeEach(() => {
         dndState.dragEndHandlers = [];
-        apiMockState.syncSlides.mockReset();
+        apiMockState.applySlideOperations.mockReset();
         apiMockState.getSession.mockReset();
         apiMockState.getSlides.mockReset();
         apiMockState.updateSession.mockReset();
@@ -233,7 +233,7 @@ describe('staff editor sync save flow', () => {
 
         apiMockState.getSession.mockResolvedValue(makeSession());
         apiMockState.getSlides.mockResolvedValue([makeSlide()]);
-        apiMockState.syncSlides.mockResolvedValue([makeSlide()]);
+        apiMockState.applySlideOperations.mockResolvedValue([makeSlide()]);
         apiMockState.updateSession.mockResolvedValue(undefined);
         apiMockState.goLiveSession.mockResolvedValue(undefined);
         apiMockState.stopSession.mockResolvedValue(undefined);
@@ -247,12 +247,12 @@ describe('staff editor sync save flow', () => {
         expect(editorMockState.latestSlide?.serverId).toBeNull();
         expect(editorMockState.latestSlide?.content.title).toBe('Edited duplicate title');
         expect(screen.getByText('Not saved')).toBeInTheDocument();
-        expect(apiMockState.syncSlides).not.toHaveBeenCalled();
+        expect(apiMockState.applySlideOperations).not.toHaveBeenCalled();
     });
 
     it('preserves the local duplicate draft on retryable save failures', async () => {
         const { ApiRequestError } = await import('@/lib/api');
-        apiMockState.syncSlides.mockRejectedValueOnce(new ApiRequestError('Database error', { status: 500, retryable: true }));
+        apiMockState.applySlideOperations.mockRejectedValueOnce(new ApiRequestError('Database error', { status: 500, retryable: true }));
 
         await renderPage();
         await duplicateAndEditDraft('Edited duplicate title');
@@ -263,7 +263,7 @@ describe('staff editor sync save flow', () => {
             expect(toastMock.error).toHaveBeenCalled();
         });
 
-        expect(apiMockState.syncSlides).toHaveBeenCalledTimes(1);
+        expect(apiMockState.applySlideOperations).toHaveBeenCalledTimes(1);
         expect(apiMockState.getSlides).toHaveBeenCalledTimes(1);
         expect(editorMockState.latestSlide?.id).toMatch(/^temp-/);
         expect(editorMockState.latestSlide?.content.title).toBe('Edited duplicate title');
@@ -272,7 +272,7 @@ describe('staff editor sync save flow', () => {
 
     it('rebases to the latest server snapshot after a 409 save conflict', async () => {
         const { ApiRequestError } = await import('@/lib/api');
-        apiMockState.syncSlides.mockRejectedValueOnce(
+        apiMockState.applySlideOperations.mockRejectedValueOnce(
             new ApiRequestError('Slide has changed on the server', { status: 409, retryable: false }),
         );
         apiMockState.getSlides

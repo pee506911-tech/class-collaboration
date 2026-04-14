@@ -49,6 +49,7 @@ mod tests {
             slide_id: slide_id.to_string(),
             content,
             slide_type: None,
+            is_hidden: None,
             base_version,
         }
     }

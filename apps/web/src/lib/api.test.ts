@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ApiRequestError, getSession, getSlides, publicSetCurrentSlide, updateSlide } from '@/lib/api';
+import { ApiRequestError, getSession, getSlides, publicSetCurrentSlide, syncSlides, updateSlide } from '@/lib/api';
 
 const originalFetch = global.fetch;
 
@@ -194,6 +194,72 @@ describe('getSlides', () => {
                 retryable: false,
             }),
         );
+    });
+});
+
+describe('syncSlides', () => {
+    afterEach(() => {
+        global.fetch = originalFetch;
+        vi.restoreAllMocks();
+        vi.useRealTimers();
+    });
+
+    it('allows long-running sync responses beyond the default timeout', async () => {
+        vi.useFakeTimers();
+
+        const fetchMock = vi.fn().mockImplementation((_url: string, options?: RequestInit) => {
+            return new Promise<Response>((resolve, reject) => {
+                const signal = options?.signal;
+                const onAbort = () => reject(new DOMException('The operation was aborted.', 'AbortError'));
+
+                if (signal?.aborted) {
+                    onAbort();
+                    return;
+                }
+
+                signal?.addEventListener('abort', onAbort, { once: true });
+
+                setTimeout(() => {
+                    signal?.removeEventListener('abort', onAbort);
+                    resolve(mockJsonResponse({
+                        success: true,
+                        data: {
+                            slides: [
+                                {
+                                    id: 'slide-1',
+                                    sessionId: 'session-1',
+                                    type: 'static',
+                                    content: { title: 'Saved after 20s' },
+                                    orderIndex: 0,
+                                    isHidden: false,
+                                    version: 5,
+                                },
+                            ],
+                            stateVersion: 9,
+                        },
+                    }));
+                }, 20000);
+            });
+        });
+        global.fetch = fetchMock as typeof fetch;
+
+        const syncPromise = syncSlides('session-1', [
+            {
+                id: 'slide-1',
+                type: 'static',
+                content: { title: 'Saved after 20s' },
+                isHidden: false,
+            },
+        ]);
+
+        await vi.advanceTimersByTimeAsync(20000);
+
+        await expect(syncPromise).resolves.toMatchObject([
+            expect.objectContaining({
+                id: 'slide-1',
+                version: 5,
+            }),
+        ]);
     });
 });
 

@@ -75,7 +75,8 @@ mod session_serde_tests {
 #[cfg(test)]
 mod slide_serde_tests {
     use crate::models::slide::{
-        CreateSlideRequest, CreateSlidesBatchRequest, ReorderSlidesRequest, UpdateSlideRequest,
+        ApplySlideOperationsRequest, CreateSlideRequest, CreateSlidesBatchRequest,
+        ReorderSlidesRequest, UpdateSlideRequest,
     };
     use serde_json;
 
@@ -170,6 +171,41 @@ mod slide_serde_tests {
         let json = serde_json::json!({ "slides": [{ "type": "poll", "content": {} }] });
         let req: Result<CreateSlidesBatchRequest, _> = serde_json::from_value(json);
         assert!(req.is_ok());
+    }
+
+    #[test]
+    fn apply_slide_operations_request_deserializes_mixed_operations() {
+        let json = serde_json::json!({
+            "operations": [
+                {
+                    "op": "update",
+                    "slideId": "slide-1",
+                    "content": { "title": "Updated" },
+                    "isHidden": true,
+                    "baseVersion": 4
+                },
+                {
+                    "op": "create",
+                    "tempId": "temp-1",
+                    "type": "static",
+                    "content": { "title": "Created" },
+                    "insertAfterSlideId": "slide-1"
+                },
+                {
+                    "op": "move",
+                    "slideId": "temp-1",
+                    "insertAfterSlideId": null
+                },
+                {
+                    "op": "delete",
+                    "slideId": "slide-2"
+                }
+            ],
+            "clientRequestId": "apply-123"
+        });
+
+        let req: Result<ApplySlideOperationsRequest, _> = serde_json::from_value(json);
+        assert!(req.is_ok(), "{req:?}");
     }
 }
 

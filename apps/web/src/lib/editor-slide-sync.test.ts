@@ -7,9 +7,11 @@ import {
     commitReorderSlides,
     createSlideCreateCommitter,
     createSlideEditCommitter,
+    saveEditorDocumentDelta,
 } from './editor-slide-sync';
 
 const apiMocks = vi.hoisted(() => ({
+    applySlideOperations: vi.fn(),
     createSlide: vi.fn(),
     deleteSlide: vi.fn(),
     reorderSlides: vi.fn(),
@@ -36,6 +38,7 @@ async function flushQueueTurn() {
 
 describe('createSlideEditCommitter', () => {
     beforeEach(() => {
+        apiMocks.applySlideOperations.mockReset();
         apiMocks.createSlide.mockReset();
         apiMocks.deleteSlide.mockReset();
         apiMocks.reorderSlides.mockReset();
@@ -89,6 +92,7 @@ describe('createSlideEditCommitter', () => {
 
 describe('slide structural commit helpers', () => {
     beforeEach(() => {
+        apiMocks.applySlideOperations.mockReset();
         apiMocks.createSlide.mockReset();
         apiMocks.deleteSlide.mockReset();
         apiMocks.reorderSlides.mockReset();
@@ -283,5 +287,178 @@ describe('slide structural commit helpers', () => {
         await expect(
             commitReorderSlides('session-1', ['slide-2', 'slide-1']),
         ).rejects.toThrow('reorder failed');
+    });
+
+    it('builds delta operations instead of full-document sync for mixed edits', async () => {
+        apiMocks.applySlideOperations.mockResolvedValueOnce([
+            {
+                id: 'slide-1',
+                sessionId: 'session-1',
+                type: 'static',
+                content: { title: 'Updated A' },
+                orderIndex: 0,
+                isHidden: false,
+                version: 2,
+            },
+            {
+                id: 'slide-3',
+                sessionId: 'session-1',
+                type: 'static',
+                content: { title: 'New C' },
+                orderIndex: 1,
+                isHidden: false,
+                version: 1,
+            },
+        ]);
+
+        const savedSlides = await saveEditorDocumentDelta(
+            'session-1',
+            [
+                {
+                    id: 'slide-1',
+                    sessionId: 'session-1',
+                    type: 'static',
+                    content: { title: 'Original A' },
+                    orderIndex: 0,
+                    isHidden: false,
+                    version: 1,
+                },
+                {
+                    id: 'slide-2',
+                    sessionId: 'session-1',
+                    type: 'static',
+                    content: { title: 'Original B' },
+                    orderIndex: 1,
+                    isHidden: false,
+                    version: 1,
+                },
+            ],
+            [
+                {
+                    id: 'slide-1',
+                    serverId: 'slide-1',
+                    sessionId: 'session-1',
+                    type: 'static',
+                    content: { title: 'Updated A' },
+                    orderIndex: 0,
+                    isHidden: false,
+                    version: 1,
+                },
+                {
+                    id: 'temp-1',
+                    serverId: null,
+                    sessionId: 'session-1',
+                    type: 'static',
+                    content: { title: 'New C' },
+                    orderIndex: 1,
+                    isHidden: false,
+                    version: 0,
+                },
+            ],
+        );
+
+        expect(apiMocks.applySlideOperations).toHaveBeenCalledWith(
+            'session-1',
+            [
+                {
+                    op: 'update',
+                    slideId: 'slide-1',
+                    content: { title: 'Updated A' },
+                    baseVersion: 1,
+                },
+                {
+                    op: 'create',
+                    tempId: 'temp-1',
+                    type: 'static',
+                    content: { title: 'New C' },
+                    isHidden: false,
+                    insertAfterSlideId: 'slide-1',
+                },
+                {
+                    op: 'delete',
+                    slideId: 'slide-2',
+                },
+            ],
+        );
+        expect(savedSlides).toHaveLength(2);
+        expect(savedSlides[0].content).toEqual({ title: 'Updated A' });
+        expect(savedSlides[1].content).toEqual({ title: 'New C' });
+    });
+
+    it('uses move operations to place a newly created front slide without renumbering the whole deck', async () => {
+        apiMocks.applySlideOperations.mockResolvedValueOnce([
+            {
+                id: 'slide-9',
+                sessionId: 'session-1',
+                type: 'static',
+                content: { title: 'Front' },
+                orderIndex: 0,
+                isHidden: false,
+                version: 1,
+            },
+            {
+                id: 'slide-1',
+                sessionId: 'session-1',
+                type: 'static',
+                content: { title: 'A' },
+                orderIndex: 1,
+                isHidden: false,
+                version: 1,
+            },
+        ]);
+
+        await saveEditorDocumentDelta(
+            'session-1',
+            [
+                {
+                    id: 'slide-1',
+                    sessionId: 'session-1',
+                    type: 'static',
+                    content: { title: 'A' },
+                    orderIndex: 0,
+                    isHidden: false,
+                    version: 1,
+                },
+            ],
+            [
+                {
+                    id: 'temp-front',
+                    serverId: null,
+                    sessionId: 'session-1',
+                    type: 'static',
+                    content: { title: 'Front' },
+                    orderIndex: 0,
+                    isHidden: false,
+                    version: 0,
+                },
+                {
+                    id: 'slide-1',
+                    serverId: 'slide-1',
+                    sessionId: 'session-1',
+                    type: 'static',
+                    content: { title: 'A' },
+                    orderIndex: 1,
+                    isHidden: false,
+                    version: 1,
+                },
+            ],
+        );
+
+        expect(apiMocks.applySlideOperations).toHaveBeenCalledWith(
+            'session-1',
+            [
+                {
+                    op: 'create',
+                    tempId: 'temp-front',
+                    type: 'static',
+                    content: { title: 'Front' },
+                    isHidden: false,
+                },
+                {
+                    op: 'move',
+                    slideId: 'temp-front',
+                },
+            ],
+        );
     });
 });

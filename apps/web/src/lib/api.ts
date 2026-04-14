@@ -33,7 +33,10 @@ export class ApiRequestError extends Error {
 
 async function fetchWithRetry(
     url: string,
-    options: RequestInit = {},
+    options: RequestInit & {
+        timeoutMs?: number;
+        clientRequestId?: string;
+    } = {},
     retries = RETRY_CONFIG.maxRetries
 ): Promise<Response> {
     const method = (options.method || 'GET').toUpperCase();
@@ -46,7 +49,7 @@ async function fetchWithRetry(
 
     const { response } = await httpFetch(url, {
         ...options,
-        timeoutMs: 15000,
+        timeoutMs: options.timeoutMs ?? 15000,
         idempotent: isIdempotent,
         retry: isIdempotent ? { maxRetries: retries, baseDelayMs: RETRY_CONFIG.baseDelay, maxDelayMs: RETRY_CONFIG.maxDelay } : false,
         throwOnHttpError: false,
@@ -357,7 +360,7 @@ export async function updateSlide(
 
 export async function updateSlidesBatch(
     sessionId: string,
-    updates: Array<{ slideId: string; content: unknown; type?: string; baseVersion?: number }>,
+    updates: Array<{ slideId: string; content: unknown; type?: string; isHidden?: boolean; baseVersion?: number }>,
 ): Promise<Slide[]> {
     let res: Response;
 
@@ -370,6 +373,7 @@ export async function updateSlidesBatch(
                     slideId: u.slideId,
                     content: u.content,
                     ...(u.type ? { type: u.type } : {}),
+                    ...(u.isHidden !== undefined ? { isHidden: u.isHidden } : {}),
                     ...(u.baseVersion !== undefined ? { baseVersion: u.baseVersion } : {}),
                 })),
             }),
@@ -381,6 +385,54 @@ export async function updateSlidesBatch(
     if (!res.ok) throw await buildApiError(res, 'Failed to batch update slides');
     const json: ApiResponse<{ slides: Slide[]; stateVersion: number }> = await res.json();
     if (!json.success) throw new ApiRequestError(json.error || 'Failed to batch update slides', { status: res.status });
+    return json.data.slides;
+}
+
+export async function applySlideOperations(
+    sessionId: string,
+    operations: Array<
+        | {
+            op: 'create';
+            tempId: string;
+            type: string;
+            content: unknown;
+            isHidden?: boolean;
+            insertAfterSlideId?: string | null;
+        }
+        | {
+            op: 'update';
+            slideId: string;
+            content?: unknown;
+            type?: string;
+            isHidden?: boolean;
+            baseVersion?: number;
+        }
+        | {
+            op: 'move';
+            slideId: string;
+            insertAfterSlideId?: string | null;
+        }
+        | {
+            op: 'delete';
+            slideId: string;
+        }
+    >,
+): Promise<Slide[]> {
+    let res: Response;
+
+    try {
+        res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides/apply`, {
+            method: 'PATCH',
+            headers: getHeaders(),
+            body: JSON.stringify({ operations }),
+        });
+    } catch (error) {
+        throw toApiRequestError(error, 'Failed to apply slide changes');
+    }
+    if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
+    if (!res.ok) throw await buildApiError(res, 'Failed to apply slide changes');
+    const json: ApiResponse<{ slides: Slide[]; stateVersion: number }> = await res.json();
+    if (!json.success) throw new ApiRequestError(json.error || 'Failed to apply slide changes', { status: res.status });
     return json.data.slides;
 }
 
@@ -469,10 +521,14 @@ export async function syncSlides(
     },
 ): Promise<Slide[]> {
     let res: Response;
+    // Structural sync rewrites the full slide document and can legitimately take
+    // longer than the default request timeout on larger decks.
+    const syncTimeoutMs = 60000;
 
     try {
         res = await fetchWithRetry(`${API_URL}/sessions/${sessionId}/slides/sync`, {
             method: 'PATCH',
+            timeoutMs: syncTimeoutMs,
             headers: getHeaders(),
             body: JSON.stringify({
                 slides: slides.map(s => ({

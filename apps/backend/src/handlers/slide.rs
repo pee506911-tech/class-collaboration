@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use axum::{
     extract::{Path, State},
@@ -15,9 +15,10 @@ use crate::error::{AppError, Result};
 use crate::middleware::auth::AuthUser;
 use crate::models::response::ApiResponse;
 use crate::models::slide::{
-    CreateSlideRequest, CreateSlidesBatchRequest, CreateSlidesBatchResponse, ReorderSlidesRequest,
-    Slide, SyncSlideEntry, SyncSlidesRequest, SyncSlidesResponse, UpdateSlideRequest,
-    UpdateSlidesBatchRequest, UpdateSlidesBatchResponse,
+    ApplySlideOperationsRequest, CreateSlideRequest, CreateSlidesBatchRequest,
+    CreateSlidesBatchResponse, ReorderSlidesRequest, Slide, SlideOperation, SyncSlideEntry,
+    SyncSlidesRequest, SyncSlidesResponse, UpdateSlideRequest, UpdateSlidesBatchRequest,
+    UpdateSlidesBatchResponse,
 };
 
 const ORDER_STEP: i32 = 1024;
@@ -102,6 +103,35 @@ async fn compute_insert_order_index(
     match insert_after_slide_id {
         Some(after_id) => allocate_order_after(tx, session_id, after_id).await,
         None => get_append_order_index(tx, session_id).await,
+    }
+}
+
+fn resolve_slide_operation_ref(
+    reference: &str,
+    created_slide_ids: &HashMap<String, String>,
+) -> String {
+    created_slide_ids
+        .get(reference)
+        .cloned()
+        .unwrap_or_else(|| reference.to_string())
+}
+
+async fn allocate_front_order_index(
+    tx: &mut Transaction<'_, MySql>,
+    session_id: &str,
+) -> Result<i32> {
+    let min_order_index = get_min_order_index(tx, session_id).await?;
+
+    match min_order_index {
+        None => Ok(0),
+        Some(i32::MIN) => {
+            rebalance_slide_orders(tx, session_id).await?;
+            let rebalanced_min_order_index = get_min_order_index(tx, session_id).await?;
+            Ok(rebalanced_min_order_index
+                .unwrap_or(0)
+                .saturating_sub(ORDER_STEP))
+        }
+        Some(value) => Ok(value.saturating_sub(ORDER_STEP)),
     }
 }
 
@@ -473,16 +503,30 @@ pub async fn update_slides_batch(
 
     // Bulk UPDATE all slides
     for update in &payload.updates {
-        let expected_version = existing_slides_map
+        let existing_slide = existing_slides_map
             .get(&update.slide_id)
-            .map(|s| s.version)
-            .unwrap_or(0);
+            .expect("existing slide should be present after pre-validation");
+        let expected_version = existing_slide.version;
+        let next_slide_type = update
+            .slide_type
+            .clone()
+            .unwrap_or_else(|| existing_slide.slide_type.clone());
+        let next_is_hidden = update.is_hidden.unwrap_or(existing_slide.is_hidden);
+
+        if next_slide_type == existing_slide.slide_type
+            && next_is_hidden == existing_slide.is_hidden
+            && existing_slide.content == sqlx::types::Json(update.content.clone())
+        {
+            continue;
+        }
 
         let result = sqlx::query(
-            "UPDATE slides SET content = ?, version = version + 1 \
+            "UPDATE slides SET type = ?, content = ?, is_hidden = ?, version = version + 1 \
              WHERE id = ? AND session_id = ? AND version = ?",
         )
+        .bind(&next_slide_type)
         .bind(sqlx::types::Json(&update.content))
+        .bind(next_is_hidden)
         .bind(&update.slide_id)
         .bind(&session_id)
         .bind(expected_version)
@@ -850,6 +894,339 @@ pub async fn reorder_slides(
     tx.commit().await?;
 
     broadcast_slides_update(&app_state, &session_id, &[]).await;
+    app_state
+        .session_service
+        .invalidate_session_cache(&session_id)
+        .await;
+
+    Ok(crate::services::wal::queued_success_response(&response))
+}
+
+/// Apply a compact set of slide operations atomically.
+///
+/// This is the fast-path save endpoint for the staff editor:
+/// - update only changed slides,
+/// - create only new slides,
+/// - move only slides whose relative position changed,
+/// - delete only removed slides.
+///
+/// All operations execute in one transaction and return the final authoritative
+/// slide list ordered by `order_index`.
+pub async fn apply_slide_operations(
+    State(app_state): State<crate::AppState>,
+    AuthUser { user_id, .. }: AuthUser,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    Json(payload): Json<ApplySlideOperationsRequest>,
+) -> Result<impl IntoResponse> {
+    let pool = app_state.db_pool.pool_fast_fail().await?;
+    verify_session_ownership(&pool, &session_id, &user_id).await?;
+
+    if payload.operations.is_empty() {
+        return Err(AppError::Input("No slide operations to apply".to_string()));
+    }
+    if payload.operations.len() > MAX_BATCH_SLIDE_COUNT * 4 {
+        return Err(AppError::Input(format!(
+            "Too many slide operations in apply request (max {})",
+            MAX_BATCH_SLIDE_COUNT * 4
+        )));
+    }
+
+    let client_request_id =
+        resolved_client_request_id(payload.client_request_id.clone(), Some(&headers))?;
+    if let Some(existing) = crate::services::wal::fetch_replay_response::<SyncSlidesResponse>(
+        &pool,
+        &session_id,
+        crate::services::wal::WalOpType::ApplySlideOperations,
+        &client_request_id,
+    )
+    .await?
+    {
+        return Ok(crate::services::wal::queued_success_response(&existing));
+    }
+
+    tracing::info!(
+        session_id = %session_id,
+        client_request_id = %client_request_id,
+        operation_count = payload.operations.len(),
+        "APPLY_AUDIT_START"
+    );
+
+    let mut tx = pool.begin().await?;
+    lock_session(&mut tx, &session_id).await?;
+
+    if let Some(existing) = crate::services::wal::fetch_replay_response::<SyncSlidesResponse>(
+        &pool,
+        &session_id,
+        crate::services::wal::WalOpType::ApplySlideOperations,
+        &client_request_id,
+    )
+    .await?
+    {
+        tracing::info!(
+            session_id = %session_id,
+            client_request_id = %client_request_id,
+            "APPLY_AUDIT_REPLAY_AFTER_LOCK"
+        );
+        tx.rollback().await?;
+        return Ok(crate::services::wal::queued_success_response(&existing));
+    }
+
+    let mut created_slide_ids = HashMap::new();
+    let mut create_count = 0usize;
+    let mut update_count = 0usize;
+    let mut move_count = 0usize;
+    let mut delete_count = 0usize;
+
+    for (operation_index, operation) in payload.operations.iter().enumerate() {
+        match operation {
+            SlideOperation::Create {
+                temp_id,
+                slide_type,
+                content,
+                is_hidden,
+                insert_after_slide_id,
+            } => {
+                if created_slide_ids.contains_key(temp_id) {
+                    return Err(AppError::Input(format!(
+                        "Duplicate temp slide id in apply request: {}",
+                        temp_id
+                    )));
+                }
+
+                let resolved_insert_after_slide_id = insert_after_slide_id
+                    .as_deref()
+                    .map(|reference| resolve_slide_operation_ref(reference, &created_slide_ids));
+
+                let order_index = compute_insert_order_index(
+                    &mut tx,
+                    &session_id,
+                    resolved_insert_after_slide_id.as_deref(),
+                )
+                .await?;
+                let slide_id = Uuid::new_v4().to_string();
+                let row_client_request_id = derive_slide_row_client_request_id(
+                    &client_request_id,
+                    "apply_slide_operations",
+                    operation_index,
+                );
+
+                tracing::info!(
+                    session_id = %session_id,
+                    client_request_id = %client_request_id,
+                    operation_index,
+                    temp_id = %temp_id,
+                    slide_id = %slide_id,
+                    insert_after_slide_id = ?resolved_insert_after_slide_id,
+                    order_index,
+                    "APPLY_AUDIT_CREATE"
+                );
+
+                sqlx::query(
+                    "INSERT INTO slides (id, session_id, type, content, order_index, is_hidden, client_request_id)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)",
+                )
+                .bind(&slide_id)
+                .bind(&session_id)
+                .bind(slide_type)
+                .bind(sqlx::types::Json(content.clone()))
+                .bind(order_index)
+                .bind(*is_hidden)
+                .bind(&row_client_request_id)
+                .execute(&mut *tx)
+                .await?;
+
+                created_slide_ids.insert(temp_id.clone(), slide_id);
+                create_count += 1;
+            }
+            SlideOperation::Update {
+                slide_id,
+                slide_type,
+                content,
+                is_hidden,
+                base_version,
+            } => {
+                let resolved_slide_id = resolve_slide_operation_ref(slide_id, &created_slide_ids);
+                let existing_slide = load_slide(&mut tx, &resolved_slide_id, &session_id).await?;
+
+                if let Some(expected_version) = base_version {
+                    if *expected_version != existing_slide.version {
+                        return Err(build_slide_version_conflict(
+                            &resolved_slide_id,
+                            existing_slide.version,
+                        ));
+                    }
+                }
+
+                let next_slide_type = slide_type
+                    .clone()
+                    .unwrap_or_else(|| existing_slide.slide_type.clone());
+                let next_content = content
+                    .clone()
+                    .unwrap_or_else(|| existing_slide.content.0.clone());
+                let next_is_hidden = (*is_hidden).unwrap_or(existing_slide.is_hidden);
+
+                if next_slide_type == existing_slide.slide_type
+                    && next_is_hidden == existing_slide.is_hidden
+                    && sqlx::types::Json(next_content.clone()) == existing_slide.content
+                {
+                    continue;
+                }
+
+                let expected_version = (*base_version).unwrap_or(existing_slide.version);
+                let result = sqlx::query(
+                    "UPDATE slides SET type = ?, content = ?, is_hidden = ?, version = version + 1
+                     WHERE id = ? AND session_id = ? AND version = ?",
+                )
+                .bind(&next_slide_type)
+                .bind(sqlx::types::Json(&next_content))
+                .bind(next_is_hidden)
+                .bind(&resolved_slide_id)
+                .bind(&session_id)
+                .bind(expected_version)
+                .execute(&mut *tx)
+                .await?;
+
+                if result.rows_affected() == 0 {
+                    let current_version = query_scalar::<_, i64>(
+                        "SELECT version FROM slides WHERE id = ? AND session_id = ?",
+                    )
+                    .bind(&resolved_slide_id)
+                    .bind(&session_id)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .unwrap_or(expected_version);
+
+                    return Err(build_slide_version_conflict(
+                        &resolved_slide_id,
+                        current_version,
+                    ));
+                }
+
+                update_count += 1;
+            }
+            SlideOperation::Move {
+                slide_id,
+                insert_after_slide_id,
+            } => {
+                let resolved_slide_id = resolve_slide_operation_ref(slide_id, &created_slide_ids);
+                load_slide(&mut tx, &resolved_slide_id, &session_id).await?;
+
+                let resolved_insert_after_slide_id = insert_after_slide_id
+                    .as_deref()
+                    .map(|reference| resolve_slide_operation_ref(reference, &created_slide_ids));
+
+                if resolved_insert_after_slide_id.as_deref() == Some(resolved_slide_id.as_str()) {
+                    return Err(AppError::Input(
+                        "Slide cannot be moved after itself".to_string(),
+                    ));
+                }
+
+                let order_index = match resolved_insert_after_slide_id.as_deref() {
+                    Some(after_slide_id) => {
+                        allocate_order_after(&mut tx, &session_id, after_slide_id).await?
+                    }
+                    None => allocate_front_order_index(&mut tx, &session_id).await?,
+                };
+
+                tracing::info!(
+                    session_id = %session_id,
+                    client_request_id = %client_request_id,
+                    operation_index,
+                    slide_id = %resolved_slide_id,
+                    insert_after_slide_id = ?resolved_insert_after_slide_id,
+                    order_index,
+                    "APPLY_AUDIT_MOVE"
+                );
+
+                sqlx::query("UPDATE slides SET order_index = ? WHERE id = ? AND session_id = ?")
+                    .bind(order_index)
+                    .bind(&resolved_slide_id)
+                    .bind(&session_id)
+                    .execute(&mut *tx)
+                    .await?;
+
+                move_count += 1;
+            }
+            SlideOperation::Delete { slide_id } => {
+                let resolved_slide_id = resolve_slide_operation_ref(slide_id, &created_slide_ids);
+                tracing::info!(
+                    session_id = %session_id,
+                    client_request_id = %client_request_id,
+                    operation_index,
+                    slide_id = %resolved_slide_id,
+                    "APPLY_AUDIT_DELETE"
+                );
+
+                let deleted = sqlx::query("DELETE FROM slides WHERE id = ? AND session_id = ?")
+                    .bind(&resolved_slide_id)
+                    .bind(&session_id)
+                    .execute(&mut *tx)
+                    .await?;
+
+                if deleted.rows_affected() == 0 {
+                    return Err(AppError::NotFound(format!(
+                        "Slide {} not found",
+                        resolved_slide_id
+                    )));
+                }
+
+                delete_count += 1;
+            }
+        }
+    }
+
+    sqlx::query("UPDATE sessions SET state_version = state_version + 1 WHERE id = ?")
+        .bind(&session_id)
+        .execute(&mut *tx)
+        .await?;
+
+    let final_slides: Vec<Slide> = query_as::<_, Slide>(
+        "SELECT id, session_id, type, content, order_index, is_hidden, version \
+         FROM slides WHERE session_id = ? ORDER BY order_index ASC, id ASC",
+    )
+    .bind(&session_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let state_version = query_scalar::<_, i64>("SELECT state_version FROM sessions WHERE id = ?")
+        .bind(&session_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+    tracing::info!(
+        session_id = %session_id,
+        client_request_id = %client_request_id,
+        create_count,
+        update_count,
+        move_count,
+        delete_count,
+        final_slide_count = final_slides.len(),
+        state_version,
+        "APPLY_AUDIT_SUCCESS"
+    );
+
+    let response = SyncSlidesResponse {
+        slides: final_slides.clone(),
+        state_version,
+    };
+
+    sqlx::query(
+        "INSERT IGNORE INTO wal_request_replays (session_id, op_type, client_request_id, response_payload)
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(&session_id)
+    .bind(crate::services::wal::WalOpType::ApplySlideOperations.to_string())
+    .bind(&client_request_id)
+    .bind(sqlx::types::Json(
+        serde_json::to_value(&response).expect("apply slide operations response should serialize"),
+    ))
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    broadcast_slides_update(&app_state, &session_id, &final_slides).await;
     app_state
         .session_service
         .invalidate_session_cache(&session_id)
