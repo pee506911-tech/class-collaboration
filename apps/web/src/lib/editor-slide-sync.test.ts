@@ -456,7 +456,8 @@ describe('slide structural commit helpers', () => {
                 },
                 {
                     op: 'move',
-                    slideId: 'temp-front',
+                    slideId: 'slide-1',
+                    insertAfterSlideId: null,
                 },
             ],
         );

@@ -129,21 +129,47 @@ export async function saveEditorDocumentDelta(
         insertAfterSlideId?: string | null;
     }> = [];
 
+    // Build a mapping from local ID to server ID for slides that have been saved
+    const localToServerId = new Map<string, string>();
+    for (const slide of localSlides) {
+        if (slide.serverId) {
+            localToServerId.set(slide.id, slide.serverId);
+        }
+    }
+
+    // Convert currentSlideIds to use server IDs where available
+    const currentSlideIdsWithServer = currentSlideIds.map(id => localToServerId.get(id) ?? id);
+
     for (let index = 0; index < desiredSlideIds.length; index += 1) {
         const desiredSlideId = desiredSlideIds[index];
-        if (currentSlideIds[index] === desiredSlideId) {
+        const desiredServerId = localToServerId.get(desiredSlideId);
+
+        // Skip temp slides - they can't be moved
+        if (!desiredServerId) {
             continue;
         }
 
-        const previousSlide = localSlides[index - 1];
-        const insertAfterSlideId = index > 0 ? (previousSlide?.serverId ?? previousSlide?.id ?? null) : null;
+        if (currentSlideIdsWithServer[index] === desiredServerId) {
+            continue;
+        }
+
+        // Find the previous server slide to use as insertAfterSlideId
+        let insertAfterSlideId: string | null = null;
+        for (let i = index - 1; i >= 0; i--) {
+            const prevServerId = localToServerId.get(desiredSlideIds[i]);
+            if (prevServerId) {
+                insertAfterSlideId = prevServerId;
+                break;
+            }
+        }
+
         moveOperations.push({
             op: 'move',
-            slideId: desiredSlideId,
-            ...(insertAfterSlideId ? { insertAfterSlideId } : {}),
+            slideId: desiredServerId,
+            insertAfterSlideId,
         });
-        currentSlideIds = currentSlideIds.filter((slideId) => slideId !== desiredSlideId);
-        currentSlideIds.splice(index, 0, desiredSlideId);
+        currentSlideIdsWithServer.splice(index, 1);
+        currentSlideIdsWithServer.splice(index, 0, desiredServerId);
     }
 
     const deleteOperations = baseSlides
