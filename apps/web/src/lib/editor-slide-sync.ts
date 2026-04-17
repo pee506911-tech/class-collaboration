@@ -125,13 +125,24 @@ export async function saveEditorDocumentDelta(
         }
 
         const previousSlide = localSlides[index - 1];
-        const insertAfterSlideId = index > 0 ? (previousSlide?.serverId ?? previousSlide?.id ?? null) : null;
+        // Use serverId if it exists in baseSlides, otherwise use local ID to avoid
+        // "Insert-after slide not found" errors when the slide was just created
+        // in a previous save but baseSlides weren't refreshed yet
+        let insertAfterSlideId: string | null = null;
+        if (index > 0 && previousSlide) {
+            if (previousSlide.serverId && baseSlidesById.has(previousSlide.serverId)) {
+                insertAfterSlideId = previousSlide.serverId;
+            } else {
+                insertAfterSlideId = previousSlide.id;
+            }
+        }
 
         console.log('[saveEditorDocumentDelta] Creating slide', {
             tempId: slide.id,
             insertAfterSlideId,
             previousSlideId: previousSlide?.id,
             previousSlideServerId: previousSlide?.serverId,
+            previousSlideInBase: previousSlide?.serverId ? baseSlidesById.has(previousSlide.serverId) : false,
         });
         createOperations.push({
             op: 'create',
