@@ -109,7 +109,8 @@ export async function saveEditorDocumentDelta(
             continue;
         }
 
-        const insertAfterSlideId = index > 0 ? localSlides[index - 1]?.id ?? null : null;
+        const previousSlide = localSlides[index - 1];
+        const insertAfterSlideId = index > 0 ? (previousSlide?.serverId ?? previousSlide?.id ?? null) : null;
         createOperations.push({
             op: 'create',
             tempId: slide.id,
@@ -134,7 +135,8 @@ export async function saveEditorDocumentDelta(
             continue;
         }
 
-        const insertAfterSlideId = index > 0 ? desiredSlideIds[index - 1] : null;
+        const previousSlide = localSlides[index - 1];
+        const insertAfterSlideId = index > 0 ? (previousSlide?.serverId ?? previousSlide?.id ?? null) : null;
         moveOperations.push({
             op: 'move',
             slideId: desiredSlideId,

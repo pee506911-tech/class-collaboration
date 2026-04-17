@@ -461,4 +461,105 @@ describe('slide structural commit helpers', () => {
             ],
         );
     });
+
+    it('uses serverId for insertAfterSlideId when adding multiple new slides in sequence', async () => {
+        apiMocks.applySlideOperations.mockResolvedValueOnce([
+            {
+                id: 'slide-1',
+                sessionId: 'session-1',
+                type: 'static',
+                content: { title: 'A' },
+                orderIndex: 0,
+                isHidden: false,
+                version: 1,
+            },
+            {
+                id: 'slide-2',
+                sessionId: 'session-1',
+                type: 'static',
+                content: { title: 'New B' },
+                orderIndex: 1,
+                isHidden: false,
+                version: 1,
+            },
+            {
+                id: 'slide-3',
+                sessionId: 'session-1',
+                type: 'static',
+                content: { title: 'New C' },
+                orderIndex: 2,
+                isHidden: false,
+                version: 1,
+            },
+        ]);
+
+        await saveEditorDocumentDelta(
+            'session-1',
+            [
+                {
+                    id: 'slide-1',
+                    sessionId: 'session-1',
+                    type: 'static',
+                    content: { title: 'A' },
+                    orderIndex: 0,
+                    isHidden: false,
+                    version: 1,
+                },
+            ],
+            [
+                {
+                    id: 'slide-1',
+                    serverId: 'slide-1',
+                    sessionId: 'session-1',
+                    type: 'static',
+                    content: { title: 'A' },
+                    orderIndex: 0,
+                    isHidden: false,
+                    version: 1,
+                },
+                {
+                    id: 'temp-2',
+                    serverId: null,
+                    sessionId: 'session-1',
+                    type: 'static',
+                    content: { title: 'New B' },
+                    orderIndex: 1,
+                    isHidden: false,
+                    version: 0,
+                },
+                {
+                    id: 'temp-3',
+                    serverId: null,
+                    sessionId: 'session-1',
+                    type: 'static',
+                    content: { title: 'New C' },
+                    orderIndex: 2,
+                    isHidden: false,
+                    version: 0,
+                },
+            ],
+        );
+
+        expect(apiMocks.applySlideOperations).toHaveBeenCalledWith(
+            'session-1',
+            [
+                {
+                    op: 'create',
+                    tempId: 'temp-2',
+                    type: 'static',
+                    content: { title: 'New B' },
+                    isHidden: false,
+                    insertAfterSlideId: 'slide-1',
+                },
+                {
+                    op: 'create',
+                    tempId: 'temp-3',
+                    type: 'static',
+                    content: { title: 'New C' },
+                    isHidden: false,
+                    insertAfterSlideId: 'temp-2',
+                },
+            ],
+        );
+    });
 });
