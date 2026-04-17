@@ -60,6 +60,14 @@ export async function saveEditorDocumentDelta(
     baseSlides: Slide[],
     localSlides: DeltaEditorSlide[],
 ): Promise<Slide[]> {
+    console.log('[saveEditorDocumentDelta] Starting save', {
+        sessionId,
+        baseSlidesCount: baseSlides.length,
+        localSlidesCount: localSlides.length,
+        baseSlides: baseSlides.map(s => ({ id: s.id, serverId: s.id })),
+        localSlides: localSlides.map(s => ({ id: s.id, serverId: s.serverId })),
+    });
+
     const baseSlidesById = new Map(baseSlides.map((slide) => [slide.id, slide]));
     const desiredServerIds = new Set(
         localSlides.flatMap((slide) => (slide.serverId ? [slide.serverId] : [])),
@@ -67,12 +75,18 @@ export async function saveEditorDocumentDelta(
 
     const updateOperations = localSlides.flatMap((slide) => {
         if (!slide.serverId) {
+            console.log('[saveEditorDocumentDelta] Skipping update - no serverId', { slideId: slide.id });
             return [];
         }
 
         const baseSlide = baseSlidesById.get(slide.serverId);
         if (!baseSlide) {
-            throw new Error(`Missing base slide ${slide.serverId}`);
+            console.warn('[saveEditorDocumentDelta] Skipping update - base slide not found', {
+                slideId: slide.id,
+                serverId: slide.serverId,
+                availableBaseIds: Array.from(baseSlidesById.keys()),
+            });
+            return [];
         }
 
         const changedType = slide.type !== baseSlide.type;
@@ -103,6 +117,7 @@ export async function saveEditorDocumentDelta(
     }> = [];
     let currentSlideIds = baseSlides.map((slide) => slide.id);
 
+    console.log('[saveEditorDocumentDelta] Processing create operations');
     for (let index = 0; index < localSlides.length; index += 1) {
         const slide = localSlides[index];
         if (slide.serverId) {
@@ -111,6 +126,13 @@ export async function saveEditorDocumentDelta(
 
         const previousSlide = localSlides[index - 1];
         const insertAfterSlideId = index > 0 ? (previousSlide?.serverId ?? previousSlide?.id ?? null) : null;
+
+        console.log('[saveEditorDocumentDelta] Creating slide', {
+            tempId: slide.id,
+            insertAfterSlideId,
+            previousSlideId: previousSlide?.id,
+            previousSlideServerId: previousSlide?.serverId,
+        });
         createOperations.push({
             op: 'create',
             tempId: slide.id,
@@ -140,12 +162,19 @@ export async function saveEditorDocumentDelta(
     // Convert currentSlideIds to use server IDs where available
     const currentSlideIdsWithServer = currentSlideIds.map(id => localToServerId.get(id) ?? id);
 
+    console.log('[saveEditorDocumentDelta] Processing move operations', {
+        localToServerId: Object.fromEntries(localToServerId),
+        currentSlideIdsWithServer,
+        desiredSlideIds,
+    });
+
     for (let index = 0; index < desiredSlideIds.length; index += 1) {
         const desiredSlideId = desiredSlideIds[index];
         const desiredServerId = localToServerId.get(desiredSlideId);
 
         // Skip temp slides - they can't be moved
         if (!desiredServerId) {
+            console.log('[saveEditorDocumentDelta] Skipping move - no serverId', { slideId: desiredSlideId });
             continue;
         }
 
@@ -163,6 +192,12 @@ export async function saveEditorDocumentDelta(
             }
         }
 
+        console.log('[saveEditorDocumentDelta] Moving slide', {
+            slideId: desiredServerId,
+            localId: desiredSlideId,
+            insertAfterSlideId,
+        });
+
         moveOperations.push({
             op: 'move',
             slideId: desiredServerId,
@@ -179,6 +214,11 @@ export async function saveEditorDocumentDelta(
             slideId: slide.id,
         }));
 
+    console.log('[saveEditorDocumentDelta] Delete operations', {
+        deleteCount: deleteOperations.length,
+        deleteOperations: deleteOperations.map(op => ({ slideId: op.slideId })),
+    });
+
     const operations = [
         ...updateOperations,
         ...createOperations,
@@ -186,10 +226,27 @@ export async function saveEditorDocumentDelta(
         ...deleteOperations,
     ];
 
+    console.log('[saveEditorDocumentDelta] Final operations summary', {
+        totalOperations: operations.length,
+        updateCount: updateOperations.length,
+        createCount: createOperations.length,
+        moveCount: moveOperations.length,
+        deleteCount: deleteOperations.length,
+        operations: operations.map(op => {
+            const logOp: any = { op: op.op };
+            if ('slideId' in op) logOp.slideId = op.slideId;
+            if ('tempId' in op) logOp.tempId = op.tempId;
+            if ('insertAfterSlideId' in op) logOp.insertAfterSlideId = op.insertAfterSlideId;
+            return logOp;
+        }),
+    });
+
     if (operations.length === 0) {
+        console.log('[saveEditorDocumentDelta] No operations to apply, returning base slides');
         return normalizeSlides(baseSlides);
     }
 
+    console.log('[saveEditorDocumentDelta] Applying operations to server');
     return normalizeSlides(await applySlideOperations(sessionId, operations));
 }
 
