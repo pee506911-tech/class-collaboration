@@ -189,6 +189,15 @@ export async function saveEditorDocumentDelta(
             continue;
         }
 
+        // Skip slides that don't exist in baseSlides (stale data from previous saves)
+        if (!baseSlidesById.has(desiredServerId)) {
+            console.log('[saveEditorDocumentDelta] Skipping move - slide not in baseSlides', {
+                slideId: desiredSlideId,
+                serverId: desiredServerId,
+            });
+            continue;
+        }
+
         if (currentSlideIdsWithServer[index] === desiredServerId) {
             continue;
         }
@@ -197,7 +206,7 @@ export async function saveEditorDocumentDelta(
         let insertAfterSlideId: string | null = null;
         for (let i = index - 1; i >= 0; i--) {
             const prevServerId = localToServerId.get(desiredSlideIds[i]);
-            if (prevServerId) {
+            if (prevServerId && baseSlidesById.has(prevServerId)) {
                 insertAfterSlideId = prevServerId;
                 break;
             }
