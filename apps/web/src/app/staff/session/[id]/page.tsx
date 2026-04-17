@@ -57,14 +57,28 @@ function toEditorSlide(slide: Slide): EditorSlide {
 }
 
 function projectServerSlidesToEditor(prevSlides: EditorSlide[], serverSlides: Slide[]): EditorSlide[] {
+    const serverSlideIds = new Set(serverSlides.map((slide) => slide.id));
     const prevSlidesByServerId = new Map(
         prevSlides
             .filter((slide) => slide.serverId)
             .map((slide) => [slide.serverId!, slide]),
     );
 
+    // Only include local slides that either:
+    // 1. Have no serverId (temp slides), or
+    // 2. Have a serverId that still exists in the server response
+    const retainedLocalSlides = prevSlides.filter(
+        (slide) => !slide.serverId || serverSlideIds.has(slide.serverId)
+    );
+
+    const retainedByServerId = new Map(
+        retainedLocalSlides
+            .filter((slide) => slide.serverId)
+            .map((slide) => [slide.serverId!, slide]),
+    );
+
     return serverSlides.map((serverSlide) => {
-        const existingSlide = prevSlidesByServerId.get(serverSlide.id);
+        const existingSlide = retainedByServerId.get(serverSlide.id);
         if (!existingSlide) {
             return toEditorSlide(serverSlide);
         }
