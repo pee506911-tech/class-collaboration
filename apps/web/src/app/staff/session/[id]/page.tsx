@@ -137,6 +137,7 @@ function EditorContent({
     const [slides, setSlides] = useState<EditorSlide[]>(() => normalizeSlides(serverSlides).map(toEditorSlide));
     const localChangeVersionRef = useRef(0);
     const slidesRef = useRef(slides);
+    const lastSaveTimeRef = useRef(0);
 
     useEffect(() => {
         slidesRef.current = slides;
@@ -170,6 +171,13 @@ function EditorContent({
             && baseSlides.some((slide, index) => slide.version > (normalizedServerSlides[index]?.version ?? -1));
 
         if (isOlderSnapshot) {
+            return;
+        }
+
+        // Skip sync if it happens within 2 seconds of a save to prevent visual flicker
+        // from the immediate WebSocket broadcast (we already have the latest state from save)
+        const timeSinceSave = Date.now() - lastSaveTimeRef.current;
+        if (timeSinceSave < 2000) {
             return;
         }
 
@@ -432,6 +440,7 @@ function EditorContent({
                     }
                 }
 
+                lastSaveTimeRef.current = Date.now();
                 setSaveState('saved');
                 toast.success('Saved');
                 return;
