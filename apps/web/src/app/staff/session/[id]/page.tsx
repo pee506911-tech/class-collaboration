@@ -389,7 +389,6 @@ function EditorContent({
         try {
             const savedSlides = await saveEditorDocumentDelta(id, baseSlides, localSnapshot);
             setBaseSlides(savedSlides);
-            void loadSlides();
 
             if (localChangeVersionRef.current === saveVersion) {
                 // Use savedSlides directly as the source of truth since it represents
