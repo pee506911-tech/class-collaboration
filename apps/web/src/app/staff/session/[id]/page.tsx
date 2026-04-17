@@ -392,10 +392,12 @@ function EditorContent({
             void loadSlides();
 
             if (localChangeVersionRef.current === saveVersion) {
-                setSlidesSynced(localSnapshot.map((slide, index) => ({
+                // Use savedSlides directly as the source of truth since it represents
+                // the actual state from the server after all operations including deletions
+                setSlidesSynced(savedSlides.map((slide, index) => ({
                     ...slide,
-                    serverId: savedSlides[index].id,
-                    version: savedSlides[index].version,
+                    serverId: slide.id,
+                    version: slide.version,
                     orderIndex: index,
                 })));
                 setSaveState('saved');
@@ -404,10 +406,10 @@ function EditorContent({
             }
 
             const savedByClientId = new Map(
-                localSnapshot.map((slide, index) => [slide.id, savedSlides[index]]),
+                savedSlides.map((slide) => [slide.id, slide]),
             );
             setSlidesSynced((prevSlides) => prevSlides.map((slide) => {
-                const savedSlide = savedByClientId.get(slide.id);
+                const savedSlide = savedByClientId.get(slide.serverId ?? slide.id);
                 if (!savedSlide) {
                     return slide;
                 }
