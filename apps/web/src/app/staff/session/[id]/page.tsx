@@ -164,13 +164,12 @@ function EditorContent({
     useEffect(() => {
         const normalizedServerSlides = normalizeSlides(serverSlides);
         const incomingIds = new Set(normalizedServerSlides.map((slide) => slide.id));
-        const isStaleSnapshot = saveState === 'saved' && baseSlides.some((slide) => !incomingIds.has(slide.id));
         const isOlderSnapshot = saveState === 'saved'
             && baseSlides.length === normalizedServerSlides.length
             && baseSlides.every((slide, index) => slide.id === normalizedServerSlides[index]?.id)
             && baseSlides.some((slide, index) => slide.version > (normalizedServerSlides[index]?.version ?? -1));
 
-        if (isStaleSnapshot || isOlderSnapshot) {
+        if (isOlderSnapshot) {
             return;
         }
 
@@ -405,6 +404,14 @@ function EditorContent({
             setBaseSlides(savedSlides);
 
             if (localChangeVersionRef.current === saveVersion) {
+                // Create a mapping from local ID to server ID for temp slides
+                const localToServerId = new Map<string, string>();
+                for (const slide of localSnapshot) {
+                    if (slide.serverId) {
+                        localToServerId.set(slide.id, slide.serverId);
+                    }
+                }
+
                 // Use savedSlides directly as the source of truth since it represents
                 // the actual state from the server after all operations including deletions
                 setSlidesSynced(savedSlides.map((slide, index) => ({
@@ -413,6 +420,18 @@ function EditorContent({
                     version: slide.version,
                     orderIndex: index,
                 })));
+
+                // Update previewSlideId if it was pointing to a temp slide that now has a server ID
+                if (previewSlideId) {
+                    const serverIdForPreview = localToServerId.get(previewSlideId);
+                    if (serverIdForPreview) {
+                        hasManualPreviewSelectionRef.current = true;
+                        startTransition(() => {
+                            setPreviewSlideId(serverIdForPreview);
+                        });
+                    }
+                }
+
                 setSaveState('saved');
                 toast.success('Saved');
                 return;
